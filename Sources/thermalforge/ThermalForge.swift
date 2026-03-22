@@ -320,12 +320,20 @@ struct Install: ParsableCommand {
         )
         print("Created \(ThermalForgeDaemon.plistPath)")
 
-        // Load the daemon
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["load", ThermalForgeDaemon.plistPath]
-        try process.run()
-        process.waitUntilExit()
+        // Unload old daemon if present, then load new one
+        let unload = Process()
+        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+        try? unload.run()
+        unload.waitUntilExit()
+
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let load = Process()
+        load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        load.arguments = ["bootstrap", "system", ThermalForgeDaemon.plistPath]
+        try load.run()
+        load.waitUntilExit()
 
         // Verify
         Thread.sleep(forTimeInterval: 1.0)
