@@ -87,7 +87,7 @@ Run `thermalforge discover` on your machine and [submit a compatibility report](
 |---|---|---|
 | MacBook Pro 16" (2025) | M5 Max | Tested |
 | Mac Studio (2022) | M2 Ultra | Tested |
-| MacBook Pro 16" (2021) | M1 Max | Pending |
+| MacBook Pro 16" (2021) | M1 Max | Tested |
 
 SMC key names vary across chip generations — ThermalForge auto-detects at startup. The `discover` command dumps all keys so we can verify what your hardware uses. The more machines tested, the more robust ThermalForge becomes.
 
