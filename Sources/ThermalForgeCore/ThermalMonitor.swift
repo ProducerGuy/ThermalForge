@@ -70,19 +70,19 @@ public final class ThermalMonitor {
         timer = nil
     }
 
+    /// Update the active profile. Does NOT execute fan commands —
+    /// the caller is responsible for immediate actions (Max/Auto).
+    /// Threshold-based commands are handled by tick().
     public func switchProfile(_ profile: FanProfile) {
         queue.async { [self] in
-            let previousProfile = activeProfile
             activeProfile = profile
 
             if profile.id == "max" {
-                applyCommand(.setMax)
                 state = .active(profileName: "Max")
             } else if profile.id == "silent" || profile.fanBehavior.mode == .auto {
-                applyCommand(.resetAuto)
                 state = .idle
-            } else if previousProfile.id == "max" || previousProfile.id == "silent" {
-                // Switching from a non-monitored profile — let tick() handle it
+            } else {
+                // Balanced/Performance — let tick() evaluate thresholds
                 state = .idle
             }
         }

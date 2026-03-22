@@ -22,6 +22,9 @@ struct ThermalForge: ParsableCommand {
             Status.self,
             Discover.self,
             Watch.self,
+            Install.self,
+            Uninstall.self,
+            Daemon.self,
         ]
     )
 }
@@ -261,5 +264,121 @@ struct Watch: ParsableCommand {
 
         // Keep the process alive
         RunLoop.main.run()
+    }
+}
+
+// MARK: - Install
+
+struct Install: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "install",
+        abstract: "Install the background daemon (one-time, requires sudo)"
+    )
+
+    func run() throws {
+        guard geteuid() == 0 else {
+            throw ValidationError("Run with sudo: sudo thermalforge install")
+        }
+
+        let binaryPath = ProcessInfo.processInfo.arguments[0]
+        let installPath = ThermalForgeDaemon.installPath
+
+        // Copy binary to /usr/local/bin
+        let fm = FileManager.default
+        try? fm.createDirectory(
+            atPath: "/usr/local/bin",
+            withIntermediateDirectories: true
+        )
+        try? fm.removeItem(atPath: installPath)
+        try fm.copyItem(atPath: binaryPath, toPath: installPath)
+        print("Installed \(installPath)")
+
+        // Write launchd plist
+        let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>\(ThermalForgeDaemon.label)</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>\(installPath)</string>
+                    <string>daemon</string>
+                </array>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>KeepAlive</key>
+                <true/>
+            </dict>
+            </plist>
+            """
+        try plist.write(
+            toFile: ThermalForgeDaemon.plistPath,
+            atomically: true, encoding: .utf8
+        )
+        print("Created \(ThermalForgeDaemon.plistPath)")
+
+        // Load the daemon
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["load", ThermalForgeDaemon.plistPath]
+        try process.run()
+        process.waitUntilExit()
+
+        // Verify
+        Thread.sleep(forTimeInterval: 1.0)
+        if ThermalForgeDaemon.isRunning {
+            print("Daemon is running. No more sudo needed.")
+        } else {
+            print("Daemon installed but not yet responding. Check: sudo launchctl list | grep thermalforge")
+        }
+    }
+}
+
+// MARK: - Uninstall
+
+struct Uninstall: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "uninstall",
+        abstract: "Remove the background daemon"
+    )
+
+    func run() throws {
+        guard geteuid() == 0 else {
+            throw ValidationError("Run with sudo: sudo thermalforge uninstall")
+        }
+
+        let fm = FileManager.default
+
+        // Unload daemon
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["unload", ThermalForgeDaemon.plistPath]
+        try? process.run()
+        process.waitUntilExit()
+
+        // Remove files
+        try? fm.removeItem(atPath: ThermalForgeDaemon.plistPath)
+        try? fm.removeItem(atPath: ThermalForgeDaemon.installPath)
+        try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)
+
+        print("ThermalForge daemon uninstalled.")
+    }
+}
+
+// MARK: - Daemon
+
+struct Daemon: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "daemon",
+        abstract: "Run the privileged socket server (called by launchd)"
+    )
+
+    func run() throws {
+        let fc = try FanControl()
+        let server = try DaemonServer(fanControl: fc)
+        server.run()
     }
 }

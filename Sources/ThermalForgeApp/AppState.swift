@@ -15,6 +15,9 @@ final class AppState: ObservableObject {
     @Published var activeProfile: FanProfile = .silent
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
+    @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
+        didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
+    }
     @Published var launchAtLogin: Bool = false {
         didSet { updateLoginItem() }
     }
@@ -53,30 +56,47 @@ final class AppState: ObservableObject {
     // MARK: - Actions
 
     func setMax() {
-        Task {
-            try? executor.execute(.setMax)
+        NSLog("ThermalForge: setMax button pressed")
+        do {
+            try executor.execute(.setMax)
             activeProfile = .max
             monitor?.switchProfile(.max)
+        } catch {
+            NSLog("ThermalForge: setMax failed: %@", "\(error)")
         }
     }
 
     func resetAuto() {
-        Task {
-            try? executor.execute(.resetAuto)
+        NSLog("ThermalForge: resetAuto button pressed")
+        do {
+            try executor.execute(.resetAuto)
             activeProfile = .silent
             monitor?.switchProfile(.silent)
+        } catch {
+            NSLog("ThermalForge: resetAuto failed: %@", "\(error)")
         }
     }
 
     func selectProfile(_ profile: FanProfile) {
+        NSLog("ThermalForge: selecting profile: %@", profile.name)
         activeProfile = profile
         monitor?.switchProfile(profile)
 
-        // Max and Silent need immediate execution
-        if profile.id == "max" {
-            Task { try? executor.execute(.setMax) }
-        } else if profile.id == "silent" {
-            Task { try? executor.execute(.resetAuto) }
+        do {
+            if profile.fanBehavior.mode == .auto {
+                // Silent — return to Apple defaults
+                try executor.execute(.resetAuto)
+            } else if profile.fanBehavior.rpmPercent >= 1.0 {
+                // Max — full speed
+                try executor.execute(.setMax)
+            } else {
+                // Balanced/Performance — apply immediately at the profile's RPM %
+                let maxRPM: Float = Float(latestStatus?.fans.first?.maxRPM ?? 7826)
+                let targetRPM = maxRPM * profile.fanBehavior.rpmPercent
+                try executor.execute(.setRPM(targetRPM))
+            }
+        } catch {
+            NSLog("ThermalForge: profile %@ failed: %@", profile.name, "\(error)")
         }
     }
 

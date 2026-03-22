@@ -45,11 +45,11 @@ struct MenuBarView: View {
 
                 // Temperatures
                 SectionHeader(title: "TEMPERATURES")
-                TemperatureRow(label: "CPU", value: peakTemp(["cpu_die_max", "cpu_hotpoint"]))
-                TemperatureRow(label: "GPU", value: peakTemp(["gpu_1", "gpu_2", "gpu_3"]))
-                TemperatureRow(label: "RAM", value: peakTemp(["ram_die_max"]))
-                TemperatureRow(label: "SSD", value: peakTemp(["ssd_max"]))
-                TemperatureRow(label: "Ambient", value: peakTemp(["ambient"]))
+                TemperatureRow(label: "CPU", value: peakTemp(["cpu_die_max", "cpu_hotpoint"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "GPU", value: peakTemp(["gpu_1", "gpu_2", "gpu_3"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "RAM", value: peakTemp(["ram_die_max"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "SSD", value: peakTemp(["ssd_max"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "Ambient", value: peakTemp(["ambient"]), fahrenheit: appState.useFahrenheit)
             } else {
                 Text("Reading sensors...")
                     .foregroundStyle(.secondary)
@@ -60,14 +60,30 @@ struct MenuBarView: View {
 
             // Profile picker
             SectionHeader(title: "PROFILE")
-            ForEach(FanProfile.builtIn) { profile in
-                ProfileButton(
-                    profile: profile,
-                    isActive: appState.activeProfile.id == profile.id
-                ) {
-                    appState.selectProfile(profile)
+            Picker("Profile", selection: Binding(
+                get: { appState.activeProfile.id },
+                set: { id in
+                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
+                        appState.selectProfile(profile)
+                    }
+                }
+            )) {
+                ForEach(FanProfile.builtIn) { profile in
+                    HStack {
+                        Text(profile.name)
+                        Spacer()
+                        if let cpu = profile.triggers.cpuTemp {
+                            Text("CPU>\(Int(cpu))°")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .tag(profile.id)
                 }
             }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            .padding(.horizontal, 12)
 
             Divider().padding(.vertical, 4)
 
@@ -91,6 +107,8 @@ struct MenuBarView: View {
             Divider().padding(.vertical, 4)
 
             // Footer
+            Toggle("°F / °C", isOn: $appState.useFahrenheit)
+                .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)
                 .padding(.horizontal, 12)
 
@@ -149,16 +167,19 @@ private struct SectionHeader: View {
 private struct TemperatureRow: View {
     let label: String
     let value: Float?
+    var fahrenheit: Bool = false
 
     var body: some View {
         HStack {
             Text(label)
                 .foregroundStyle(.secondary)
             Spacer()
-            if let temp = value {
-                Text("\(String(format: "%.1f", temp))°C")
+            if let tempC = value {
+                let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
+                let unit = fahrenheit ? "F" : "C"
+                Text("\(String(format: "%.1f", display))°\(unit)")
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(tempColor(temp))
+                    .foregroundStyle(tempColor(tempC))
             } else {
                 Text("—")
                     .foregroundStyle(.tertiary)
@@ -168,6 +189,7 @@ private struct TemperatureRow: View {
         .padding(.vertical, 1)
     }
 
+    /// Color thresholds always based on °C
     private func tempColor(_ temp: Float) -> Color {
         if temp >= 90 { return .red }
         if temp >= 75 { return .orange }
