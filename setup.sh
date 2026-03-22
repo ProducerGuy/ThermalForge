@@ -13,14 +13,23 @@ swift build -c release --quiet
 
 echo "Installing (requires admin password once)..."
 
-# Install CLI and daemon
+# Stop existing daemon if running
+sudo launchctl bootout system/com.thermalforge.daemon 2>/dev/null || true
+sleep 1
+
+# Install CLI binary
 sudo cp .build/release/thermalforge /usr/local/bin/thermalforge
+sudo xattr -cr /usr/local/bin/thermalforge
+sudo chmod +x /usr/local/bin/thermalforge
+
+# Install and start daemon
 sudo /usr/local/bin/thermalforge install
 
 # Create .app bundle in /Applications so it shows in Spotlight/Finder
 APP_DIR="/Applications/ThermalForge.app/Contents"
 sudo mkdir -p "$APP_DIR/MacOS"
 sudo cp .build/release/ThermalForgeApp "$APP_DIR/MacOS/ThermalForgeApp"
+sudo xattr -cr /Applications/ThermalForge.app
 
 sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,7 +61,7 @@ sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
 </plist>
 PLIST
 
-# Update Spotlight index for the new app
+# Update Spotlight index
 sudo mdimport /Applications/ThermalForge.app 2>/dev/null || true
 
 echo ""
