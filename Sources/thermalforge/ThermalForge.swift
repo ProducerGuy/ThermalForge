@@ -291,7 +291,6 @@ struct Install: ParsableCommand {
         )
         try? fm.removeItem(atPath: installPath)
         try fm.copyItem(atPath: binaryPath, toPath: installPath)
-        print("Installed \(installPath)")
 
         // Write launchd plist
         let plist = """
@@ -318,12 +317,12 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        print("Created \(ThermalForgeDaemon.plistPath)")
-
-        // Unload old daemon if present, then load new one
+        // Stop old daemon silently, start new one
         let unload = Process()
         unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+        unload.standardOutput = FileHandle.nullDevice
+        unload.standardError = FileHandle.nullDevice
         try? unload.run()
         unload.waitUntilExit()
 
@@ -332,15 +331,17 @@ struct Install: ParsableCommand {
         let load = Process()
         load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         load.arguments = ["bootstrap", "system", ThermalForgeDaemon.plistPath]
+        load.standardOutput = FileHandle.nullDevice
+        load.standardError = FileHandle.nullDevice
         try load.run()
         load.waitUntilExit()
 
         // Verify
         Thread.sleep(forTimeInterval: 1.0)
         if ThermalForgeDaemon.isRunning {
-            print("Daemon is running. No more sudo needed.")
+            print("Done.")
         } else {
-            print("Daemon installed but not yet responding. Check: sudo launchctl list | grep thermalforge")
+            print("Warning: daemon not responding. Try: sudo launchctl list | grep thermalforge")
         }
     }
 }
