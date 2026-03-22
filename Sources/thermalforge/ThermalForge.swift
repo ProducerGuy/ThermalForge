@@ -317,32 +317,29 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        // Stop old daemon silently, start new one
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-        unload.standardOutput = FileHandle.nullDevice
-        unload.standardError = FileHandle.nullDevice
-        try? unload.run()
-        unload.waitUntilExit()
+        // Stop old daemon if one is running
+        if ThermalForgeDaemon.isRunning {
+            let unload = Process()
+            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+            try unload.run()
+            unload.waitUntilExit()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
 
-        Thread.sleep(forTimeInterval: 0.5)
-
+        // Start new daemon
         let load = Process()
         load.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         load.arguments = ["bootstrap", "system", ThermalForgeDaemon.plistPath]
-        load.standardOutput = FileHandle.nullDevice
-        load.standardError = FileHandle.nullDevice
         try load.run()
         load.waitUntilExit()
 
         // Verify
         Thread.sleep(forTimeInterval: 1.0)
-        if ThermalForgeDaemon.isRunning {
-            print("Done.")
-        } else {
-            print("Warning: daemon not responding. Try: sudo launchctl list | grep thermalforge")
+        guard ThermalForgeDaemon.isRunning else {
+            throw ValidationError("Daemon failed to start. Try: sudo launchctl list | grep thermalforge")
         }
+        print("Done.")
     }
 }
 

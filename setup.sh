@@ -13,11 +13,7 @@ swift build -c release --quiet
 
 echo "Installing (requires admin password once)..."
 
-# Stop existing daemon if running
-sudo launchctl bootout system/com.thermalforge.daemon 2>/dev/null || true
-sleep 1
-
-# Install CLI and start daemon (copies binary to /usr/local/bin itself)
+# Install CLI and daemon (handles stopping old daemon if present)
 sudo xattr -cr .build/release/thermalforge
 sudo .build/release/thermalforge install
 
