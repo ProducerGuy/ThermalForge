@@ -8,14 +8,17 @@
 import SwiftUI
 import ThermalForgeCore
 
-@main
-struct ThermalForgeApp: App {
-    @StateObject private var appState = AppState()
-
-    init() {
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
     }
+}
+
+@main
+struct ThermalForgeApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject private var appState = AppState()
 
     var body: some Scene {
         MenuBarExtra {
