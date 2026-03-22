@@ -95,8 +95,10 @@ public final class ThermalMonitor {
         latestStatus = status
 
         // Extract peak temperatures
-        let cpuTemp = peakTemp(status, keys: ["cpu_die_max", "cpu_hotpoint", "cpu_microblock"])
-        let gpuTemp = peakTemp(status, keys: ["gpu_1", "gpu_2", "gpu_3"])
+        // CPU: aggregate keys (M5) + per-core keys (M1-M4)
+        let cpuTemp = peakTemp(status, prefixes: ["TC", "Tp"])
+        // GPU: ioft keys (M5) + flt keys (M1-M4)
+        let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
         let maxTemp = max(cpuTemp, gpuTemp)
 
         // Safety override: any sensor > 95°C
@@ -178,8 +180,10 @@ public final class ThermalMonitor {
 
     // MARK: - Helpers
 
-    private func peakTemp(_ status: ThermalStatus, keys: [String]) -> Float {
-        keys.compactMap { status.temperatures[$0] }.max() ?? 0
+    private func peakTemp(_ status: ThermalStatus, prefixes: [String]) -> Float {
+        status.temperatures
+            .filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }
+            .values.max() ?? 0
     }
 
     private func applyCommand(_ command: FanCommand) {

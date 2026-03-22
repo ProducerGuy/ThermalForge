@@ -239,9 +239,12 @@ struct Watch: ParsableCommand {
                     print(line)
                 }
             } else {
-                let cpuTemp = status.temperatures["cpu_die_max"] ?? 0
-                let gpuTemp = ["gpu_1", "gpu_2", "gpu_3"]
-                    .compactMap { status.temperatures[$0] }.max() ?? 0
+                let cpuTemp = status.temperatures
+                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+                    .values.max() ?? 0
+                let gpuTemp = status.temperatures
+                    .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
+                    .values.max() ?? 0
                 let fan0 = status.fans.first.map { $0.actualRPM } ?? 0
                 let stateLabel: String
                 switch state {

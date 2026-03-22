@@ -45,11 +45,11 @@ struct MenuBarView: View {
 
                 // Temperatures
                 SectionHeader(title: "TEMPERATURES")
-                TemperatureRow(label: "CPU", value: peakTemp(["cpu_die_max", "cpu_hotpoint"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "GPU", value: peakTemp(["gpu_1", "gpu_2", "gpu_3"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "RAM", value: peakTemp(["ram_die_max"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "SSD", value: peakTemp(["ssd_max"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "Ambient", value: peakTemp(["ambient"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "CPU", value: peakTemp(prefixes: ["TC", "Tp"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "GPU", value: peakTemp(prefixes: ["TG", "Tg"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "RAM", value: peakTemp(prefixes: ["TR", "Tm", "TM"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "SSD", value: peakTemp(prefixes: ["TH"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: "Ambient", value: peakTemp(prefixes: ["TA"]), fahrenheit: appState.useFahrenheit)
             } else {
                 Text("Reading sensors...")
                     .foregroundStyle(.secondary)
@@ -144,9 +144,9 @@ struct MenuBarView: View {
         }
     }
 
-    private func peakTemp(_ keys: [String]) -> Float? {
+    private func peakTemp(prefixes: [String]) -> Float? {
         guard let temps = appState.latestStatus?.temperatures else { return nil }
-        let values = keys.compactMap { temps[$0] }
+        let values = temps.filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }.values
         return values.max()
     }
 }

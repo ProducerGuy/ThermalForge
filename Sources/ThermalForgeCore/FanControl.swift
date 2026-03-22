@@ -313,45 +313,56 @@ public final class FanControl {
             ))
         }
 
-        // Probe temperature keys verified on M5 Max (Mac17,7)
-        // flt type (IEEE 754 float, 4 bytes)
+        // Probe temperature keys across all known Apple Silicon generations.
+        // Keys that don't exist on a given machine are skipped automatically.
+        // Labels use the raw SMC key name — no assumptions about what a key
+        // means on hardware we haven't verified.
         var temps: [String: Float] = [:]
-        let fltProbes: [(key: String, label: String)] = [
-            ("TCDX", "cpu_die_max"),
-            ("TCHP", "cpu_hotpoint"),
-            ("TCMb", "cpu_microblock"),
-            ("TPDX", "power_delivery_max"),
-            ("TRDX", "ram_die_max"),
-            ("TMVR", "memory_vr"),
-            ("TH0x", "ssd_max"),
-            ("TS0P", "soc_proximity"),
-            ("TAOL", "ambient"),
-            ("TB0T", "battery_1"),
+
+        // All known CPU/GPU/memory/misc thermal keys (flt type, 4 bytes)
+        let fltKeys: [String] = [
+            // CPU — aggregate (M5 Max verified)
+            "TCDX", "TCHP", "TCMb",
+            // CPU — per-core (Tp prefix, present across M1-M5 with varying mappings)
+            "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
+            "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
+            "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
+            // GPU (flt type — M1 through M4)
+            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
+            // Memory
+            "Tm02", "Tm06", "Tm08", "Tm09",
+            "TRDX", "TMVR",
+            // Power delivery
+            "TPDX",
+            // SSD
+            "TH0x", "TH0A", "TH0B",
+            // Ambient
+            "TAOL", "TA0P",
+            // Proximity
+            "TS0P",
+            // Battery
+            "TB0T",
         ]
 
-        for probe in fltProbes {
-            let result = smc.readKey(probe.key)
+        for key in fltKeys {
+            let result = smc.readKey(key)
             if result.success && result.size == 4 {
                 let temp = smcBytesToFloat(result.bytes, size: result.size)
                 if temp > 0 && temp < 150 {
-                    temps[probe.label] = (temp * 10).rounded() / 10
+                    temps[key] = (temp * 10).rounded() / 10
                 }
             }
         }
 
         // ioft type (16.16 fixed-point, 8 bytes) — GPU temps on M5 Max
-        let ioftProbes: [(key: String, label: String)] = [
-            ("TG0B", "gpu_1"),
-            ("TG0H", "gpu_2"),
-            ("TG0V", "gpu_3"),
-        ]
+        let ioftKeys = ["TG0B", "TG0H", "TG0V"]
 
-        for probe in ioftProbes {
-            let result = smc.readKey(probe.key)
+        for key in ioftKeys {
+            let result = smc.readKey(key)
             if result.success && result.size == 8 {
                 let temp = ioftBytesToFloat(result.bytes)
                 if temp > 0 && temp < 150 {
-                    temps[probe.label] = (temp * 10).rounded() / 10
+                    temps[key] = (temp * 10).rounded() / 10
                 }
             }
         }
