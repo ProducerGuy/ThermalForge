@@ -8,6 +8,7 @@
 
 import Darwin
 import Foundation
+import IOKit.pwr_mgt
 
 // MARK: - Constants
 
@@ -115,6 +116,8 @@ public final class DaemonClient {
 public final class DaemonServer {
     private let socketFD: Int32
     private let fanControl: FanControl
+    /// Last fan command — re-applied after sleep/wake
+    private var lastCommand: String?
 
     public init(fanControl: FanControl) throws {
         self.fanControl = fanControl
@@ -155,11 +158,90 @@ public final class DaemonServer {
     public func run() {
         NSLog("ThermalForge daemon: listening on %@", ThermalForgeDaemon.socketPath)
 
-        while true {
-            let clientFD = accept(socketFD, nil, nil)
-            guard clientFD >= 0 else { continue }
-            handleClient(clientFD)
-            close(clientFD)
+        // Watch for sleep/wake to re-apply fan settings
+        registerWakeNotification()
+
+        // Accept connections on a background thread
+        // (RunLoop.main needed for NSWorkspace notifications)
+        DispatchQueue.global(qos: .utility).async { [self] in
+            while true {
+                let clientFD = accept(socketFD, nil, nil)
+                guard clientFD >= 0 else { continue }
+                handleClient(clientFD)
+                close(clientFD)
+            }
+        }
+
+        // Main thread runs the RunLoop for wake notifications
+        RunLoop.main.run()
+    }
+
+    // MARK: - Sleep/Wake
+
+    /// IOKit root port for power notifications
+    private var rootPort: io_connect_t = 0
+    private var notifyPort: IONotificationPortRef?
+    private var notifier: io_object_t = 0
+
+    private func registerWakeNotification() {
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        rootPort = IORegisterForSystemPower(
+            refcon, &notifyPort, { (refcon, _, messageType, messageArgument) in
+                guard let refcon = refcon else { return }
+                let server = Unmanaged<DaemonServer>.fromOpaque(refcon).takeUnretainedValue()
+
+                // IOKit message constants (macros unavailable in Swift)
+                let kSystemHasPoweredOn: UInt32 = 0xe0000300
+                let kSystemWillSleep: UInt32 = 0xe0000280
+                let kCanSystemSleep: UInt32 = 0xe0000270
+
+                switch messageType {
+                case kSystemHasPoweredOn:
+                    server.handleWake()
+                case kSystemWillSleep, kCanSystemSleep:
+                    IOAllowPowerChange(server.rootPort, numericCast(Int(bitPattern: messageArgument)))
+                default:
+                    break
+                }
+            }, &notifier
+        )
+
+        guard rootPort != 0, let notifyPort = notifyPort else {
+            NSLog("ThermalForge daemon: failed to register for power notifications")
+            return
+        }
+
+        let source = IONotificationPortGetRunLoopSource(notifyPort).takeUnretainedValue()
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        NSLog("ThermalForge daemon: registered for wake notifications")
+    }
+
+    private func handleWake() {
+        guard let command = lastCommand else {
+            NSLog("ThermalForge daemon: woke — no profile to re-apply")
+            return
+        }
+
+        NSLog("ThermalForge daemon: woke — re-applying: %@", command)
+
+        // Delay slightly — SMC needs a moment after wake
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [self] in
+            let parts = command.split(separator: " ")
+            do {
+                switch parts.first.map(String.init) {
+                case "max":
+                    try fanControl.setMax()
+                case "set":
+                    if let rpm = parts.dropFirst().first.flatMap({ Float($0) }) {
+                        try fanControl.setAllFans(rpm: rpm)
+                    }
+                default:
+                    break
+                }
+                NSLog("ThermalForge daemon: re-applied after wake")
+            } catch {
+                NSLog("ThermalForge daemon: wake re-apply failed: %@", "\(error)")
+            }
         }
     }
 
@@ -179,9 +261,11 @@ public final class DaemonServer {
             switch parts.first.map(String.init) {
             case "max":
                 try fanControl.setMax()
+                lastCommand = "max"
                 response = "ok"
             case "auto":
                 try fanControl.resetAuto()
+                lastCommand = nil  // Nothing to re-apply on wake
                 response = "ok"
             case "set":
                 guard parts.count >= 2, let rpm = Float(parts[1]) else {
@@ -189,6 +273,7 @@ public final class DaemonServer {
                     break
                 }
                 try fanControl.setAllFans(rpm: rpm)
+                lastCommand = command
                 response = "ok"
             case "status":
                 let status = try fanControl.status()
