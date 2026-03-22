@@ -125,6 +125,10 @@ ThermalForge is a solo project but compatibility reports are hugely valuable. If
 
 That's it. Every new machine tested makes ThermalForge better for everyone.
 
+## Coming Soon: Thermal Logging
+
+Research-grade thermal data export — CSV + JSON, process correlation, configurable sample rates. Built for reproducible analysis, cross-machine comparison, and hardware research. See [ROADMAP.md](ROADMAP.md) for details.
+
 ## License
 
 [MIT](LICENSE) — free to use, modify, and distribute.
