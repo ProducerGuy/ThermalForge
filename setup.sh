@@ -13,14 +13,22 @@ swift build -c release --quiet
 
 echo "Installing (requires admin password once)..."
 
+# Generate app icon if needed
+if [ ! -f ThermalForge.icns ]; then
+    echo "Generating app icon..."
+    swift Scripts/generate-icon.swift
+    iconutil -c icns ThermalForge.iconset -o ThermalForge.icns
+fi
+
 # Install CLI and daemon (handles stopping old daemon if present)
 sudo xattr -cr .build/release/thermalforge
 sudo .build/release/thermalforge install
 
 # Create .app bundle in /Applications so it shows in Spotlight/Finder
 APP_DIR="/Applications/ThermalForge.app/Contents"
-sudo mkdir -p "$APP_DIR/MacOS"
+sudo mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
 sudo cp .build/release/ThermalForgeApp "$APP_DIR/MacOS/ThermalForgeApp"
+sudo cp ThermalForge.icns "$APP_DIR/Resources/AppIcon.icns"
 sudo xattr -cr /Applications/ThermalForge.app
 
 sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
@@ -41,6 +49,8 @@ sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
     <string>ThermalForgeApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
