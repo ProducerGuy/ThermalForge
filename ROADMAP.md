@@ -1,5 +1,66 @@
 # ThermalForge Roadmap
 
+## Smart Profile — Proactive Thermal Curve (Coming Soon)
+
+A new default profile that keeps Apple Silicon chips running at peak sustained performance by getting ahead of heat instead of reacting to it.
+
+### The problem with reactive cooling
+
+Apple's default fan behavior and traditional fan control apps wait until temperatures are already high before ramping fans. This creates a damaging cycle:
+
+1. Heavy workload starts (render, LLM inference, compile)
+2. CPU/GPU runs at full clocks, heat builds unchecked
+3. Temps hit ~90°C — chip starts throttling clock speeds, performance drops 10-20%
+4. Fans finally ramp up reactively
+5. Temps drop, clocks recover, fans slow down
+6. Heat builds again — repeat
+
+This sawtooth pattern hurts performance (sustained throughput loss), hurts hardware longevity (thermal cycling stress on solder joints and interconnects — the damage metric is temperature swing amplitude, not absolute temperature), and forces fans to work harder than they need to because they're always recovering from a heat spike instead of preventing one.
+
+### How the Smart profile works
+
+Instead of threshold triggers ("hit 80°C → set fans to 85%"), the Smart profile uses a graduated curve that starts early and ramps smoothly:
+
+| Temp Range | Fan Behavior | Rationale |
+|---|---|---|
+| Below 60°C | Apple default | No thermal concern |
+| 60–75°C | Gentle ramp begins | Get ahead of rising heat before it compounds |
+| 75–85°C | Moderate, steady ramp | Target steady state — full boost clocks, zero throttling |
+| 85–90°C | Aggressive ramp | Approaching throttle onset (~90°C on Apple Silicon) |
+| 90°C+ | Max fans | Chip is losing performance — cool down immediately |
+
+The goal is to hold temps in the 75–85°C range under sustained load. This is the sweet spot: full performance, no throttling, and fans at moderate speeds because they never have to recover from a thermal spike.
+
+### Why this is better for hardware longevity
+
+Research in semiconductor reliability (Coffin-Manson model) shows that thermal cycling — repeated large temperature swings — accelerates solder joint fatigue and interconnect failure. A chip held stable at 78°C is under less mechanical stress than one swinging between 50°C and 95°C, even though the sawtooth has a lower average temperature. Proactive cooling reduces delta-T, which directly extends component lifespan.
+
+### Why Apple doesn't do this
+
+Apple optimizes for the majority of users who value silence and battery life over sustained peak performance. In a store demo, quiet = premium. For rendering, AI compute, compiles, and sustained workloads, that tradeoff costs real performance. ThermalForge gives power users the choice Apple doesn't.
+
+### UI changes
+
+**Current:**
+- Profiles: Silent, Balanced (CPU>70°), Performance (CPU>80°), Max
+- Buttons: [Max] [Auto] ← "Auto" is misleading, just resets to Apple defaults
+
+**Proposed:**
+- Profiles: **Smart (recommended)**, Silent, Balanced, Performance, Max
+- Buttons: [Max] [Reset to Default] ← clearly hands control back to Apple
+- Smart profile documentation accessible from the app explaining why it's recommended
+
+### Build plan
+
+1. Implement graduated fan curve in ThermalMonitor — smooth RPM calculation based on temp range, not threshold jumps
+2. Determine optimal RPM-to-temperature mapping per machine (fans have different ranges across MacBook Pro vs Mac Studio)
+3. Add Smart profile to FanProfile with the curve parameters
+4. Rename "Auto" button to "Reset to Default" in MenuBarView
+5. Make Smart the default selected profile for new installs
+6. Validate with thermal logging data — compare sawtooth (reactive) vs flat-line (proactive) under identical workloads
+
+---
+
 ## Thermal Logging (Coming Soon)
 
 Research-grade thermal data export for Apple Silicon Macs. Designed for reproducible analysis — arXiv papers, hardware engineering, cross-machine comparison.
@@ -70,5 +131,4 @@ thermalforge log --rate 1 --no-expire --output .  # persistent, custom location
 ## Other planned features
 
 - **Control Center widget** — requires Xcode project + WidgetKit
-- **Mac Studio validation** — M2 Ultra testing
 - **FORGE process auto-detection**

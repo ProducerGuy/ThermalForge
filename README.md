@@ -125,9 +125,11 @@ ThermalForge is a solo project but compatibility reports are hugely valuable. If
 
 That's it. Every new machine tested makes ThermalForge better for everyone.
 
-## Coming Soon: Thermal Logging
+## Coming Soon
 
-Research-grade thermal data export — CSV + JSON, process correlation, configurable sample rates. Built for reproducible analysis, cross-machine comparison, and hardware research. See [ROADMAP.md](ROADMAP.md) for details.
+**Smart Profile** — Proactive thermal curve that ramps fans early and gradually, keeping chips in the 75–85°C sweet spot for sustained peak performance. No throttling, less thermal cycling wear, quieter fans overall. Based on semiconductor reliability research. See [why reactive cooling costs you performance](ROADMAP.md#smart-profile--proactive-thermal-curve-coming-soon).
+
+**Thermal Logging** — Research-grade data export (CSV + JSON) with process correlation, configurable sample rates, and full session metadata. Built for reproducible analysis, cross-machine comparison, and hardware research. See [full spec](ROADMAP.md#thermal-logging-coming-soon).
 
 ## License
 
