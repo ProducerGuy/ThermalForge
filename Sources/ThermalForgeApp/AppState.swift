@@ -41,7 +41,9 @@ final class AppState: ObservableObject {
                 self?.latestStatus = status
                 self?.activeProfile = profile
                 self?.monitorState = state
-                self?.maxTemp = status.temperatures.values.max()
+                // Max of only the displayed sensors
+                let displayedKeys = ["cpu_die_max", "cpu_hotpoint", "gpu_1", "gpu_2", "gpu_3", "ram_die_max", "ssd_max", "ambient"]
+                self?.maxTemp = displayedKeys.compactMap { status.temperatures[$0] }.max()
             }
         }
         monitor.onFanCommand = { [weak self] command in
