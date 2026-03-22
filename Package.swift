@@ -21,6 +21,11 @@ let package = Package(
             ],
             path: "Sources/thermalforge"
         ),
+        .executableTarget(
+            name: "ThermalForgeApp",
+            dependencies: ["ThermalForgeCore"],
+            path: "Sources/ThermalForgeApp"
+        ),
         .testTarget(
             name: "ThermalForgeTests",
             dependencies: ["ThermalForgeCore"],

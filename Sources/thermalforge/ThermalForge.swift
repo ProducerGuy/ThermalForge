@@ -184,17 +184,82 @@ struct Discover: ParsableCommand {
     }
 }
 
-// MARK: - Watch (Phase 2)
+// MARK: - Watch
 
 struct Watch: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "watch",
-        abstract: "Daemon mode — auto-adjusts based on thresholds (Phase 2)"
+        abstract: "Monitor temps and auto-adjust fans based on a profile"
     )
 
+    @Option(name: .shortAndLong, help: "Profile: silent, balanced, performance, max")
+    var profile: String = "balanced"
+
+    @Option(name: .shortAndLong, help: "Poll interval in seconds")
+    var interval: Double = 2.0
+
+    @Flag(name: .long, help: "Output JSON on each update")
+    var json: Bool = false
+
     func run() throws {
-        print("Watch mode is planned for Phase 2.")
-        print("For now, use 'thermalforge max' before your workload")
-        print("and 'thermalforge auto' after.")
+        let profiles = FanProfile.builtIn
+        guard let selectedProfile = profiles.first(where: { $0.id == profile }) else {
+            throw ValidationError(
+                "Unknown profile '\(profile)'. Options: \(profiles.map(\.id).joined(separator: ", "))"
+            )
+        }
+
+        let fc = try FanControl()
+        let monitor = ThermalMonitor(fanControl: fc, profile: selectedProfile)
+
+        print("ThermalForge watch — profile: \(selectedProfile.name)")
+        print("Hardware: \(fc.hardwareInfo)")
+        print("Polling every \(interval)s. Ctrl-C to stop.\n")
+
+        // CLI runs as root, so fan commands go directly through FanControl
+        monitor.onFanCommand = { command in
+            switch command {
+            case .setMax: try fc.setMax()
+            case .setRPM(let rpm): try fc.setAllFans(rpm: rpm)
+            case .resetAuto: try fc.resetAuto()
+            }
+        }
+
+        monitor.onUpdate = { [json] status, activeProfile, state in
+            if json {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                encoder.keyEncodingStrategy = .convertToSnakeCase
+                if let data = try? encoder.encode(status),
+                   let line = String(data: data, encoding: .utf8)
+                {
+                    print(line)
+                }
+            } else {
+                let cpuTemp = status.temperatures["cpu_die_max"] ?? 0
+                let gpuTemp = ["gpu_1", "gpu_2", "gpu_3"]
+                    .compactMap { status.temperatures[$0] }.max() ?? 0
+                let fan0 = status.fans.first.map { $0.actualRPM } ?? 0
+                let stateLabel: String
+                switch state {
+                case .idle: stateLabel = "idle"
+                case .active(let name): stateLabel = name
+                case .safetyOverride: stateLabel = "SAFETY"
+                }
+                let timestamp = ISO8601DateFormatter().string(from: Date())
+                print("[\(timestamp)] CPU: \(String(format: "%.0f", cpuTemp))°C  GPU: \(String(format: "%.0f", gpuTemp))°C  Fan: \(fan0) RPM  [\(stateLabel)]")
+            }
+        }
+
+        // Set up signal handler for clean shutdown
+        signal(SIGINT) { _ in
+            print("\nResetting fans to auto...")
+            Darwin.exit(0)
+        }
+
+        monitor.start(interval: interval)
+
+        // Keep the process alive
+        RunLoop.main.run()
     }
 }
