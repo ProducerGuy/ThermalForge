@@ -17,13 +17,9 @@ echo "Installing (requires admin password once)..."
 sudo launchctl bootout system/com.thermalforge.daemon 2>/dev/null || true
 sleep 1
 
-# Install CLI binary
-sudo cp .build/release/thermalforge /usr/local/bin/thermalforge
-sudo xattr -cr /usr/local/bin/thermalforge
-sudo chmod +x /usr/local/bin/thermalforge
-
-# Install and start daemon
-sudo /usr/local/bin/thermalforge install
+# Install CLI and start daemon (copies binary to /usr/local/bin itself)
+sudo xattr -cr .build/release/thermalforge
+sudo .build/release/thermalforge install
 
 # Create .app bundle in /Applications so it shows in Spotlight/Finder
 APP_DIR="/Applications/ThermalForge.app/Contents"
