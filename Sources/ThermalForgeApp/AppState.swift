@@ -60,15 +60,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Actions
 
-    func setMax() {
-        NSLog("ThermalForge: setMax button pressed")
-        do {
-            try executor.execute(.setMax)
-            activeProfile = .max
-            monitor?.switchProfile(.max)
-        } catch {
-            NSLog("ThermalForge: setMax failed: %@", "\(error)")
-        }
+    func setSmart() {
+        NSLog("ThermalForge: Smart button pressed")
+        activeProfile = .smart
+        monitor?.switchProfile(.smart)
     }
 
     func resetAuto() {
@@ -88,7 +83,10 @@ final class AppState: ObservableObject {
         monitor?.switchProfile(profile)
 
         do {
-            if profile.fanBehavior.mode == .auto {
+            if profile.id == "smart" {
+                // Smart — tick() handles fan control dynamically
+                return
+            } else if profile.fanBehavior.mode == .auto {
                 // Silent — return to Apple defaults
                 try executor.execute(.resetAuto)
             } else if profile.fanBehavior.rpmPercent >= 1.0 {

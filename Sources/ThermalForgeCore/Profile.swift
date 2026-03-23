@@ -85,6 +85,13 @@ extension FanProfile {
         fanBehavior: FanBehavior(mode: .manual, rpmPercent: 1.0)
     )
 
+    public static let smart = FanProfile(
+        id: "smart",
+        name: "Smart",
+        triggers: Triggers(),
+        fanBehavior: FanBehavior(mode: .manual, rpmPercent: 0)
+    )
+
     public static let builtIn: [FanProfile] = [silent, balanced, performance, max]
 }
 

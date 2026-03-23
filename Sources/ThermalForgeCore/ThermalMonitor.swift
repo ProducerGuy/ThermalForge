@@ -35,6 +35,10 @@ public final class ThermalMonitor {
     public private(set) var state: MonitorState = .idle
     public private(set) var latestStatus: ThermalStatus?
 
+    // Smart profile state
+    private var tempHistory: [Float] = []
+    private var lastSmartRPMPercent: Float = 0
+
     /// Called on every poll with updated status
     public var onUpdate: ((ThermalStatus, FanProfile, MonitorState) -> Void)?
     /// Called when a fan command needs to be executed (may require privilege)
@@ -77,7 +81,12 @@ public final class ThermalMonitor {
         queue.async { [self] in
             activeProfile = profile
 
-            if profile.id == "max" {
+            if profile.id == "smart" {
+                // Reset Smart state — let tick() take over
+                tempHistory.removeAll()
+                lastSmartRPMPercent = 0
+                state = .idle
+            } else if profile.id == "max" {
                 state = .active(profileName: "Max")
             } else if profile.id == "silent" || profile.fanBehavior.mode == .auto {
                 state = .idle
@@ -118,6 +127,13 @@ public final class ThermalMonitor {
             state = .idle
         }
 
+        // Smart profile: graduated curve with rate-of-change awareness
+        if activeProfile.id == "smart" {
+            tickSmart(status: status, peakTemp: maxTemp)
+            onUpdate?(status, activeProfile, state)
+            return
+        }
+
         // Skip trigger evaluation for manual-only profiles
         if activeProfile.id == "silent" || activeProfile.id == "max" {
             onUpdate?(status, activeProfile, state)
@@ -150,6 +166,70 @@ public final class ThermalMonitor {
         }
 
         onUpdate?(status, activeProfile, state)
+    }
+
+    // MARK: - Smart Profile
+
+    /// Target temperature ceiling — keep below this to avoid any throttling
+    private static let smartCeiling: Float = 85.0
+    /// Below this temperature, hand control back to Apple (fans off / idle)
+    private static let smartFloor: Float = 60.0
+
+    private func tickSmart(status: ThermalStatus, peakTemp: Float) {
+        // Track temperature history (keep last 4 readings = 8 seconds at 2s interval)
+        tempHistory.append(peakTemp)
+        if tempHistory.count > 4 { tempHistory.removeFirst() }
+
+        let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
+
+        // Below floor: return to auto
+        if peakTemp < Self.smartFloor && rateOfChange() <= 0 {
+            if lastSmartRPMPercent > 0 {
+                applyCommand(.resetAuto)
+                lastSmartRPMPercent = 0
+                state = .idle
+            }
+            return
+        }
+
+        // Base RPM from curve position (floor to ceiling mapped to 0-100%)
+        let range = Self.smartCeiling - Self.smartFloor
+        let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
+        // S-curve: gentle start, steeper in the middle, aggressive near ceiling
+        let basePct = position * position * (3 - 2 * position)
+
+        // Rate-of-change boost: if temp is rising, push harder
+        let rate = rateOfChange()
+        var targetPct = basePct
+        if rate > 0 {
+            // Rising: boost proportional to rate (1°C/sec adds ~20%)
+            targetPct = min(targetPct + rate * 0.2, 1.0)
+        }
+
+        // Ramp-down governor: reduce RPM at half the rate we ramp up
+        if targetPct < lastSmartRPMPercent {
+            let maxDrop: Float = 0.05 // max 5% drop per tick
+            targetPct = max(targetPct, lastSmartRPMPercent - maxDrop)
+        }
+
+        // Apply if changed meaningfully (avoid SMC write spam)
+        if abs(targetPct - lastSmartRPMPercent) > 0.02 {
+            let targetRPM = maxRPM * targetPct
+            applyCommand(.setRPM(targetRPM))
+            lastSmartRPMPercent = targetPct
+            state = .active(profileName: "Smart")
+        } else if lastSmartRPMPercent > 0 {
+            state = .active(profileName: "Smart")
+        }
+    }
+
+    /// Temperature rate of change in °C per second (smoothed over history)
+    private func rateOfChange() -> Float {
+        guard tempHistory.count >= 2 else { return 0 }
+        let oldest = tempHistory.first!
+        let newest = tempHistory.last!
+        let seconds = Float(tempHistory.count - 1) * 2.0 // 2s polling interval
+        return (newest - oldest) / seconds
     }
 
     // MARK: - Trigger Evaluation

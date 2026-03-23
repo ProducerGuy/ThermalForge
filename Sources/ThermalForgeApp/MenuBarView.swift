@@ -89,7 +89,7 @@ struct MenuBarView: View {
 
             // Quick actions
             HStack(spacing: 8) {
-                Button(action: { appState.setMax() }) {
+                Button(action: { appState.setSmart() }) {
                     Label("Smart", systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
                 }
