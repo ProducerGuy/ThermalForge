@@ -90,14 +90,14 @@ struct MenuBarView: View {
             // Quick actions
             HStack(spacing: 8) {
                 Button(action: { appState.setMax() }) {
-                    Label("Max", systemImage: "fan.fill")
+                    Label("Smart", systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .tint(.orange)
 
                 Button(action: { appState.resetAuto() }) {
-                    Label("Auto", systemImage: "arrow.counterclockwise")
+                    Label("Default", systemImage: "arrow.counterclockwise")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
