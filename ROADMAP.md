@@ -128,6 +128,28 @@ thermalforge log --rate 1 --no-expire --output .  # persistent, custom location
 
 ---
 
+## In-App Calibration UI (Planned)
+
+Currently calibration runs via `sudo thermalforge calibrate` in the terminal. The planned in-app experience:
+
+### UI
+
+A dedicated calibration window accessible from the menu bar dropdown. Shows:
+- **Progress bar** with time elapsed and estimated time remaining
+- **Current phase** — which fan speed level is being tested, heating or cooling
+- **Live temperature** — real-time readout during the test
+- **Stop button** — immediately resets fans to Apple defaults, exits cleanly, Smart falls back to the default curve
+
+### Behavior
+
+- First time a user clicks Smart with no calibration data: prompt to calibrate with an option to skip (Smart uses default curve if skipped)
+- Calibration requires elevated privileges — app prompts for password once
+- If stopped early: no partial data saved, Smart uses default curve
+- If ThermalForge quits mid-calibration: same as stopping — fans reset via daemon, no data saved
+- On completion: calibration data saved permanently, Smart immediately starts using it
+
+---
+
 ## Other planned features
 
 - **Control Center widget** — requires Xcode project + WidgetKit

@@ -287,10 +287,26 @@ struct Calibrate: ParsableCommand {
         print("ThermalForge Calibration")
         print("========================")
         print("This will stress your CPU and measure thermal response at different fan speeds.")
-        print("Takes about 4 minutes. Fans will be loud during the test.\n")
+        print("Takes about 4 minutes. Fans will be loud during the test.")
+        print("")
+        print("DISCLAIMER: Calibration pushes your CPU to full load and cycles fan speeds.")
+        print("This is within normal operating parameters for your Mac, but ThermalForge is")
+        print("provided as-is with no warranty. Use at your own risk.")
+        print("")
+        print("Press Ctrl-C at any time to stop. Fans will reset to Apple defaults.\n")
 
         let fc = try FanControl()
         let runner = CalibrationRunner(fanControl: fc)
+
+        // Kill switch: Ctrl-C resets fans and exits cleanly
+        signal(SIGINT) { _ in
+            print("\n\nCalibration interrupted. Resetting fans to Apple defaults...")
+            if let resetFC = try? FanControl() {
+                try? resetFC.resetAuto()
+            }
+            print("Fans reset. No calibration data was saved.")
+            Darwin.exit(0)
+        }
 
         runner.onProgress = { message in
             print(message)

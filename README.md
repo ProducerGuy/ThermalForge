@@ -67,6 +67,45 @@ open /Applications/ThermalForge.app
 
 Turn on **Launch at Login** in the menu bar dropdown and it starts automatically on every boot.
 
+## Smart Profile
+
+The Smart button uses a proactive thermal curve that ramps fans early and gradually, keeping your chip below 85°C for sustained peak performance — no throttling, less thermal cycling wear, quieter fans overall.
+
+### Calibration
+
+For best results, calibrate Smart to your specific machine:
+
+```bash
+sudo thermalforge calibrate
+```
+
+This takes about 4 minutes. It stress-tests your CPU at different fan speeds and measures how your machine heats and cools. The results are saved permanently and Smart uses them from then on.
+
+**Smart works without calibration** — it uses a conservative default curve. Calibration makes it precise for your hardware.
+
+### FAQ
+
+**Do I need to re-calibrate every time I use Smart?**
+No. Calibration runs once and saves the results. Switch between profiles freely — Smart always has your data.
+
+**Can I re-calibrate?**
+Yes. Run `sudo thermalforge calibrate` again anytime. This overwrites the previous data. You might want to re-calibrate after a macOS update or if your cooling setup changes.
+
+**What if I stop calibration early?**
+Press Ctrl-C. Fans reset to Apple defaults immediately. No calibration data is saved. Smart continues to work with the default curve.
+
+**What if ThermalForge closes during normal use?**
+The background daemon keeps running with the last fan setting. On next launch, Smart picks up your calibration data and resumes.
+
+**What does calibration save?**
+Two files in `~/Library/Application Support/ThermalForge/`:
+- `calibration.json` — machine-specific thermal data that Smart reads
+- `calibration_<timestamp>.csv` — every sensor reading taken during calibration (for research use)
+
+### Disclaimer
+
+Calibration pushes your CPU to full load and cycles fan speeds. This is within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
+
 ## CLI
 
 ```bash
@@ -76,6 +115,7 @@ thermalforge auto          # Reset to Apple defaults
 thermalforge set 4000      # Set specific RPM
 thermalforge discover      # Dump all SMC keys (for new hardware)
 thermalforge watch          # Monitor mode with auto-boost profiles
+thermalforge calibrate     # Calibrate Smart profile for this machine (sudo)
 ```
 
 ## Compatibility
