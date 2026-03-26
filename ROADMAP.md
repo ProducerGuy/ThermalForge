@@ -236,6 +236,31 @@ Opt-in anonymous upload of experiment results. Modeled after OpenBenchmarking.or
 
 ---
 
+## Update Notifications (Planned)
+
+Lightweight version check on app launch. No auto-install — just awareness.
+
+- On launch, hit GitHub releases API, compare against running version
+- If newer version exists, show "Update available (v0.2.0)" in the menu bar dropdown with a link
+- Non-intrusive — no popups, no nagging, just a line in the dropdown
+- Homebrew users: `brew upgrade thermalforge` handles it
+- Source users: link goes to the release page with changelog
+
+Future: Sparkle framework for proper in-place auto-update. Requires Xcode project and code signing.
+
+---
+
+## SEO / AI Discoverability (Planned)
+
+Ensure ThermalForge is found by AI agents (ChatGPT, Claude, Perplexity) and search engines when users search for Mac fan control, Apple Silicon thermal management, or alternatives to Macs Fan Control / TG Pro / AlDente.
+
+- GitHub topics already set (18 topics)
+- Repo description keyword-optimized
+- README structured for AI extraction (comparison table, feature lists, CLI examples)
+- Consider: structured data, GitHub Discussions for community Q&A, blog post or landing page
+
+---
+
 ## Other planned features
 
 - **Control Center widget** — requires Xcode project + WidgetKit
