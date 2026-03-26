@@ -38,6 +38,7 @@ public final class ThermalMonitor {
     // Smart profile state
     private var tempHistory: [Float] = []
     private var lastSmartRPMPercent: Float = 0
+    private var calibration: CalibrationData? = CalibrationData.load()
 
     /// Called on every poll with updated status
     public var onUpdate: ((ThermalStatus, FanProfile, MonitorState) -> Void)?
@@ -82,9 +83,10 @@ public final class ThermalMonitor {
             activeProfile = profile
 
             if profile.id == "smart" {
-                // Reset Smart state — let tick() take over
+                // Reset Smart state and reload calibration data
                 tempHistory.removeAll()
                 lastSmartRPMPercent = 0
+                calibration = CalibrationData.load()
                 state = .idle
             } else if profile.id == "max" {
                 state = .active(profileName: "Max")
@@ -192,23 +194,40 @@ public final class ThermalMonitor {
             return
         }
 
-        // Base RPM from curve position (floor to ceiling mapped to 0-100%)
-        let range = Self.smartCeiling - Self.smartFloor
-        let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
-        // S-curve: gentle start, steeper in the middle, aggressive near ceiling
-        let basePct = position * position * (3 - 2 * position)
-
-        // Rate-of-change boost: if temp is rising, push harder
         let rate = rateOfChange()
-        var targetPct = basePct
-        if rate > 0 {
-            // Rising: boost proportional to rate (1°C/sec adds ~20%)
-            targetPct = min(targetPct + rate * 0.2, 1.0)
+        var targetPct: Float
+
+        if let cal = calibration {
+            // Calibrated path: use machine-specific data
+            // What RPM % holds us at the ceiling temp under load?
+            let basePct = cal.rpmPercentForTarget(Self.smartCeiling) ?? 0.5
+
+            if rate > 0 {
+                // Rising: ramp harder based on how fast and how close to ceiling
+                let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+                let coolingNeeded = rate / abs(cal.coolingRateAt(rpmPercent: basePct))
+                targetPct = min(basePct + coolingNeeded * (0.5 + urgency * 0.5), 1.0)
+            } else if peakTemp > Self.smartCeiling {
+                // Above ceiling: push hard
+                targetPct = min(basePct + 0.3, 1.0)
+            } else {
+                // Stable or falling: hold at the calibrated baseline
+                targetPct = basePct * min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+            }
+        } else {
+            // Uncalibrated fallback: conservative S-curve
+            let range = Self.smartCeiling - Self.smartFloor
+            let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
+            targetPct = position * position * (3 - 2 * position)
+
+            if rate > 0 {
+                targetPct = min(targetPct + rate * 0.2, 1.0)
+            }
         }
 
         // Ramp-down governor: reduce RPM at half the rate we ramp up
         if targetPct < lastSmartRPMPercent {
-            let maxDrop: Float = 0.05 // max 5% drop per tick
+            let maxDrop: Float = 0.05
             targetPct = max(targetPct, lastSmartRPMPercent - maxDrop)
         }
 

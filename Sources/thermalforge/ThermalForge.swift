@@ -22,6 +22,7 @@ struct ThermalForge: ParsableCommand {
             Status.self,
             Discover.self,
             Watch.self,
+            Calibrate.self,
             Install.self,
             Uninstall.self,
             Daemon.self,
@@ -267,6 +268,51 @@ struct Watch: ParsableCommand {
 
         // Keep the process alive
         RunLoop.main.run()
+    }
+}
+
+// MARK: - Calibrate
+
+struct Calibrate: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "calibrate",
+        abstract: "Measure this machine's thermal characteristics for the Smart profile"
+    )
+
+    func run() throws {
+        guard geteuid() == 0 else {
+            throw ValidationError("Run with sudo: sudo thermalforge calibrate")
+        }
+
+        print("ThermalForge Calibration")
+        print("========================")
+        print("This will stress your CPU and measure thermal response at different fan speeds.")
+        print("Takes about 4 minutes. Fans will be loud during the test.\n")
+
+        let fc = try FanControl()
+        let runner = CalibrationRunner(fanControl: fc)
+
+        runner.onProgress = { message in
+            print(message)
+        }
+
+        let data = try runner.run()
+        try data.save()
+
+        print("\nCalibration complete.")
+        print("\nSaved to:")
+        print("  \(CalibrationData.filePath.path)")
+        if let logPath = runner.logPath {
+            print("  \(logPath.path)")
+        }
+        print("\nResults:")
+        for m in data.measurements {
+            print("  \(Int(m.rpmPercent * 100))% RPM → steady state: \(String(format: "%.0f", m.steadyState))°C, cooling: \(String(format: "%.2f", m.coolingRate))°C/s")
+        }
+        print("\nThe Smart profile will now use these measurements for this machine.")
+        if runner.logPath != nil {
+            print("The CSV log contains every sensor reading taken during calibration.")
+        }
     }
 }
 
