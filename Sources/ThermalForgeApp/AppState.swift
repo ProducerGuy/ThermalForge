@@ -15,6 +15,8 @@ final class AppState: ObservableObject {
     @Published var activeProfile: FanProfile = .silent
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
+    let calibrationState = CalibrationState()
+
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }

@@ -17,6 +17,15 @@ public struct CalibrationData: Codable {
     public let calibratedAt: String
     public let measurements: [Measurement]
 
+    public init(machine: String, fans: Int, maxRPM: Int, minRPM: Int, calibratedAt: String, measurements: [Measurement]) {
+        self.machine = machine
+        self.fans = fans
+        self.maxRPM = maxRPM
+        self.minRPM = minRPM
+        self.calibratedAt = calibratedAt
+        self.measurements = measurements
+    }
+
     public struct Measurement: Codable {
         /// Fan speed as fraction of max RPM (0.0–1.0)
         public let rpmPercent: Float
@@ -26,6 +35,13 @@ public struct CalibrationData: Codable {
         public let heatingRate: Float
         /// Temperature where heating and cooling reach equilibrium under load
         public let steadyState: Float
+
+        public init(rpmPercent: Float, coolingRate: Float, heatingRate: Float, steadyState: Float) {
+            self.rpmPercent = rpmPercent
+            self.coolingRate = coolingRate
+            self.heatingRate = heatingRate
+            self.steadyState = steadyState
+        }
     }
 
     /// Interpolate the RPM percentage needed to hold a target temperature under load.

@@ -116,6 +116,8 @@ thermalforge set 4000      # Set specific RPM
 thermalforge discover      # Dump all SMC keys (for new hardware)
 thermalforge watch          # Monitor mode with auto-boost profiles
 thermalforge calibrate     # Calibrate Smart profile for this machine (sudo)
+thermalforge log           # Record thermal data to CSV (1Hz, auto-delete 24h)
+thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep forever
 ```
 
 ## Compatibility
@@ -165,11 +167,21 @@ ThermalForge is a solo project but compatibility reports are hugely valuable. If
 
 That's it. Every new machine tested makes ThermalForge better for everyone.
 
-## Coming Soon
+## Thermal Logging
 
-**Smart Profile** — Proactive thermal curve that ramps fans early and gradually, keeping chips in the 75–85°C sweet spot for sustained peak performance. No throttling, less thermal cycling wear, quieter fans overall. Based on semiconductor reliability research. See [why reactive cooling costs you performance](ROADMAP.md#smart-profile--proactive-thermal-curve-coming-soon).
+Record sensor data for research and analysis:
 
-**Thermal Logging** — Research-grade data export (CSV + JSON) with process correlation, configurable sample rates, and full session metadata. Built for reproducible analysis, cross-machine comparison, and hardware research. See [full spec](ROADMAP.md#thermal-logging-coming-soon).
+```bash
+thermalforge log                                          # 1Hz, auto-delete after 24h
+thermalforge log --rate 10 --duration 1h --no-expire      # 10Hz, 1 hour, keep forever
+```
+
+Each session produces a self-contained folder with:
+- **thermal.csv** — timestamped sensor readings + fan state at every sample
+- **processes.csv** — top 5 processes by CPU at every sample
+- **metadata.json** — machine model, OS, sensor dictionary, session info
+
+Standard CSV format — loadable in pandas, R, Excel. See [full spec](ROADMAP.md#thermal-logging-coming-soon).
 
 ## License
 

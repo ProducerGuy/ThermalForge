@@ -23,6 +23,7 @@ struct ThermalForge: ParsableCommand {
             Discover.self,
             Watch.self,
             Calibrate.self,
+            Log.self,
             Install.self,
             Uninstall.self,
             Daemon.self,
@@ -329,6 +330,84 @@ struct Calibrate: ParsableCommand {
         if runner.logPath != nil {
             print("The CSV log contains every sensor reading taken during calibration.")
         }
+    }
+}
+
+// MARK: - Log
+
+struct Log: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "log",
+        abstract: "Record thermal data to CSV for research and analysis"
+    )
+
+    @Option(name: .shortAndLong, help: "Sample rate in Hz (default: 1)")
+    var rate: Double = 1.0
+
+    @Option(name: .shortAndLong, help: "Duration (e.g., 1h, 30m, 60s). Omit for indefinite.")
+    var duration: String?
+
+    @Option(name: .shortAndLong, help: "Output directory (default: ~/Library/Application Support/ThermalForge/logs)")
+    var output: String?
+
+    @Flag(name: .long, help: "Keep logs permanently (default: auto-delete after 24h)")
+    var noExpire: Bool = false
+
+    func run() throws {
+        let fc = try FanControl()
+
+        let durationSec: TimeInterval? = duration.flatMap { parseDuration($0) }
+        let outputURL = output.map { URL(fileURLWithPath: $0) }
+
+        let logger = try ThermalLogger(
+            fanControl: fc,
+            rateHz: rate,
+            duration: durationSec,
+            outputDir: outputURL,
+            noExpire: noExpire
+        )
+
+        // Clean expired sessions on startup
+        ThermalLogger.cleanExpired()
+
+        let durationStr = durationSec.map { formatDuration($0) } ?? "indefinite"
+        print("ThermalForge Log")
+        print("  Rate: \(rate) Hz")
+        print("  Duration: \(durationStr)")
+        print("  Output: \(logger.outputPath.path)")
+        print("  Auto-delete: \(noExpire ? "off" : "after 24h")")
+        print("\nLogging... Ctrl-C to stop.\n")
+
+        // Clean shutdown on Ctrl-C
+        signal(SIGINT) { _ in
+            print("\n\nStopping...")
+            Darwin.exit(0)
+        }
+
+        logger.onSample = { line in
+            print(line)
+        }
+
+        try logger.run()
+
+        print("\nLog saved to: \(logger.outputPath.path)")
+        print("  thermal.csv   — sensor readings + fan state")
+        print("  processes.csv — top processes by CPU")
+        print("  metadata.json — session info + data dictionary")
+    }
+
+    private func parseDuration(_ s: String) -> TimeInterval? {
+        let trimmed = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if trimmed.hasSuffix("h"), let v = Double(trimmed.dropLast()) { return v * 3600 }
+        if trimmed.hasSuffix("m"), let v = Double(trimmed.dropLast()) { return v * 60 }
+        if trimmed.hasSuffix("s"), let v = Double(trimmed.dropLast()) { return v }
+        return Double(trimmed)
+    }
+
+    private func formatDuration(_ t: TimeInterval) -> String {
+        if t >= 3600 { return "\(Int(t / 3600))h" }
+        if t >= 60 { return "\(Int(t / 60))m" }
+        return "\(Int(t))s"
     }
 }
 
