@@ -18,7 +18,11 @@ final class CalibrationState: ObservableObject {
     @Published var progress: Float = 0 // 0.0–1.0
     @Published var elapsedSeconds: Int = 0
     @Published var isComplete = false
+    @Published var showPrompt = false
     @Published var error: String?
+
+    /// Called on main thread when calibration completes successfully
+    var onComplete: (() -> Void)?
 
     private var task: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
@@ -191,6 +195,7 @@ final class CalibrationState: ObservableObject {
             phase = "Complete"
             isRunning = false
             isComplete = true
+            onComplete?()
         }
     }
 
@@ -262,18 +267,54 @@ private struct StatusResponse: Decodable {
 
 struct CalibrationView: View {
     @ObservedObject var state: CalibrationState
+    @EnvironmentObject var appState: AppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "CALIBRATION")
-
-            if state.isComplete {
+            if state.showPrompt {
+                promptView
+            } else if state.isComplete {
                 completeView
             } else if state.isRunning {
                 runningView
+            } else if CalibrationData.exists {
+                calibratedView
             } else {
+                SectionHeader(title: "CALIBRATION")
                 startView
             }
+        }
+    }
+
+    private var promptView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionHeader(title: "CALIBRATE FOR SMART")
+
+            Text("Smart works best when calibrated to your machine. This takes ~4 minutes and only needs to run once.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+
+            Button(action: {
+                state.showPrompt = false
+                state.start()
+            }) {
+                Label("Calibrate Now", systemImage: "gauge.with.dots.needle.33percent")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .padding(.horizontal, 12)
+
+            Button(action: {
+                state.showPrompt = false
+                appState.activateSmartAfterSkip()
+            }) {
+                Text("Skip — use default curve")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .padding(.horizontal, 12)
         }
     }
 
@@ -294,6 +335,16 @@ struct CalibrationView: View {
             .buttonStyle(.bordered)
             .tint(.orange)
             .padding(.horizontal, 12)
+        }
+    }
+
+    private var calibratedView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionHeader(title: "CALIBRATION")
+            Label("Calibrated", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .padding(.horizontal, 12)
         }
     }
 

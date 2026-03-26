@@ -29,6 +29,10 @@ final class AppState: ObservableObject {
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        calibrationState.onComplete = { [weak self] in
+            self?.activeProfile = .smart
+            self?.monitor?.switchProfile(.smart)
+        }
         startMonitoring()
     }
 
@@ -64,6 +68,17 @@ final class AppState: ObservableObject {
 
     func setSmart() {
         NSLog("ThermalForge: Smart button pressed")
+        if !CalibrationData.exists && !calibrationState.isComplete {
+            // No calibration data — prompt user
+            calibrationState.showPrompt = true
+        } else {
+            activeProfile = .smart
+            monitor?.switchProfile(.smart)
+        }
+    }
+
+    func activateSmartAfterSkip() {
+        NSLog("ThermalForge: Smart activated with default curve (calibration skipped)")
         activeProfile = .smart
         monitor?.switchProfile(.smart)
     }
