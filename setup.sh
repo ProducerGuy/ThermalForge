@@ -13,6 +13,10 @@ swift build -c release --quiet
 
 echo "Installing (requires admin password once)..."
 
+# Kill old app if running
+pkill -x ThermalForgeApp 2>/dev/null || true
+sleep 1
+
 # Generate app icon if needed
 if [ ! -f ThermalForge.icns ]; then
     echo "Generating app icon..."
