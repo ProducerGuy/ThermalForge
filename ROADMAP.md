@@ -128,25 +128,111 @@ thermalforge log --rate 1 --no-expire --output .  # persistent, custom location
 
 ---
 
-## In-App Calibration UI (Planned)
+## In-App Calibration UI (Built)
 
-Currently calibration runs via `sudo thermalforge calibrate` in the terminal. The planned in-app experience:
-
-### UI
-
-A dedicated calibration window accessible from the menu bar dropdown. Shows:
-- **Progress bar** with time elapsed and estimated time remaining
+Calibration is accessible from both the terminal (`sudo thermalforge calibrate`) and the menu bar app. The app shows:
+- **Progress bar** with time elapsed
 - **Current phase** — which fan speed level is being tested, heating or cooling
 - **Live temperature** — real-time readout during the test
 - **Stop button** — immediately resets fans to Apple defaults, exits cleanly, Smart falls back to the default curve
 
-### Behavior
+---
 
-- First time a user clicks Smart with no calibration data: prompt to calibrate with an option to skip (Smart uses default curve if skipped)
-- Calibration requires elevated privileges — app prompts for password once
-- If stopped early: no partial data saved, Smart uses default curve
-- If ThermalForge quits mid-calibration: same as stopping — fans reset via daemon, no data saved
-- On completion: calibration data saved permanently, Smart immediately starts using it
+## Enhanced Logging (Planned)
+
+Additional data points for research-grade logging:
+
+### New data columns
+- **Thermal throttle state** — `ProcessInfo.thermalState` (nominal/fair/serious/critical) and `com.apple.system.thermalpressurelevel` (5 levels including the hidden moderate/heavy distinction that `.fair` masks). Captured at every sample.
+- **Power draw** — SMC power keys (PSTR, PCPT, PCPG, etc.) to capture package and per-domain wattage. Direct correlation between power and thermal output.
+- **GPU utilization** — Metal performance statistics or IOKit GPU activity to capture GPU load alongside CPU processes.
+- **Memory pressure** — system memory pressure percentage via Mach VM stats. Already implemented in ThermalMonitor, needs to be added to the logger.
+- **Delta-T over ambient** — accept ambient temperature input (manual or via TA0P/TAOL sensor if present), report all temps as both absolute °C and delta above ambient. Delta-T is the standard comparison metric in hardware review methodology (Gamers Nexus, Notebookcheck, Jarrod's Tech).
+- **User markers** — `thermalforge mark "started render"` command that inserts an annotated timestamp into the active log session. Enables post-hoc correlation between events and thermal data.
+- **Statistical summary in metadata.json** — min, max, mean, standard deviation, P95, P99 for all sensors. Total time in each thermal state. Peak fan RPM. Time at or above throttle threshold.
+
+### Sources informing this design
+- Gamers Nexus cooler testing methodology: five averaged sets of averages, automated standard deviation monitoring
+- Notebookcheck: 60 min idle + 60 min load, ambient-controlled
+- NASA MIL-STD-1540E: thermal stability = rate of change <1°C over 5 hours
+- Apple WWDC 2019 Session 422: thermal state simulation and monitoring
+
+---
+
+## Experiment Mode (Planned)
+
+Controlled thermal testing framework. No existing macOS tool offers this.
+
+### CLI interface
+
+```bash
+thermalforge experiment --workload cpu --fan smart --duration 10m --label "smart-baseline"
+thermalforge experiment --workload gpu --fan 75%  --duration 10m --label "gpu-fixed-75"
+thermalforge experiment --workload combined --fan max --duration 10m --label "worst-case"
+thermalforge experiment --workload idle --duration 5m --label "idle-baseline"
+thermalforge experiment --workload "blender --render scene.blend" --fan smart --duration 30m --label "real-render"
+thermalforge compare smart-baseline gpu-fixed-75 worst-case
+```
+
+### Built-in workloads
+- **cpu** — saturate all P-cores and E-cores with compute-bound work (similar to Prime95 small FFTs)
+- **gpu** — Metal compute shaders that stress the GPU pipeline (inspired by Philip Turner's metal-benchmarks)
+- **combined** — CPU + GPU simultaneously. The real-world worst case for Apple Silicon where CPU, GPU, and Neural Engine share the same die and unified memory.
+- **idle** — no workload, machine at rest. Used as baseline before/after active tests.
+- **Custom command** — any shell command as the workload. Run your actual renders, compiles, or ML inference.
+
+### Experiment protocol (modeled after Gamers Nexus and Notebookcheck)
+1. **Baseline capture** — 5 min idle measurement at the start (configurable)
+2. **Workload phase** — run the specified workload for the specified duration
+3. **Steady-state detection** — automatic detection when temperature stabilizes (rate of change <0.5°C over 2 minutes). Reported as time-to-steady-state.
+4. **Throttle detection** — monitor `com.apple.system.thermalpressurelevel` and record exact timestamps of state transitions. Report time-to-throttle.
+5. **Cooldown capture** — 5 min idle measurement after workload ends
+6. **Full logging throughout** — every data point captured to CSV (thermal, processes, power, throttle state)
+
+### Metrics per experiment
+- **Time-to-throttle** — seconds from workload start until thermal state changes from nominal
+- **Time-to-steady-state** — seconds until temperature stabilizes under load
+- **Peak temperature** — highest reading during the test
+- **Steady-state temperature** — average temp after stabilization
+- **Delta-T over ambient** — all temps reported as degrees above ambient
+- **Statistical summary** — mean, std dev, min, max, P95, P99 for all sensors
+- **Thermal state timeline** — exact timestamps of every state transition
+
+### Comparison reports
+
+`thermalforge compare` generates:
+- Side-by-side statistical summaries
+- Delta between experiments (e.g., Smart held 7°C lower than fixed 75%)
+- Time-to-throttle comparison
+- Identification of statistically significant differences
+- Export as CSV or formatted text
+
+### Use cases
+- **Thermal pad modders** — run the same experiment before and after a mod, get a quantified comparison instead of "it feels cooler"
+- **Developers** — profile how your app affects system thermals under controlled conditions
+- **Hardware reviewers** — standardized methodology with reproducible results
+- **Cooling solution engineers** — compare thermal resistance across configurations
+- **ML researchers** — measure sustained inference throughput under different thermal strategies
+
+### Sources informing this design
+- Gamers Nexus: single die, ambient-controlled, Delta-T-over-ambient, noise-normalized at 35 dBA, five averaged sets
+- Notebookcheck: 60 min idle + 60 min load, Prime95 + FurMark, Fluke T3000 validation
+- Jarrod's Tech: controlled 21°C ambient, 3x 10-min Cinebench averaged
+- Phoronix Test Suite: 450+ test profiles, concurrent stress runs, community result sharing
+- NASA/JEDEC: formal stabilization criteria for thermal testing
+
+---
+
+## Community Thermal Database (Planned)
+
+Opt-in anonymous upload of experiment results. Modeled after OpenBenchmarking.org.
+
+- Anonymous machine fingerprinting (chip model + core count + fan count, never serial number)
+- Standardized experiment profiles so results are comparable across machines
+- Delta-T-over-ambient as the comparison metric
+- "Compare my machine" queries — see how your M5 Max ranks against other M5 Max machines
+- Community validation — outlier detection, methodology verification
+- Local-first: all data stored locally, upload is always opt-in
 
 ---
 

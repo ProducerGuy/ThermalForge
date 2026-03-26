@@ -69,7 +69,21 @@ Turn on **Launch at Login** in the menu bar dropdown and it starts automatically
 
 ## Smart Profile
 
-The Smart button uses a proactive thermal curve that ramps fans early and gradually, keeping your chip below 85°C for sustained peak performance — no throttling, less thermal cycling wear, quieter fans overall.
+### Why proactive cooling matters
+
+Apple's default fan behavior is reactive: fans stay off until the chip is already hot, then ramp up to recover. This creates a repeating cycle during sustained workloads like renders, compiles, and ML inference:
+
+1. CPU/GPU runs at full clocks, heat builds unchecked
+2. Chip hits ~90°C, starts throttling clock speeds — **10-20% performance loss**
+3. Fans finally ramp up
+4. Temps drop, clocks recover, fans slow down
+5. Heat builds again — repeat
+
+This sawtooth pattern costs you sustained performance, wears hardware faster (thermal cycling stress on solder joints follows the Coffin-Manson fatigue model — damage scales with temperature swing amplitude, not absolute temperature), and forces fans to work harder because they're always recovering instead of preventing.
+
+The Smart profile eliminates this. It monitors temperature velocity — not just where the temp is, but how fast it's rising — and ramps fans early enough to hold the chip below 85°C. The result: sustained peak clocks throughout your entire workload, less thermal cycling wear, and fans that run quieter overall because they never need to recover from a heat spike.
+
+Apple doesn't do this because silence sells in store demos and most users never run sustained workloads. ThermalForge gives power users the choice Apple doesn't.
 
 ### Calibration
 
@@ -169,19 +183,87 @@ That's it. Every new machine tested makes ThermalForge better for everyone.
 
 ## Thermal Logging
 
-Record sensor data for research and analysis:
+No existing macOS tool exports structured thermal data with process correlation in a format designed for research. ThermalForge does.
+
+### Who this is for
+
+- **Data scientists** studying thermal behavior across Apple Silicon generations
+- **Hardware engineers** validating cooling solutions or thermal pad mods
+- **Developers** profiling how their apps affect system thermals
+- **Researchers** who need reproducible, citable thermal data for papers
+
+### What it captures
 
 ```bash
 thermalforge log                                          # 1Hz, auto-delete after 24h
 thermalforge log --rate 10 --duration 1h --no-expire      # 10Hz, 1 hour, keep forever
 ```
 
-Each session produces a self-contained folder with:
-- **thermal.csv** — timestamped sensor readings + fan state at every sample
-- **processes.csv** — top 5 processes by CPU at every sample
-- **metadata.json** — machine model, OS, sensor dictionary, session info
+Each session produces a self-contained folder:
 
-Standard CSV format — loadable in pandas, R, Excel. See [full spec](ROADMAP.md#thermal-logging-coming-soon).
+| File | Contents |
+|---|---|
+| **thermal.csv** | Timestamped readings from every detected temperature sensor, fan RPM (actual + target), fan mode, at every sample interval |
+| **processes.csv** | Top 5 processes by CPU utilization at every sample — the missing link between thermal data and what caused it |
+| **metadata.json** | Machine model, chip, OS version, ThermalForge version, fan count, RPM range, sample rate, complete sensor dictionary, session start/end, total sample count |
+
+### Why this format
+
+- **CSV + JSON sidecar** — loads directly in pandas, R, Excel, or any data tool without a custom parser
+- **Raw SMC key names** — no friendly labels that could be wrong across chip generations. Cross-reference against Apple hardware documentation directly
+- **Self-describing sessions** — every log folder contains everything needed to interpret the data. Hand it to someone with no context and they can work with it
+- **Auto-delete by default (24h)** — prevents disk bloat for casual users. `--no-expire` for researchers who need to keep data
+
+## Coming Soon
+
+### Enhanced Logging
+
+- **Thermal throttle state** — capture Apple's `ProcessInfo.thermalState` (nominal/fair/serious/critical) at every sample. Know exactly when and how hard the chip throttled.
+- **Power draw** — SMC power keys (PSTR, PCPT) to capture wattage alongside temperature. Watts correlate directly with heat generation.
+- **GPU utilization** — current logging captures CPU processes but GPU compute workloads (Metal, ML inference) are invisible. GPU utilization fills that gap.
+- **Memory pressure** — system memory pressure percentage at every sample
+- **Delta-T over ambient** — report temperatures as both absolute and delta above ambient. This is the standard comparison metric used by hardware reviewers (Gamers Nexus, Notebookcheck) because absolute temps vary with room temperature.
+- **User markers** — annotate the log mid-session ("started render", "switched profile") so data points have context when analyzed later
+- **Statistical summary** — min, max, mean, standard deviation, P95/P99 for all sensors across the session. Time spent in each thermal state. Peak fan RPM.
+
+### Experiment Mode
+
+A controlled testing framework for anyone who wants to understand their Mac's thermal behavior — modders validating thermal pad swaps, developers profiling their apps, engineers comparing cooling strategies.
+
+```bash
+thermalforge experiment --workload cpu --fan smart --duration 10m --label "smart-baseline"
+thermalforge experiment --workload cpu --fan 75%  --duration 10m --label "fixed-75"
+thermalforge compare smart-baseline fixed-75
+```
+
+**Controlled variables:**
+- Fan speed: any profile, fixed percentage, or Smart
+- Workload type: CPU stress, GPU stress (Metal compute), CPU+GPU combined, idle baseline, or any custom command
+- Duration with automatic steady-state detection (temp change <0.5°C over 2 minutes)
+- Ambient temperature input for Delta-T calculations
+
+**Metrics generated per experiment:**
+- Time-to-throttle — how long before the chip starts losing performance
+- Time-to-steady-state — how long before temperature stabilizes
+- Sustained performance score — average clock throughput over the test duration
+- Statistical summary — mean, std dev, min, max, P95/P99 temps
+
+**Comparison reports:**
+- Side-by-side A/B results across experiments
+- Automatic detection of statistically significant differences
+- Export as CSV or formatted summary
+
+**Built-in workloads:**
+- CPU stress: saturates all cores with compute-bound work
+- GPU stress: Metal compute shaders that load the GPU pipeline
+- Combined: CPU + GPU simultaneously (the real-world worst case for Apple Silicon where CPU, GPU, and Neural Engine share the same die and unified memory)
+- Idle baseline: 5-minute idle measurement before and after tests to establish reference
+
+### Community Thermal Database
+
+Opt-in anonymous upload of experiment results. Compare your machine against others with the same chip. See how your M5 Max thermal performance ranks against the distribution. Modeled after [OpenBenchmarking.org](https://openbenchmarking.org) — standardized methodology, community validation, machine fingerprinting by chip model (not serial number).
+
+See [ROADMAP.md](ROADMAP.md) for full specs and build plans.
 
 ## License
 
