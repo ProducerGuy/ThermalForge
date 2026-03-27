@@ -273,6 +273,7 @@ final class CalibrationState: ObservableObject {
             maxRPM: Int(maxRPM),
             minRPM: Int(minRPM),
             calibratedAt: isoFormatter.string(from: Date()),
+            mode: mode.rawValue,
             measurements: measurements
         )
         try? calibration.save()

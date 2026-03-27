@@ -189,22 +189,22 @@ SMC key names vary across chip generations — ThermalForge auto-detects at star
 ### Homebrew
 
 ```bash
-sudo thermalforge uninstall
 brew uninstall thermalforge
-sudo rm -rf /Applications/ThermalForge.app
+sudo thermalforge uninstall
 ```
+
+`thermalforge uninstall` removes the daemon, binary, app, calibration data, and all logs.
 
 ### From source
 
 ```bash
-./uninstall.sh
+sudo thermalforge uninstall
 ```
 
 Or manually:
 
 ```bash
 sudo thermalforge uninstall
-sudo rm -f /usr/local/bin/thermalforge
 sudo rm -rf /Applications/ThermalForge.app
 ```
 

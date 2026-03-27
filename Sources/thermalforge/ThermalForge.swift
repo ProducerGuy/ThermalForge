@@ -551,10 +551,10 @@ struct Uninstall: ParsableCommand {
             try? fc.resetAuto()
         }
 
-        // Unload daemon
+        // Unload daemon (bootout is the modern replacement for unload)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["unload", ThermalForgeDaemon.plistPath]
+        process.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
         try? process.run()
         process.waitUntilExit()
 

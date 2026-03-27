@@ -48,6 +48,10 @@ final class AppState: ObservableObject {
         startHeartbeat()
     }
 
+    deinit {
+        heartbeatTimer?.invalidate()
+    }
+
     // MARK: - Heartbeat
 
     private func startHeartbeat() {
