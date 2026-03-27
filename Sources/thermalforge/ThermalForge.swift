@@ -67,13 +67,9 @@ struct Auto: ParsableCommand {
         try? kill.run()
         kill.waitUntilExit()
 
-        // Delete calibration data so stale data can't cause problems on next launch
-        try? FileManager.default.removeItem(at: CalibrationData.filePath)
-
         let fc = try FanControl()
         try fc.resetAuto()
         print("Fans reset to Apple defaults")
-        print("Calibration data cleared. Re-run calibration for Smart profile.")
     }
 }
 
@@ -541,6 +537,19 @@ struct Uninstall: ParsableCommand {
         }
 
         let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+
+        // Kill app if running
+        let kill = Process()
+        kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        kill.arguments = ["ThermalForgeApp"]
+        try? kill.run()
+        kill.waitUntilExit()
+
+        // Reset fans
+        if let fc = try? FanControl() {
+            try? fc.resetAuto()
+        }
 
         // Unload daemon
         let process = Process()
@@ -549,12 +558,22 @@ struct Uninstall: ParsableCommand {
         try? process.run()
         process.waitUntilExit()
 
-        // Remove files
+        // Remove daemon files
         try? fm.removeItem(atPath: ThermalForgeDaemon.plistPath)
         try? fm.removeItem(atPath: ThermalForgeDaemon.installPath)
         try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)
 
-        print("ThermalForge daemon uninstalled.")
+        // Remove user data
+        let appSupport = home.appendingPathComponent("Library/Application Support/ThermalForge")
+        let logs = home.appendingPathComponent("Library/Logs/ThermalForge")
+        try? fm.removeItem(at: appSupport)
+        try? fm.removeItem(at: logs)
+
+        // Remove app bundle
+        try? fm.removeItem(atPath: "/Applications/ThermalForge.app")
+
+        print("ThermalForge fully uninstalled.")
+        print("Removed: daemon, binary, app, calibration data, logs.")
     }
 }
 
