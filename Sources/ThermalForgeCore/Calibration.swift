@@ -166,9 +166,20 @@ extension CalibrationData {
     }
 
     public static func load() -> CalibrationData? {
-        guard let data = try? Data(contentsOf: filePath),
-              let calibration = try? JSONDecoder().decode(CalibrationData.self, from: data)
-        else { return nil }
+        guard FileManager.default.fileExists(atPath: filePath.path) else { return nil }
+
+        guard let data = try? Data(contentsOf: filePath) else {
+            TFLogger.shared.error("Calibration file exists but couldn't be read — deleting")
+            try? FileManager.default.removeItem(at: filePath)
+            return nil
+        }
+
+        guard let calibration = try? JSONDecoder().decode(CalibrationData.self, from: data) else {
+            TFLogger.shared.error("Calibration file is corrupted (JSON decode failed) — deleting")
+            try? FileManager.default.removeItem(at: filePath)
+            return nil
+        }
+
         return calibration
     }
 
