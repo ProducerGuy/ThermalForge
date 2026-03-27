@@ -12,6 +12,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
+
+        // Prevent duplicate instances
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.thermalforge.app"
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if running.count > 1 {
+            TFLogger.shared.error("Another instance already running — quitting")
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
