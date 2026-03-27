@@ -73,7 +73,13 @@ final class CalibrationState: ObservableObject {
 
         isRunning = false
         phase = "Stopped"
+
+        // Notify so AppState can reset profile to Silent
+        onStop?()
     }
+
+    /// Called when calibration is stopped — AppState uses this to reset profile
+    var onStop: (() -> Void)?
 
     /// Tracks the current stress flag so stop() can kill threads
     var activeStressFlag: StressFlag?

@@ -143,9 +143,19 @@ Two files in `~/Library/Application Support/ThermalForge/`:
 - `calibration.json` — machine-specific thermal data that Smart reads
 - `calibration_<timestamp>.csv` — every sensor reading taken during calibration (for research use)
 
+### Emergency reset
+
+If fans are stuck or behaving unexpectedly, this command kills the app and resets fans to Apple defaults:
+
+```bash
+sudo killall ThermalForgeApp; sudo /usr/local/bin/thermalforge auto
+```
+
+The `thermalforge auto` command also kills the app automatically to prevent it from overriding the reset.
+
 ### Disclaimer
 
-Calibration pushes your CPU to full load and cycles fan speeds. This is within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
+Calibration pushes your CPU and GPU to full load and cycles fan speeds. This is within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
 
 ## CLI
 

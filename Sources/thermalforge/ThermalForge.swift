@@ -59,9 +59,21 @@ struct Auto: ParsableCommand {
     )
 
     func run() throws {
+        // Kill the menu bar app first — if it's running with a profile active,
+        // it will override the fan reset within seconds
+        let kill = Process()
+        kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        kill.arguments = ["ThermalForgeApp"]
+        try? kill.run()
+        kill.waitUntilExit()
+
+        // Delete calibration data so stale data can't cause problems on next launch
+        try? FileManager.default.removeItem(at: CalibrationData.filePath)
+
         let fc = try FanControl()
         try fc.resetAuto()
         print("Fans reset to Apple defaults")
+        print("Calibration data cleared. Re-run calibration for Smart profile.")
     }
 }
 

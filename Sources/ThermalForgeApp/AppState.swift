@@ -33,6 +33,10 @@ final class AppState: ObservableObject {
             self?.activeProfile = .smart
             self?.monitor?.switchProfile(.smart)
         }
+        calibrationState.onStop = { [weak self] in
+            self?.activeProfile = .silent
+            self?.monitor?.switchProfile(.silent)
+        }
         startMonitoring()
     }
 
