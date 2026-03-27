@@ -7,7 +7,7 @@
 
 import ServiceManagement
 import SwiftUI
-import ThermalForgeCore
+@preconcurrency import ThermalForgeCore
 
 @MainActor
 final class AppState: ObservableObject {
@@ -26,6 +26,7 @@ final class AppState: ObservableObject {
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
+    private var heartbeatTimer: Timer?
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
@@ -38,6 +39,16 @@ final class AppState: ObservableObject {
             self?.monitor?.switchProfile(.silent)
         }
         startMonitoring()
+        startHeartbeat()
+    }
+
+    // MARK: - Heartbeat
+
+    private func startHeartbeat() {
+        let client = DaemonClient()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+            _ = try? client.send("heartbeat")
+        }
     }
 
     // MARK: - Monitoring

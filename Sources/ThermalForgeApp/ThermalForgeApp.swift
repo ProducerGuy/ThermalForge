@@ -13,6 +13,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Reset fans on quit so daemon doesn't hold stale manual settings
+        let client = DaemonClient()
+        try? client.execute(.resetAuto)
+    }
 }
 
 @main

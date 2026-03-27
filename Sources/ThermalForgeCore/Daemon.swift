@@ -118,6 +118,9 @@ public final class DaemonServer {
     private let fanControl: FanControl
     /// Last fan command — re-applied after sleep/wake
     private var lastCommand: String?
+    /// Heartbeat: last time the app checked in
+    private var lastHeartbeat: Date?
+    private let heartbeatLock = NSLock()
 
     public init(fanControl: FanControl) throws {
         self.fanControl = fanControl
@@ -161,6 +164,10 @@ public final class DaemonServer {
         // Watch for sleep/wake to re-apply fan settings
         registerWakeNotification()
 
+        // Heartbeat watchdog: if app set fans to manual but hasn't checked in
+        // for 15 seconds, reset to auto. Prevents fans stuck after app crash.
+        startHeartbeatWatchdog()
+
         // Accept connections on a background thread
         // (RunLoop.main needed for NSWorkspace notifications)
         DispatchQueue.global(qos: .utility).async { [self] in
@@ -174,6 +181,34 @@ public final class DaemonServer {
 
         // Main thread runs the RunLoop for wake notifications
         RunLoop.main.run()
+    }
+
+    // MARK: - Heartbeat Watchdog
+
+    private func startHeartbeatWatchdog() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            while true {
+                Thread.sleep(forTimeInterval: 5)
+
+                heartbeatLock.lock()
+                let lastBeat = lastHeartbeat
+                let hasManualControl = lastCommand != nil
+                heartbeatLock.unlock()
+
+                // Only reset if: app has connected before (lastBeat != nil),
+                // fans are in manual mode, and heartbeat is stale
+                guard let beat = lastBeat, hasManualControl else { continue }
+
+                if Date().timeIntervalSince(beat) > 15 {
+                    NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                    try? fanControl.resetAuto()
+                    heartbeatLock.lock()
+                    lastCommand = nil
+                    lastHeartbeat = nil
+                    heartbeatLock.unlock()
+                }
+            }
+        }
     }
 
     // MARK: - Sleep/Wake
@@ -261,11 +296,17 @@ public final class DaemonServer {
             switch parts.first.map(String.init) {
             case "max":
                 try fanControl.setMax()
+                heartbeatLock.lock()
                 lastCommand = "max"
+                lastHeartbeat = Date()
+                heartbeatLock.unlock()
                 response = "ok"
             case "auto":
                 try fanControl.resetAuto()
-                lastCommand = nil  // Nothing to re-apply on wake
+                heartbeatLock.lock()
+                lastCommand = nil
+                lastHeartbeat = nil
+                heartbeatLock.unlock()
                 response = "ok"
             case "set":
                 guard parts.count >= 2, let rpm = Float(parts[1]) else {
@@ -273,7 +314,10 @@ public final class DaemonServer {
                     break
                 }
                 try fanControl.setAllFans(rpm: rpm)
+                heartbeatLock.lock()
                 lastCommand = command
+                lastHeartbeat = Date()
+                heartbeatLock.unlock()
                 response = "ok"
             case "status":
                 let status = try fanControl.status()
@@ -281,6 +325,11 @@ public final class DaemonServer {
                 encoder.keyEncodingStrategy = .convertToSnakeCase
                 let data = try encoder.encode(status)
                 response = String(data: data, encoding: .utf8) ?? "error: encode failed"
+            case "heartbeat":
+                heartbeatLock.lock()
+                lastHeartbeat = Date()
+                heartbeatLock.unlock()
+                response = "ok"
             default:
                 response = "error: unknown command '\(command)'"
             }
