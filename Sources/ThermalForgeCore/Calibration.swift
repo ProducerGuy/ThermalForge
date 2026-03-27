@@ -16,15 +16,27 @@ public struct CalibrationData: Codable {
     public let maxRPM: Int
     public let minRPM: Int
     public let calibratedAt: String
+    public let mode: String?
     public let measurements: [Measurement]
 
-    public init(machine: String, fans: Int, maxRPM: Int, minRPM: Int, calibratedAt: String, measurements: [Measurement]) {
+    public init(machine: String, fans: Int, maxRPM: Int, minRPM: Int, calibratedAt: String, mode: String? = nil, measurements: [Measurement]) {
         self.machine = machine
         self.fans = fans
         self.maxRPM = maxRPM
         self.minRPM = minRPM
         self.calibratedAt = calibratedAt
+        self.mode = mode
         self.measurements = measurements
+    }
+
+    /// Ranking for downgrade prevention: quick=1, standard=2, optimized=3
+    public var modeRank: Int {
+        switch mode {
+        case "quick": return 1
+        case "standard": return 2
+        case "optimized": return 3
+        default: return 0 // legacy data without mode field
+        }
     }
 
     public struct Measurement: Codable {
@@ -153,13 +165,22 @@ public enum CalibrationMode: String, CaseIterable {
     /// Exits each phase when rate of change <0.5°C over 60 seconds.
     /// Ceiling of 10 min heat + 5 min cool per level (5 time constants = 99.3%).
     /// Produces the most accurate data and logs time-to-steady-state.
-    case thorough
+    case optimized
 
     public var description: String {
         switch self {
         case .quick: return "Quick (~10 min)"
         case .standard: return "Standard (~28 min)"
-        case .thorough: return "Thorough (until stable, ~35-50 min)"
+        case .optimized: return "Optimized (until stable, ~35-50 min)"
+        }
+    }
+
+    /// Ranking for downgrade prevention
+    public var rank: Int {
+        switch self {
+        case .quick: return 1
+        case .standard: return 2
+        case .optimized: return 3
         }
     }
 
@@ -168,7 +189,7 @@ public enum CalibrationMode: String, CaseIterable {
         switch self {
         case .quick: return 120       // 2 min
         case .standard: return 300    // 5 min
-        case .thorough: return 600    // 10 min max, exits early on steady state
+        case .optimized: return 600   // 10 min max, exits early on steady state
         }
     }
 
@@ -177,13 +198,31 @@ public enum CalibrationMode: String, CaseIterable {
         switch self {
         case .quick: return 30
         case .standard: return 120    // 2 min
-        case .thorough: return 300    // 5 min max, exits early on steady state
+        case .optimized: return 300   // 5 min max, exits early on steady state
         }
     }
 
     /// Whether to use steady-state detection to exit phases early
     public var usesSteadyStateDetection: Bool {
-        self == .thorough
+        self == .optimized
+    }
+}
+
+/// What to stress during calibration
+public enum CalibrationStressType: String, CaseIterable {
+    /// CPU + GPU simultaneously — real-world worst case (default)
+    case combined
+    /// CPU only — isolates CPU thermal contribution
+    case cpu
+    /// GPU only — isolates GPU thermal contribution (Metal compute)
+    case gpu
+
+    public var description: String {
+        switch self {
+        case .combined: return "CPU + GPU (recommended)"
+        case .cpu: return "CPU only"
+        case .gpu: return "GPU only"
+        }
     }
 }
 
@@ -192,6 +231,7 @@ public enum CalibrationMode: String, CaseIterable {
 public final class CalibrationRunner {
     private let fanControl: FanControl
     private let mode: CalibrationMode
+    private let stressType: CalibrationStressType
     private var stressThreads: [Thread] = []
     private var stressRunning = false
     private let isoFormatter = ISO8601DateFormatter()
@@ -204,9 +244,16 @@ public final class CalibrationRunner {
     // CSV log handle — written to in real time during calibration
     private var csvHandle: FileHandle?
 
-    public init(fanControl: FanControl, mode: CalibrationMode = .standard) {
+    public init(fanControl: FanControl, mode: CalibrationMode = .standard, stressType: CalibrationStressType = .combined) {
         self.fanControl = fanControl
         self.mode = mode
+        self.stressType = stressType
+    }
+
+    /// Check if running this mode would downgrade existing calibration
+    public static func wouldDowngrade(mode: CalibrationMode) -> Bool {
+        guard let existing = CalibrationData.load() else { return false }
+        return mode.rank < existing.modeRank
     }
 
     /// Run full calibration. Blocks until complete.
@@ -224,6 +271,7 @@ public final class CalibrationRunner {
         let machine = String(cString: modelBuf)
 
         log("Mode: \(mode.description)")
+        log("Stress: \(stressType.description)")
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -294,6 +342,7 @@ public final class CalibrationRunner {
             maxRPM: Int(maxRPM),
             minRPM: Int(minRPM),
             calibratedAt: isoFormatter.string(from: Date()),
+            mode: mode.rawValue,
             measurements: measurements
         )
     }
@@ -309,24 +358,28 @@ public final class CalibrationRunner {
         stressRunning = true
 
         // CPU stress: saturate all cores
-        let coreCount = ProcessInfo.processInfo.activeProcessorCount
-        for _ in 0..<coreCount {
-            let thread = Thread {
-                while self.stressRunning {
-                    var x: Double = 1.0
-                    for i in 1...10000 {
-                        x = sin(x) * cos(Double(i))
+        if stressType == .combined || stressType == .cpu {
+            let coreCount = ProcessInfo.processInfo.activeProcessorCount
+            for _ in 0..<coreCount {
+                let thread = Thread {
+                    while self.stressRunning {
+                        var x: Double = 1.0
+                        for i in 1...10000 {
+                            x = sin(x) * cos(Double(i))
+                        }
+                        _ = x
                     }
-                    _ = x
                 }
+                thread.qualityOfService = .userInteractive
+                thread.start()
+                stressThreads.append(thread)
             }
-            thread.qualityOfService = .userInteractive
-            thread.start()
-            stressThreads.append(thread)
         }
 
         // GPU stress: Metal compute shader doing dense floating point math
-        startGPUStress()
+        if stressType == .combined || stressType == .gpu {
+            startGPUStress()
+        }
     }
 
     private func startGPUStress() {

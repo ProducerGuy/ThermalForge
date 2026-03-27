@@ -358,7 +358,7 @@ struct CalibrationView: View {
         Picker("Mode", selection: $state.selectedMode) {
             Text("Quick (~10 min)").tag(CalibrationMode.quick)
             Text("Standard (~28 min)").tag(CalibrationMode.standard)
-            Text("Thorough (until stable)").tag(CalibrationMode.thorough)
+            Text("Optimized (until stable)").tag(CalibrationMode.optimized)
         }
         .pickerStyle(.inline)
         .labelsHidden()

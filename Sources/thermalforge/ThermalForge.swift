@@ -280,8 +280,11 @@ struct Calibrate: ParsableCommand {
         abstract: "Measure this machine's thermal characteristics for the Smart profile"
     )
 
-    @Option(name: .shortAndLong, help: "Calibration mode: quick (~10 min), standard (~28 min), thorough (until stable)")
+    @Option(name: .shortAndLong, help: "Calibration mode: quick (~10 min), standard (~28 min), optimized (until stable)")
     var mode: String = "standard"
+
+    @Option(name: .shortAndLong, help: "Stress type: combined (CPU+GPU, default), cpu, gpu")
+    var stress: String = "combined"
 
     func run() throws {
         guard geteuid() == 0 else {
@@ -289,24 +292,40 @@ struct Calibrate: ParsableCommand {
         }
 
         guard let calMode = CalibrationMode(rawValue: mode) else {
-            throw ValidationError("Unknown mode '\(mode)'. Options: quick, standard, thorough")
+            throw ValidationError("Unknown mode '\(mode)'. Options: quick, standard, optimized")
+        }
+
+        guard let calStress = CalibrationStressType(rawValue: stress) else {
+            throw ValidationError("Unknown stress type '\(stress)'. Options: combined, cpu, gpu")
+        }
+
+        // Prevent downgrade
+        if CalibrationRunner.wouldDowngrade(mode: calMode) {
+            let existing = CalibrationData.load()
+            let existingMode = existing?.mode ?? "unknown"
+            throw ValidationError(
+                "Existing calibration was run at '\(existingMode)' level. " +
+                "Running '\(mode)' would downgrade your data. " +
+                "Use --mode \(existingMode) or higher."
+            )
         }
 
         print("ThermalForge Calibration")
         print("========================")
         print("Mode: \(calMode.description)")
+        print("Stress: \(calStress.description)")
         print("")
-        print("This will stress your CPU and measure thermal response at 4 fan speed levels.")
+        print("This will stress your \(calStress == .combined ? "CPU and GPU" : calStress == .cpu ? "CPU" : "GPU") and measure thermal response at 4 fan speed levels.")
         print("Fans will be loud during the test.")
         print("")
-        print("DISCLAIMER: Calibration pushes your CPU to full load and cycles fan speeds.")
-        print("This is within normal operating parameters for your Mac, but ThermalForge is")
-        print("provided as-is with no warranty. Use at your own risk.")
+        print("DISCLAIMER: Calibration pushes your Mac to full load and cycles fan speeds.")
+        print("This is within normal operating parameters but ThermalForge is provided")
+        print("as-is with no warranty. Use at your own risk.")
         print("")
         print("Press Ctrl-C at any time to stop. Fans will reset to Apple defaults.\n")
 
         let fc = try FanControl()
-        let runner = CalibrationRunner(fanControl: fc, mode: calMode)
+        let runner = CalibrationRunner(fanControl: fc, mode: calMode, stressType: calStress)
 
         // Kill switch: Ctrl-C resets fans and exits cleanly
         signal(SIGINT) { _ in
