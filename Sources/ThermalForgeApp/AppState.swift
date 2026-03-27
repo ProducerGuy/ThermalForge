@@ -30,6 +30,11 @@ final class AppState: ObservableObject {
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
+
+        // Clean state: reset fans to auto on every launch.
+        // Prevents stale manual settings from a previous crash.
+        try? executor.execute(.resetAuto)
+
         calibrationState.onComplete = { [weak self] in
             self?.activeProfile = .smart
             self?.monitor?.switchProfile(.smart)
