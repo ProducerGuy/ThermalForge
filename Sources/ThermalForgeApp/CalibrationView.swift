@@ -302,6 +302,8 @@ struct CalibrationView: View {
 
             modePicker
 
+            disclaimerText
+
             Button(action: {
                 state.showPrompt = false
                 state.start()
@@ -333,6 +335,8 @@ struct CalibrationView: View {
 
             modePicker
 
+            disclaimerText
+
             Button(action: { state.start() }) {
                 Label("Start Calibration", systemImage: "gauge.with.dots.needle.33percent")
                     .frame(maxWidth: .infinity)
@@ -341,6 +345,13 @@ struct CalibrationView: View {
             .tint(.orange)
             .padding(.horizontal, 12)
         }
+    }
+
+    private var disclaimerText: some View {
+        Text("This will push your CPU to full load and cycle fan speeds. Within normal operating parameters but use at your own risk. Press Stop at any time to cancel safely.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 12)
     }
 
     private var modePicker: some View {
