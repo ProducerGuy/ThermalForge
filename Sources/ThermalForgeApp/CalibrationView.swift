@@ -59,15 +59,20 @@ final class CalibrationState: ObservableObject {
     }
 
     func stop() {
-        task?.cancel()
-        timerTask?.cancel()
-
-        // Kill all stress threads immediately
+        // Kill stress threads first — this is the most important step
         activeStressFlag?.stop()
         activeStressFlag = nil
 
-        // Reset fans to Apple defaults
+        // Cancel async tasks
+        task?.cancel()
+        timerTask?.cancel()
+
+        // Reset fans to Apple defaults — try twice for safety
         try? executor.execute(.resetAuto)
+        let retryExecutor = PrivilegedExecutor()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            try? retryExecutor.execute(.resetAuto)
+        }
 
         isRunning = false
         phase = "Stopped"
@@ -256,11 +261,20 @@ final class CalibrationState: ObservableObject {
     }
 }
 
-// Thread-safe stress control
+// Thread-safe stress control using atomic-like access
 final class StressFlag: @unchecked Sendable {
+    private let lock = NSLock()
     private var _running = true
-    var running: Bool { _running }
-    func stop() { _running = false }
+    var running: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _running
+    }
+    func stop() {
+        lock.lock()
+        _running = false
+        lock.unlock()
+    }
 }
 
 // Decodable for daemon status JSON (snake_case)

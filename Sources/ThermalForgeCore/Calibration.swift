@@ -233,7 +233,12 @@ public final class CalibrationRunner {
     private let mode: CalibrationMode
     private let stressType: CalibrationStressType
     private var stressThreads: [Thread] = []
-    private var stressRunning = false
+    private let stressLock = NSLock()
+    private var _stressRunning = false
+    private var stressRunning: Bool {
+        get { stressLock.lock(); defer { stressLock.unlock() }; return _stressRunning }
+        set { stressLock.lock(); _stressRunning = newValue; stressLock.unlock() }
+    }
     private let isoFormatter = ISO8601DateFormatter()
 
     public var onProgress: ((String) -> Void)?
@@ -474,9 +479,10 @@ public final class CalibrationRunner {
 
     private func stopStress() {
         stressRunning = false
+        // Wait for threads to notice the flag and exit
+        Thread.sleep(forTimeInterval: 2)
         stressThreads.removeAll()
-        Thread.sleep(forTimeInterval: 1)
-        // Release Metal resources
+        // Release Metal resources — stops GPU dispatches
         gpuBuffer = nil
         gpuPipeline = nil
         gpuQueue = nil

@@ -9,7 +9,7 @@
 import Foundation
 import ThermalForgeCore
 
-final class PrivilegedExecutor {
+final class PrivilegedExecutor: @unchecked Sendable {
     private let client = DaemonClient()
 
     func execute(_ command: FanCommand) throws {
