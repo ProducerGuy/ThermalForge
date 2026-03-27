@@ -5,6 +5,7 @@
 //  In-app calibration UI with progress, live temp, and stop button.
 //
 
+@preconcurrency import Metal
 import SwiftUI
 import ThermalForgeCore
 
@@ -79,18 +80,31 @@ final class CalibrationState: ObservableObject {
 
     private func runCalibration() async {
         let client = DaemonClient()
-        let rpmLevels: [(pct: Float, label: String)] = [
-            (0.25, "25%"), (0.50, "50%"), (0.75, "75%"), (1.00, "100%")
-        ]
+        let mode = selectedMode
 
-        // Get max RPM from status
+        // Get fan range from status
         var maxRPM: Float = 7826
+        var minRPM: Float = 2317
         if let response = try? client.send("status"),
            let data = response.data(using: .utf8),
            let status = try? JSONDecoder().decode(StatusResponse.self, from: data),
            let fan = status.fans.first {
             maxRPM = Float(fan.maxRPM)
+            minRPM = Float(fan.minRPM)
         }
+
+        // Calculate RPM levels — ensure none are below machine minimum
+        let rpmLevels: [(pct: Float, label: String)] = ([Float(0.25), 0.50, 0.75, 1.00]).map { pct in
+            let targetRPM = maxRPM * pct
+            if targetRPM < minRPM {
+                let adjustedPct = minRPM / maxRPM
+                return (adjustedPct, "\(Int(adjustedPct * 100))% (min)")
+            }
+            return (pct, "\(Int(pct * 100))%")
+        }
+
+        let heatTicks = mode.heatSeconds / 2
+        let coolTicks = mode.coolSeconds / 2
 
         var measurements: [CalibrationData.Measurement] = []
         let isoFormatter = ISO8601DateFormatter()
@@ -130,9 +144,9 @@ final class CalibrationState: ObservableObject {
             await MainActor.run { activeStressFlag = stressFlag }
             startStress(flag: stressFlag)
 
-            // Sample heating for 30 seconds
+            // Sample heating
             var heatingReadings: [Float] = []
-            for _ in 0..<15 {
+            for _ in 0..<heatTicks {
                 guard !Task.isCancelled else {
                     stressFlag.stop()
                     break
@@ -166,7 +180,7 @@ final class CalibrationState: ObservableObject {
             }
 
             var coolingReadings: [Float] = []
-            for _ in 0..<10 {
+            for _ in 0..<coolTicks {
                 guard !Task.isCancelled else { break }
                 let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
                 coolingReadings.append(peak)
@@ -200,19 +214,17 @@ final class CalibrationState: ObservableObject {
 
         // Get fan info for calibration data
         var fanCount = 2
-        var minRPM = 0
         if let response = try? client.send("status"),
            let data = response.data(using: .utf8),
            let status = try? JSONDecoder().decode(StatusResponse.self, from: data) {
             fanCount = status.fans.count
-            minRPM = status.fans.first?.minRPM ?? 0
         }
 
         let calibration = CalibrationData(
             machine: machine,
             fans: fanCount,
             maxRPM: Int(maxRPM),
-            minRPM: minRPM,
+            minRPM: Int(minRPM),
             calibratedAt: isoFormatter.string(from: Date()),
             measurements: measurements
         )
@@ -253,7 +265,13 @@ final class CalibrationState: ObservableObject {
         return (readings.last! - readings.first!) / Float(readings.count - 1) / 2.0
     }
 
+    private var gpuPipeline: MTLComputePipelineState?
+    private var gpuQueue: MTLCommandQueue?
+    private var gpuBuffer: MTLBuffer?
+    private var gpuElementCount: Int = 0
+
     private func startStress(flag: StressFlag) {
+        // CPU stress: saturate all cores
         let coreCount = ProcessInfo.processInfo.activeProcessorCount
         for _ in 0..<coreCount {
             Thread.detachNewThread {
@@ -262,6 +280,59 @@ final class CalibrationState: ObservableObject {
                     for i in 1...10000 { x = sin(x) * cos(Double(i)) }
                     _ = x
                 }
+            }
+        }
+
+        // GPU stress: Metal compute shader
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let shaderSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void stress(device float *data [[buffer(0)]],
+                          uint id [[thread_position_in_grid]]) {
+            float x = data[id];
+            for (int i = 0; i < 2000; i++) {
+                x = sin(x) * cos(x) + tan(x * 0.01);
+                x = fma(x, x, float(i) * 0.001);
+                x = sqrt(abs(x) + 1.0);
+            }
+            data[id] = x;
+        }
+        """
+
+        guard let library = try? device.makeLibrary(source: shaderSource, options: nil),
+              let function = library.makeFunction(name: "stress"),
+              let pipeline = try? device.makeComputePipelineState(function: function),
+              let queue = device.makeCommandQueue()
+        else { return }
+
+        let elementCount = 1024 * 1024 * 4
+        guard let buffer = device.makeBuffer(length: elementCount * MemoryLayout<Float>.stride, options: .storageModeShared)
+        else { return }
+
+        let ptr = buffer.contents().bindMemory(to: Float.self, capacity: elementCount)
+        for i in 0..<elementCount { ptr[i] = Float(i % 1000) * 0.001 }
+
+        self.gpuPipeline = pipeline
+        self.gpuQueue = queue
+        self.gpuBuffer = buffer
+        self.gpuElementCount = elementCount
+
+        let threadGroupSize = MTLSize(width: pipeline.maxTotalThreadsPerThreadgroup, height: 1, depth: 1)
+        let gridSize = MTLSize(width: elementCount, height: 1, depth: 1)
+
+        Thread.detachNewThread {
+            while flag.running {
+                guard let commandBuffer = queue.makeCommandBuffer(),
+                      let encoder = commandBuffer.makeComputeCommandEncoder()
+                else { continue }
+                encoder.setComputePipelineState(pipeline)
+                encoder.setBuffer(buffer, offset: 0, index: 0)
+                encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+                encoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
             }
         }
     }

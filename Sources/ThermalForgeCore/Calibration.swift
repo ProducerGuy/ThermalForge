@@ -291,12 +291,21 @@ public final class CalibrationRunner {
         // CSV header
         csvWrite("timestamp,phase,rpm_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c,stress_active")
 
-        let rpmLevels: [Float] = [0.25, 0.50, 0.75, 1.00]
+        // Calculate RPM levels — ensure none go below machine minimum
+        let rpmLevels: [(pct: Float, label: String)] = ([0.25, 0.50, 0.75, 1.00] as [Float]).map { pct in
+            let targetRPM = maxRPM * pct
+            if targetRPM < minRPM {
+                let adjusted = minRPM / maxRPM
+                return (adjusted, "\(Int(adjusted * 100))% (min)")
+            }
+            return (pct, "\(Int(pct * 100))%")
+        }
         var measurements: [CalibrationData.Measurement] = []
 
-        for pct in rpmLevels {
+        for level in rpmLevels {
+            let pct = level.pct
             let targetRPM = maxRPM * pct
-            let label = "\(Int(pct * 100))%"
+            let label = level.label
 
             // Phase A: Heat — stress CPU at fixed fan speed
             log("[\(label)] Heating with fans at \(Int(targetRPM)) RPM...")
