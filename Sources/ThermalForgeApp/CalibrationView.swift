@@ -135,16 +135,25 @@ final class CalibrationState: ObservableObject {
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
 
+        var daemonDied = false
+        var consecutiveZeros = 0
+
         for (_, level) in rpmLevels.enumerated() {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled && !daemonDied else { break }
 
             let targetRPM = Int(maxRPM * level.pct)
             await MainActor.run {
                 phase = "[\(level.label)] Heating at \(targetRPM) RPM"
             }
 
-            // Set fan speed
-            try? client.execute(.setRPM(Float(targetRPM)))
+            // Set fan speed — abort if daemon unreachable
+            do {
+                try client.execute(.setRPM(Float(targetRPM)))
+            } catch {
+                TFLogger.shared.error("Daemon unreachable during calibration: \(error)")
+                await MainActor.run { phase = "ERROR: Daemon not responding" }
+                break
+            }
 
             // Start stress threads — store flag so stop() can kill them
             let stressFlag = StressFlag()
@@ -159,6 +168,21 @@ final class CalibrationState: ObservableObject {
                     break
                 }
                 let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
+
+                // Daemon unreachable check — zero readings mean no data
+                if peak == 0 && cpuT == 0 && gpuT == 0 {
+                    consecutiveZeros += 1
+                    if consecutiveZeros >= 3 {
+                        stressFlag.stop()
+                        TFLogger.shared.error("Daemon unreachable during calibration — aborting")
+                        await MainActor.run { phase = "ERROR: Daemon not responding" }
+                        daemonDied = true
+                        break
+                    }
+                } else {
+                    consecutiveZeros = 0
+                }
+
                 heatingReadings.append(peak)
                 await MainActor.run { currentTemp = peak }
                 csvWrite("\(isoFormatter.string(from: Date())),heating,\(String(format: "%.2f", level.pct)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT)),true")
