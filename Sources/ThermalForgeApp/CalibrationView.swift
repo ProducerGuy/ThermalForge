@@ -67,12 +67,8 @@ final class CalibrationState: ObservableObject {
         task?.cancel()
         timerTask?.cancel()
 
-        // Reset fans to Apple defaults — try twice for safety
+        // Reset fans to Apple defaults
         try? executor.execute(.resetAuto)
-        let retryExecutor = PrivilegedExecutor()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            try? retryExecutor.execute(.resetAuto)
-        }
 
         isRunning = false
         phase = "Stopped"
