@@ -90,10 +90,24 @@ Apple doesn't do this because silence sells in store demos and most users never 
 For best results, calibrate Smart to your specific machine:
 
 ```bash
-sudo thermalforge calibrate
+sudo thermalforge calibrate                    # Standard (~28 min)
+sudo thermalforge calibrate --mode quick       # Quick (~10 min)
+sudo thermalforge calibrate --mode thorough    # Until stable (~35-50 min)
 ```
 
-This takes about 4 minutes. It stress-tests your CPU at different fan speeds and measures how your machine heats and cools. The results are saved permanently and Smart uses them from then on.
+Calibration stresses both CPU and GPU simultaneously using Metal compute shaders — the same combined-load approach used by [Notebookcheck](https://www.notebookcheck.net) (Prime95 + FurMark) and [Gamers Nexus](https://gamersnexus.net/guides/3561-cpu-cooler-testing-methodology-most-tests-are-flawed) for thermal testing. On Apple Silicon, CPU and GPU share the same die and unified memory, so combined stress is the only way to capture real-world worst-case thermal behavior.
+
+At each of 4 fan speed levels (25%, 50%, 75%, 100%), calibration measures how fast the machine heats, where temperature stabilizes, and how fast it cools. Results are saved permanently.
+
+### Calibration modes
+
+| Mode | Time | What it does |
+|---|---|---|
+| **Quick** | ~10 min | 2 min heat + 30s cool per level. Reaches ~75% of steady state. Good baseline. |
+| **Standard** | ~28 min | 5 min heat + 2 min cool per level. Reaches ~95% of steady state. Recommended. |
+| **Thorough** | ~35-50 min | Runs until temperature stabilizes (<0.5°C change over 60s). Guaranteed steady state. Best data. |
+
+Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Three time constants (5 min) reaches 95% of steady state. Five time constants (10 min) reaches 99.3%. Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's 5-minute heating phase.
 
 **Smart works without calibration** — it uses a conservative default curve. Calibration makes it precise for your hardware.
 

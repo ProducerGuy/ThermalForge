@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Metal
 
 // MARK: - Data Model
 
@@ -297,12 +298,17 @@ public final class CalibrationRunner {
         )
     }
 
-    // MARK: - Stress
+    // MARK: - Stress (CPU + GPU combined)
+    //
+    // Combined stress matches real-world worst case on Apple Silicon where
+    // CPU, GPU, and Neural Engine share the same die and unified memory.
+    // This is the Notebookcheck standard (Prime95 + FurMark simultaneously).
 
     private func startStress() {
         guard !stressRunning else { return }
         stressRunning = true
 
+        // CPU stress: saturate all cores
         let coreCount = ProcessInfo.processInfo.activeProcessorCount
         for _ in 0..<coreCount {
             let thread = Thread {
@@ -318,12 +324,110 @@ public final class CalibrationRunner {
             thread.start()
             stressThreads.append(thread)
         }
+
+        // GPU stress: Metal compute shader doing dense floating point math
+        startGPUStress()
+    }
+
+    private func startGPUStress() {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            log("Warning: Metal device not available, running CPU-only stress")
+            return
+        }
+
+        // Compile a compute shader at runtime that does dense FP32 math
+        let shaderSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        kernel void stress(device float *data [[buffer(0)]],
+                          uint id [[thread_position_in_grid]]) {
+            float x = data[id];
+            for (int i = 0; i < 2000; i++) {
+                x = sin(x) * cos(x) + tan(x * 0.01);
+                x = fma(x, x, float(i) * 0.001);
+                x = sqrt(abs(x) + 1.0);
+            }
+            data[id] = x;
+        }
+        """
+
+        guard let library = try? device.makeLibrary(source: shaderSource, options: nil),
+              let function = library.makeFunction(name: "stress"),
+              let pipeline = try? device.makeComputePipelineState(function: function),
+              let queue = device.makeCommandQueue()
+        else {
+            log("Warning: Metal pipeline setup failed, running CPU-only stress")
+            return
+        }
+
+        // Allocate a large buffer to keep the GPU busy
+        let elementCount = 1024 * 1024 * 4 // 4M floats = 16MB
+        let bufferSize = elementCount * MemoryLayout<Float>.stride
+        guard let buffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
+            log("Warning: Metal buffer allocation failed, running CPU-only stress")
+            return
+        }
+
+        // Fill with initial values
+        let ptr = buffer.contents().bindMemory(to: Float.self, capacity: elementCount)
+        for i in 0..<elementCount {
+            ptr[i] = Float(i % 1000) * 0.001
+        }
+
+        self.gpuDevice = device
+        self.gpuPipeline = pipeline
+        self.gpuQueue = queue
+        self.gpuBuffer = buffer
+        self.gpuElementCount = elementCount
+
+        // Run GPU dispatches on a background thread
+        let thread = Thread {
+            self.gpuStressLoop()
+        }
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        stressThreads.append(thread)
+    }
+
+    private var gpuDevice: MTLDevice?
+    private var gpuPipeline: MTLComputePipelineState?
+    private var gpuQueue: MTLCommandQueue?
+    private var gpuBuffer: MTLBuffer?
+    private var gpuElementCount: Int = 0
+
+    private func gpuStressLoop() {
+        guard let pipeline = gpuPipeline,
+              let queue = gpuQueue,
+              let buffer = gpuBuffer
+        else { return }
+
+        let threadGroupSize = MTLSize(width: pipeline.maxTotalThreadsPerThreadgroup, height: 1, depth: 1)
+        let gridSize = MTLSize(width: gpuElementCount, height: 1, depth: 1)
+
+        while stressRunning {
+            guard let commandBuffer = queue.makeCommandBuffer(),
+                  let encoder = commandBuffer.makeComputeCommandEncoder()
+            else { continue }
+
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
+            encoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
     }
 
     private func stopStress() {
         stressRunning = false
         stressThreads.removeAll()
         Thread.sleep(forTimeInterval: 1)
+        // Release Metal resources
+        gpuBuffer = nil
+        gpuPipeline = nil
+        gpuQueue = nil
+        gpuDevice = nil
     }
 
     // MARK: - Sampling

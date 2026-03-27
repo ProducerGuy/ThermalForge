@@ -11,7 +11,10 @@ let package = Package(
     targets: [
         .target(
             name: "ThermalForgeCore",
-            path: "Sources/ThermalForgeCore"
+            path: "Sources/ThermalForgeCore",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+            ]
         ),
         .executableTarget(
             name: "thermalforge",
