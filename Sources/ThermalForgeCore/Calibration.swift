@@ -364,26 +364,34 @@ public final class CalibrationRunner {
             try fanControl.setAllFans(rpm: targetRPM)
             startStress()
 
-            let heatingReadings = samplePhase(
+            let heatingResult = samplePhase(
                 maxSeconds: mode.heatSeconds,
                 phase: "heating", rpmPct: pct, stressActive: true
             )
-            let heatingRate = rateFromReadings(heatingReadings)
-            let steadyState = heatingReadings.last ?? 0
 
-            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, temp: \(String(format: "%.1f", steadyState))°C (\(heatingReadings.count * 2)s)")
+            // If safety triggered, discard this level entirely
+            stopStress()
+            if heatingResult.safetyTriggered {
+                log("[\(label)] Level discarded — safety override triggered")
+                Thread.sleep(forTimeInterval: 5)
+                continue
+            }
+
+            let heatingRate = rateFromReadings(heatingResult.readings)
+            let steadyState = heatingResult.readings.last ?? 0
+
+            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, temp: \(String(format: "%.1f", steadyState))°C (\(heatingResult.readings.count * 2)s)")
 
             // Phase B: Cool — stop stress, keep fans at same speed
-            stopStress()
             log("[\(label)] Cooling at \(Int(targetRPM)) RPM...")
 
-            let coolingReadings = samplePhase(
+            let coolingResult = samplePhase(
                 maxSeconds: mode.coolSeconds,
                 phase: "cooling", rpmPct: pct, stressActive: false
             )
-            let coolingRate = rateFromReadings(coolingReadings)
+            let coolingRate = rateFromReadings(coolingResult.readings)
 
-            log("[\(label)] Cooling rate: \(String(format: "%.2f", coolingRate))°C/s (\(coolingReadings.count * 2)s)")
+            log("[\(label)] Cooling rate: \(String(format: "%.2f", coolingRate))°C/s (\(coolingResult.readings.count * 2)s)")
 
             measurements.append(CalibrationData.Measurement(
                 rpmPercent: pct,
@@ -554,8 +562,9 @@ public final class CalibrationRunner {
 
     /// Sample for up to maxSeconds. In Optimized mode, exits early if steady state detected.
     /// Steady state: temperature change <0.5°C over the last 60 seconds (30 readings).
-    private func samplePhase(maxSeconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> [Float] {
+    private func samplePhase(maxSeconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> (readings: [Float], safetyTriggered: Bool) {
         var readings: [Float] = []
+        var safetyHit = false
         let maxTicks = maxSeconds / 2
 
         for tick in 0..<maxTicks {
@@ -577,10 +586,11 @@ public final class CalibrationRunner {
 
                 // Safety override: 95°C — stop stress, max fans, cool down
                 if stressActive && peakTemp >= 95.0 {
-                    log("  SAFETY: \(String(format: "%.0f", peakTemp))°C — stopping stress, maxing fans")
+                    log("  SAFETY: \(String(format: "%.0f", peakTemp))°C — stopping stress, maxing fans, level discarded")
                     stopStress()
                     try? fanControl.setMax()
                     Thread.sleep(forTimeInterval: 10)
+                    safetyHit = true
                     break
                 }
 
@@ -598,7 +608,7 @@ public final class CalibrationRunner {
             }
             Thread.sleep(forTimeInterval: 2)
         }
-        return readings
+        return (readings, safetyHit)
     }
 
     private func rateFromReadings(_ readings: [Float]) -> Float {

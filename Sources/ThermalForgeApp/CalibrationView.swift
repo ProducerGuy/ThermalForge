@@ -146,6 +146,8 @@ final class CalibrationState: ObservableObject {
                 phase = "[\(level.label)] Heating at \(targetRPM) RPM"
             }
 
+            var safetyTriggered = false
+
             // Set fan speed — abort if daemon unreachable
             do {
                 try client.execute(.setRPM(Float(targetRPM)))
@@ -191,8 +193,10 @@ final class CalibrationState: ObservableObject {
                 if peak >= 95.0 {
                     stressFlag.stop()
                     try? client.execute(.setMax)
-                    await MainActor.run { phase = "SAFETY: \(String(format: "%.0f", peak))°C — fans maxed, stress stopped" }
-                    try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s cooldown
+                    TFLogger.shared.safety("Calibration safety override at \(String(format: "%.0f", peak))°C — level \(level.label) discarded")
+                    await MainActor.run { phase = "SAFETY: \(String(format: "%.0f", peak))°C — level discarded" }
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    safetyTriggered = true
                     break
                 }
 
@@ -222,12 +226,15 @@ final class CalibrationState: ObservableObject {
 
             let coolingRate = rate(from: coolingReadings)
 
-            measurements.append(CalibrationData.Measurement(
-                rpmPercent: level.pct,
-                coolingRate: coolingRate,
-                heatingRate: heatingRate,
-                steadyState: steadyState
-            ))
+            // Only save this level's data if safety didn't trigger
+            if !safetyTriggered {
+                measurements.append(CalibrationData.Measurement(
+                    rpmPercent: level.pct,
+                    coolingRate: coolingRate,
+                    heatingRate: heatingRate,
+                    steadyState: steadyState
+                ))
+            }
 
             // Brief pause
             try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -239,7 +246,16 @@ final class CalibrationState: ObservableObject {
         try? client.execute(.resetAuto)
         await MainActor.run { activeStressFlag = nil }
 
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled else { return }
+
+        // If all levels were discarded by safety, don't save
+        guard !measurements.isEmpty else {
+            TFLogger.shared.calibration("All levels hit safety threshold — no calibration data saved")
+            await MainActor.run {
+                timerTask?.cancel()
+                phase = "Failed — all levels hit 95°C"
+                isRunning = false
+            }
             return
         }
 
