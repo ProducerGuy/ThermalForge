@@ -133,7 +133,7 @@ Yes, at the same level or higher. Calibration data can't be downgraded — if yo
 Yes. If you initially ran Quick, running Standard or Optimized will replace it with better data.
 
 **What if I stop calibration early?**
-Press Ctrl-C. Fans reset to Apple defaults immediately. No calibration data is saved. Smart continues to work with the default curve.
+Press the Stop button in the app or Ctrl-C in the terminal. Stress threads are killed immediately, fans reset to Apple defaults. No calibration data is saved. Smart continues to work with the default curve.
 
 **What if ThermalForge closes during normal use?**
 The background daemon keeps running with the last fan setting. On next launch, Smart picks up your calibration data and resumes.

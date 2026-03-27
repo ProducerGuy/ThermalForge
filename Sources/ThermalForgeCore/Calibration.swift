@@ -491,7 +491,7 @@ public final class CalibrationRunner {
 
     // MARK: - Sampling
 
-    /// Sample for up to maxSeconds. In Thorough mode, exits early if steady state detected.
+    /// Sample for up to maxSeconds. In Optimized mode, exits early if steady state detected.
     /// Steady state: temperature change <0.5°C over the last 60 seconds (30 readings).
     private func samplePhase(maxSeconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> [Float] {
         var readings: [Float] = []
@@ -514,7 +514,7 @@ public final class CalibrationRunner {
                 let ts = isoFormatter.string(from: Date())
                 csvWrite("\(ts),\(phase),\(String(format: "%.2f", rpmPct)),\(fan0),\(fan1),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp)),\(stressActive)")
 
-                // Steady-state detection for Thorough mode
+                // Steady-state detection for Optimized mode
                 // Check after at least 60 seconds (30 readings at 2s intervals)
                 if mode.usesSteadyStateDetection && readings.count >= 30 {
                     let recent = readings.suffix(30)
