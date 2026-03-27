@@ -38,7 +38,14 @@ public final class ThermalMonitor {
     // Smart profile state
     private var tempHistory: [Float] = []
     private var lastSmartRPMPercent: Float = 0
-    private var calibration: CalibrationData? = CalibrationData.load()
+    private var calibration: CalibrationData? = {
+        guard let data = CalibrationData.load() else { return nil }
+        if let error = data.validationError {
+            TFLogger.shared.error("Calibration data rejected: \(error)")
+            return nil
+        }
+        return data
+    }()
 
     /// Called on every poll with updated status
     public var onUpdate: ((ThermalStatus, FanProfile, MonitorState) -> Void)?
@@ -86,7 +93,13 @@ public final class ThermalMonitor {
                 // Reset Smart state and reload calibration data
                 tempHistory.removeAll()
                 lastSmartRPMPercent = 0
-                calibration = CalibrationData.load()
+                let loaded = CalibrationData.load()
+                if let error = loaded?.validationError {
+                    TFLogger.shared.error("Calibration data rejected on reload: \(error)")
+                    calibration = nil
+                } else {
+                    calibration = loaded
+                }
                 state = .idle
             } else if profile.id == "max" {
                 state = .active(profileName: "Max")
@@ -117,6 +130,7 @@ public final class ThermalMonitor {
             if state != .safetyOverride {
                 applyCommand(.setMax)
                 state = .safetyOverride
+                TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
             onUpdate?(status, activeProfile, state)
             return

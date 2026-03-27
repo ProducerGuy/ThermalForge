@@ -57,6 +57,47 @@ public struct CalibrationData: Codable {
         }
     }
 
+    /// Validate that calibration data is physically consistent.
+    /// Returns nil if valid, or a description of what's wrong.
+    public var validationError: String? {
+        guard !measurements.isEmpty else {
+            return "No measurements"
+        }
+
+        for m in measurements {
+            // Heating rate should be positive (temps rise under load)
+            if m.heatingRate <= 0 {
+                return "Heating rate \(m.heatingRate) at \(Int(m.rpmPercent * 100))% is not positive"
+            }
+            // Cooling rate should be negative (temps drop without load)
+            if m.coolingRate >= 0 {
+                return "Cooling rate \(m.coolingRate) at \(Int(m.rpmPercent * 100))% is not negative"
+            }
+            // Steady state should be in a sane range
+            if m.steadyState < 20 || m.steadyState > 105 {
+                return "Steady state \(m.steadyState)°C at \(Int(m.rpmPercent * 100))% is out of range (20-105°C)"
+            }
+            // Heating rate shouldn't be insane
+            if m.heatingRate > 5 {
+                return "Heating rate \(m.heatingRate)°C/s at \(Int(m.rpmPercent * 100))% is unreasonably high"
+            }
+        }
+
+        // Steady-state temps should generally decrease as RPM increases
+        // (more fan = more cooling = lower steady state)
+        let sorted = measurements.sorted { $0.rpmPercent < $1.rpmPercent }
+        for i in 0..<(sorted.count - 1) {
+            if sorted[i + 1].steadyState > sorted[i].steadyState + 5 {
+                // Allow small inversions (noise) but not large ones
+                return "Steady state increases from \(Int(sorted[i].rpmPercent * 100))% to \(Int(sorted[i + 1].rpmPercent * 100))% — data inconsistent"
+            }
+        }
+
+        return nil
+    }
+
+    public var isValid: Bool { validationError == nil }
+
     /// Interpolate the RPM percentage needed to hold a target temperature under load.
     /// Returns nil if calibration data can't answer the question.
     public func rpmPercentForTarget(_ targetTemp: Float) -> Float? {

@@ -73,6 +73,7 @@ final class CalibrationState: ObservableObject {
 
         isRunning = false
         phase = "Stopped"
+        TFLogger.shared.calibration("Stopped by user — stress killed, fans reset")
 
         // Notify so AppState can reset profile to Silent
         onStop?()

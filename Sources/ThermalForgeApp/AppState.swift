@@ -34,6 +34,7 @@ final class AppState: ObservableObject {
         // Clean state: reset fans to auto on every launch.
         // Prevents stale manual settings from a previous crash.
         try? executor.execute(.resetAuto)
+        TFLogger.shared.info("App launched — fans reset to auto")
 
         calibrationState.onComplete = { [weak self] in
             self?.activeProfile = .smart
@@ -87,30 +88,30 @@ final class AppState: ObservableObject {
     // MARK: - Actions
 
     func setSmart() {
-        NSLog("ThermalForge: Smart button pressed")
         if !CalibrationData.exists && !calibrationState.isComplete {
-            // No calibration data — prompt user
             calibrationState.showPrompt = true
+            TFLogger.shared.profile("Smart requested — no calibration data, showing prompt")
         } else {
             activeProfile = .smart
             monitor?.switchProfile(.smart)
+            TFLogger.shared.profile("Smart activated" + (CalibrationData.exists ? " (calibrated)" : " (default curve)"))
         }
     }
 
     func activateSmartAfterSkip() {
-        NSLog("ThermalForge: Smart activated with default curve (calibration skipped)")
         activeProfile = .smart
         monitor?.switchProfile(.smart)
+        TFLogger.shared.profile("Smart activated with default curve (calibration skipped)")
     }
 
     func resetAuto() {
-        NSLog("ThermalForge: resetAuto button pressed")
         do {
             try executor.execute(.resetAuto)
             activeProfile = .silent
             monitor?.switchProfile(.silent)
+            TFLogger.shared.profile("Reset to Default (Silent)")
         } catch {
-            NSLog("ThermalForge: resetAuto failed: %@", "\(error)")
+            TFLogger.shared.error("Reset to Default failed: \(error)")
         }
     }
 
