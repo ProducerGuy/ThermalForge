@@ -62,12 +62,19 @@ final class CalibrationState: ObservableObject {
         task?.cancel()
         timerTask?.cancel()
 
+        // Kill all stress threads immediately
+        activeStressFlag?.stop()
+        activeStressFlag = nil
+
         // Reset fans to Apple defaults
         try? executor.execute(.resetAuto)
 
         isRunning = false
         phase = "Stopped"
     }
+
+    /// Tracks the current stress flag so stop() can kill threads
+    var activeStressFlag: StressFlag?
 
     private func runCalibration() async {
         let client = DaemonClient()
@@ -117,14 +124,18 @@ final class CalibrationState: ObservableObject {
             // Set fan speed
             try? client.execute(.setRPM(Float(targetRPM)))
 
-            // Start stress threads
+            // Start stress threads — store flag so stop() can kill them
             let stressFlag = StressFlag()
+            await MainActor.run { activeStressFlag = stressFlag }
             startStress(flag: stressFlag)
 
             // Sample heating for 30 seconds
             var heatingReadings: [Float] = []
             for _ in 0..<15 {
-                guard !Task.isCancelled else { break }
+                guard !Task.isCancelled else {
+                    stressFlag.stop()
+                    break
+                }
                 let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
                 heatingReadings.append(peak)
                 await MainActor.run { currentTemp = peak }
@@ -132,11 +143,13 @@ final class CalibrationState: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
 
+            // Always stop stress before moving on
+            stressFlag.stop()
+
+            guard !Task.isCancelled else { break }
+
             let heatingRate = rate(from: heatingReadings)
             let steadyState = heatingReadings.last ?? 0
-
-            // Stop stress, measure cooling
-            stressFlag.stop()
             await MainActor.run {
                 phase = "[\(level.label)] Cooling at \(targetRPM) RPM"
             }
@@ -166,13 +179,13 @@ final class CalibrationState: ObservableObject {
 
         csvHandle?.closeFile()
 
+        // Always reset fans and clear stress flag
+        try? client.execute(.resetAuto)
+        await MainActor.run { activeStressFlag = nil }
+
         guard !Task.isCancelled else {
-            try? client.execute(.resetAuto)
             return
         }
-
-        // Reset fans
-        try? client.execute(.resetAuto)
 
         // Get fan info for calibration data
         var fanCount = 2
@@ -244,7 +257,7 @@ final class CalibrationState: ObservableObject {
 }
 
 // Thread-safe stress control
-private final class StressFlag: @unchecked Sendable {
+final class StressFlag: @unchecked Sendable {
     private var _running = true
     var running: Bool { _running }
     func stop() { _running = false }
