@@ -514,6 +514,15 @@ public final class CalibrationRunner {
                 let ts = isoFormatter.string(from: Date())
                 csvWrite("\(ts),\(phase),\(String(format: "%.2f", rpmPct)),\(fan0),\(fan1),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp)),\(stressActive)")
 
+                // Safety override: 95°C — stop stress, max fans, cool down
+                if stressActive && peakTemp >= 95.0 {
+                    log("  SAFETY: \(String(format: "%.0f", peakTemp))°C — stopping stress, maxing fans")
+                    stopStress()
+                    try? fanControl.setMax()
+                    Thread.sleep(forTimeInterval: 10)
+                    break
+                }
+
                 // Steady-state detection for Optimized mode
                 // Check after at least 60 seconds (30 readings at 2s intervals)
                 if mode.usesSteadyStateDetection && readings.count >= 30 {

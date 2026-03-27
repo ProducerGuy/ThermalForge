@@ -141,6 +141,16 @@ final class CalibrationState: ObservableObject {
                 heatingReadings.append(peak)
                 await MainActor.run { currentTemp = peak }
                 csvWrite("\(isoFormatter.string(from: Date())),heating,\(String(format: "%.2f", level.pct)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT)),true")
+
+                // Safety override: if any reading hits 95°C, stop stress and max fans
+                if peak >= 95.0 {
+                    stressFlag.stop()
+                    try? client.execute(.setMax)
+                    await MainActor.run { phase = "SAFETY: \(String(format: "%.0f", peak))°C — fans maxed, stress stopped" }
+                    try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s cooldown
+                    break
+                }
+
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
 
