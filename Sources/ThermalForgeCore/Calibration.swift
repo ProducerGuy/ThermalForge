@@ -123,10 +123,74 @@ extension CalibrationData {
     }
 }
 
+// MARK: - Calibration Mode
+
+/// Calibration modes based on thermal engineering research.
+///
+/// Apple Silicon MacBooks reach ~95% of thermal steady state in 4.5-6 minutes
+/// under sustained load (thermal time constant ~90-120s, measured across M1-M5
+/// by Notebookcheck, Max Tech). Mac Studio takes 5-7 minutes due to 2-3x
+/// thermal mass. Cooling time constant is ~60-90s at max fan, 3-5 min at idle.
+///
+/// Sources:
+/// - Notebookcheck MacBook Pro M1 Max, M2 Max, M3 Max, M4 Max stress tests
+/// - Max Tech sustained performance testing methodology
+/// - Thermal time constant = thermal mass × thermal resistance
+///   ~20-50 J/K × 0.3-0.8 K/W = 60-180s for laptop heatsink assemblies
+/// - 3 time constants = 95% of steady state, 5 time constants = 99.3%
+public enum CalibrationMode: String, CaseIterable {
+    /// ~10 minutes. 2 min heat + 30s cool per level.
+    /// Reaches ~75% of steady state. Good baseline data.
+    case quick
+
+    /// ~28 minutes. 5 min heat + 2 min cool per level.
+    /// Reaches ~95% of steady state (3 thermal time constants).
+    /// Reliable for all Apple Silicon Macs including Mac Studio.
+    case standard
+
+    /// Varies (est. 35-50 min). Runs until temperature stabilizes.
+    /// Exits each phase when rate of change <0.5°C over 60 seconds.
+    /// Ceiling of 10 min heat + 5 min cool per level (5 time constants = 99.3%).
+    /// Produces the most accurate data and logs time-to-steady-state.
+    case thorough
+
+    public var description: String {
+        switch self {
+        case .quick: return "Quick (~10 min)"
+        case .standard: return "Standard (~28 min)"
+        case .thorough: return "Thorough (until stable, ~35-50 min)"
+        }
+    }
+
+    /// Heat phase duration in seconds per level
+    public var heatSeconds: Int {
+        switch self {
+        case .quick: return 120       // 2 min
+        case .standard: return 300    // 5 min
+        case .thorough: return 600    // 10 min max, exits early on steady state
+        }
+    }
+
+    /// Cool phase duration in seconds per level
+    public var coolSeconds: Int {
+        switch self {
+        case .quick: return 30
+        case .standard: return 120    // 2 min
+        case .thorough: return 300    // 5 min max, exits early on steady state
+        }
+    }
+
+    /// Whether to use steady-state detection to exit phases early
+    public var usesSteadyStateDetection: Bool {
+        self == .thorough
+    }
+}
+
 // MARK: - Calibration Runner
 
 public final class CalibrationRunner {
     private let fanControl: FanControl
+    private let mode: CalibrationMode
     private var stressThreads: [Thread] = []
     private var stressRunning = false
     private let isoFormatter = ISO8601DateFormatter()
@@ -139,8 +203,9 @@ public final class CalibrationRunner {
     // CSV log handle — written to in real time during calibration
     private var csvHandle: FileHandle?
 
-    public init(fanControl: FanControl) {
+    public init(fanControl: FanControl, mode: CalibrationMode = .standard) {
         self.fanControl = fanControl
+        self.mode = mode
     }
 
     /// Run full calibration. Blocks until complete.
@@ -156,6 +221,8 @@ public final class CalibrationRunner {
         var modelBuf = [CChar](repeating: 0, count: Swift.max(sysSize, 1))
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
+
+        log("Mode: \(mode.description)")
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -177,25 +244,31 @@ public final class CalibrationRunner {
             let targetRPM = maxRPM * pct
             let label = "\(Int(pct * 100))%"
 
-            // Phase A: Start stress, set fans to this RPM, measure heating
-            log("[\(label)] Starting stress test with fans at \(Int(targetRPM)) RPM...")
+            // Phase A: Heat — stress CPU at fixed fan speed
+            log("[\(label)] Heating with fans at \(Int(targetRPM)) RPM...")
             try fanControl.setAllFans(rpm: targetRPM)
             startStress()
 
-            let heatingReadings = sample(seconds: 30, phase: "heating", rpmPct: pct, stressActive: true)
+            let heatingReadings = samplePhase(
+                maxSeconds: mode.heatSeconds,
+                phase: "heating", rpmPct: pct, stressActive: true
+            )
             let heatingRate = rateFromReadings(heatingReadings)
             let steadyState = heatingReadings.last ?? 0
 
-            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, temp: \(String(format: "%.1f", steadyState))°C")
+            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, temp: \(String(format: "%.1f", steadyState))°C (\(heatingReadings.count * 2)s)")
 
-            // Phase B: Stop stress, keep fans at same RPM, measure cooling
+            // Phase B: Cool — stop stress, keep fans at same speed
             stopStress()
-            log("[\(label)] Stress stopped, measuring cooling rate...")
+            log("[\(label)] Cooling at \(Int(targetRPM)) RPM...")
 
-            let coolingReadings = sample(seconds: 20, phase: "cooling", rpmPct: pct, stressActive: false)
+            let coolingReadings = samplePhase(
+                maxSeconds: mode.coolSeconds,
+                phase: "cooling", rpmPct: pct, stressActive: false
+            )
             let coolingRate = rateFromReadings(coolingReadings)
 
-            log("[\(label)] Cooling rate: \(String(format: "%.2f", coolingRate))°C/s")
+            log("[\(label)] Cooling rate: \(String(format: "%.2f", coolingRate))°C/s (\(coolingReadings.count * 2)s)")
 
             measurements.append(CalibrationData.Measurement(
                 rpmPercent: pct,
@@ -255,11 +328,13 @@ public final class CalibrationRunner {
 
     // MARK: - Sampling
 
-    private func sample(seconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> [Float] {
+    /// Sample for up to maxSeconds. In Thorough mode, exits early if steady state detected.
+    /// Steady state: temperature change <0.5°C over the last 60 seconds (30 readings).
+    private func samplePhase(maxSeconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> [Float] {
         var readings: [Float] = []
-        let ticks = seconds / 2
+        let maxTicks = maxSeconds / 2
 
-        for _ in 0..<ticks {
+        for tick in 0..<maxTicks {
             if let status = try? fanControl.status() {
                 let cpuTemp = status.temperatures
                     .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
@@ -275,6 +350,18 @@ public final class CalibrationRunner {
                 let fan1 = status.fans.count > 1 ? status.fans[1].actualRPM : 0
                 let ts = isoFormatter.string(from: Date())
                 csvWrite("\(ts),\(phase),\(String(format: "%.2f", rpmPct)),\(fan0),\(fan1),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp)),\(stressActive)")
+
+                // Steady-state detection for Thorough mode
+                // Check after at least 60 seconds (30 readings at 2s intervals)
+                if mode.usesSteadyStateDetection && readings.count >= 30 {
+                    let recent = readings.suffix(30)
+                    let recentMin = recent.min() ?? 0
+                    let recentMax = recent.max() ?? 0
+                    if recentMax - recentMin < 0.5 {
+                        log("  Steady state detected at \(tick * 2)s (\(String(format: "%.1f", peakTemp))°C)")
+                        break
+                    }
+                }
             }
             Thread.sleep(forTimeInterval: 2)
         }

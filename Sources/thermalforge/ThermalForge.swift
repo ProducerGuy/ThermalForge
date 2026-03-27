@@ -280,15 +280,24 @@ struct Calibrate: ParsableCommand {
         abstract: "Measure this machine's thermal characteristics for the Smart profile"
     )
 
+    @Option(name: .shortAndLong, help: "Calibration mode: quick (~10 min), standard (~28 min), thorough (until stable)")
+    var mode: String = "standard"
+
     func run() throws {
         guard geteuid() == 0 else {
             throw ValidationError("Run with sudo: sudo thermalforge calibrate")
         }
 
+        guard let calMode = CalibrationMode(rawValue: mode) else {
+            throw ValidationError("Unknown mode '\(mode)'. Options: quick, standard, thorough")
+        }
+
         print("ThermalForge Calibration")
         print("========================")
-        print("This will stress your CPU and measure thermal response at different fan speeds.")
-        print("Takes about 4 minutes. Fans will be loud during the test.")
+        print("Mode: \(calMode.description)")
+        print("")
+        print("This will stress your CPU and measure thermal response at 4 fan speed levels.")
+        print("Fans will be loud during the test.")
         print("")
         print("DISCLAIMER: Calibration pushes your CPU to full load and cycles fan speeds.")
         print("This is within normal operating parameters for your Mac, but ThermalForge is")
@@ -297,7 +306,7 @@ struct Calibrate: ParsableCommand {
         print("Press Ctrl-C at any time to stop. Fans will reset to Apple defaults.\n")
 
         let fc = try FanControl()
-        let runner = CalibrationRunner(fanControl: fc)
+        let runner = CalibrationRunner(fanControl: fc, mode: calMode)
 
         // Kill switch: Ctrl-C resets fans and exits cleanly
         signal(SIGINT) { _ in

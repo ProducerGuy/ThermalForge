@@ -19,6 +19,7 @@ final class CalibrationState: ObservableObject {
     @Published var elapsedSeconds: Int = 0
     @Published var isComplete = false
     @Published var showPrompt = false
+    @Published var selectedMode: CalibrationMode = .standard
     @Published var error: String?
 
     /// Called on main thread when calibration completes successfully
@@ -27,7 +28,11 @@ final class CalibrationState: ObservableObject {
     private var task: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
     private let executor = PrivilegedExecutor()
-    private let totalSeconds = 220 // ~4 min (4 levels × 50s + pauses)
+
+    private var totalSeconds: Int {
+        // 4 levels × (heat + cool) + pauses
+        4 * (selectedMode.heatSeconds + selectedMode.coolSeconds) + 20
+    }
 
     func start() {
         guard !isRunning else { return }
@@ -290,10 +295,12 @@ struct CalibrationView: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionHeader(title: "CALIBRATE FOR SMART")
 
-            Text("Smart works best when calibrated to your machine. This takes ~4 minutes and only needs to run once.")
+            Text("Smart works best when calibrated to your machine. Only needs to run once.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
+
+            modePicker
 
             Button(action: {
                 state.showPrompt = false
@@ -323,10 +330,8 @@ struct CalibrationView: View {
             Text("Calibrate Smart for this machine.")
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
-            Text("Takes ~4 minutes. Fans will be loud.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 12)
+
+            modePicker
 
             Button(action: { state.start() }) {
                 Label("Start Calibration", systemImage: "gauge.with.dots.needle.33percent")
@@ -336,6 +341,17 @@ struct CalibrationView: View {
             .tint(.orange)
             .padding(.horizontal, 12)
         }
+    }
+
+    private var modePicker: some View {
+        Picker("Mode", selection: $state.selectedMode) {
+            Text("Quick (~10 min)").tag(CalibrationMode.quick)
+            Text("Standard (~28 min)").tag(CalibrationMode.standard)
+            Text("Thorough (until stable)").tag(CalibrationMode.thorough)
+        }
+        .pickerStyle(.inline)
+        .labelsHidden()
+        .padding(.horizontal, 12)
     }
 
     private var calibratedView: some View {
