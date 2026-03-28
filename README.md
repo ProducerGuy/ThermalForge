@@ -13,18 +13,33 @@ Built in 2026 with Swift. No subscriptions, no telemetry, no ads.
 
 ## Why ThermalForge?
 
-Tools like **Macs Fan Control**, **TG Pro**, and **AlDente Pro** charge $15–$30+ for fan control on Mac. ThermalForge does the same thing for free:
+Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control that hasn't fundamentally improved in years. Both require manual configuration, neither learns anything about your machine, and both have documented problems on Apple Silicon.
 
-| Feature | ThermalForge | Macs Fan Control Pro | TG Pro | AlDente Pro |
-|---|---|---|---|---|
-| Custom fan profiles | Yes | $15 | $20 | $30 |
-| Real-time temp monitoring | Yes | Yes | Yes | Yes |
-| Menu bar app | Yes | Yes | Yes | Yes |
-| CLI access | Yes | No | No | No |
-| Sleep/wake re-apply | Yes | Yes | Yes | No |
-| Safety override (95°C) | Yes | No | Yes | No |
-| Open source | **Yes** | No | No | No |
-| Price | **Free** | $15 | $20 | $30 |
+| Feature | ThermalForge | Macs Fan Control | TG Pro |
+|---|---|---|---|
+| Smart adaptive fan curve | **Yes** | No | No |
+| Machine-specific calibration | **Yes** | No | No |
+| Multi-sensor safety | **Yes — all sensors** | [One sensor per fan](https://github.com/crystalidea/macs-fan-control/issues/266) | Manual rules only |
+| Proactive cooling (ramps before throttle) | **Yes** | No | No |
+| Fan curve type | Graduated continuous | Linear between 2 points | Manual step-function |
+| Real-time temp monitoring | Yes | Yes | Yes |
+| Menu bar app | Yes | Yes | Yes |
+| CLI access | **Yes** | No | No |
+| Thermal data logging (CSV) | **Yes** | No | Yes |
+| Process correlation in logs | **Yes** | No | No |
+| Sleep/wake re-apply | Yes | Yes | Yes |
+| Safety override (95°C) | **Yes — always active** | No | Requires manual setup |
+| Crash recovery (heartbeat watchdog) | **Yes** | Reverts on quit only | Override removes macOS safety |
+| Open source | **Yes** | No | No |
+| Price | **Free** | $15 | $20 |
+
+### Known problems with alternatives
+
+**Macs Fan Control** monitors only one temperature sensor per fan. Users have reported [GPU overheating while monitoring CPU only](https://github.com/crystalidea/macs-fan-control/issues/266), leading to system lockups. Fan control is [broken on M3/M4 Pro and Max](https://github.com/crystalidea/macs-fan-control/issues/785) due to Apple firmware changes.
+
+**TG Pro** offers more flexibility but requires users to manually configure step-function rules for each fan speed threshold. Its "Override System" mode removes macOS thermal safety entirely — if your rules are wrong, there's no backstop. No learning, no adaptation, no calibration.
+
+**AlDente Pro** ($30) is a battery management tool with no fan control features. It monitors battery temperature and pauses charging — it does not control fans.
 
 ## Features
 
