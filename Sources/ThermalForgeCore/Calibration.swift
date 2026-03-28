@@ -46,14 +46,17 @@ public struct CalibrationData: Codable {
         public let coolingRate: Float
         /// Heating rate under load in °C/sec (positive = heating)
         public let heatingRate: Float
-        /// Temperature where heating and cooling reach equilibrium under load
+        /// Temperature at the highest load step this fan speed sustained below 85°C
         public let steadyState: Float
+        /// Maximum load (0.0–1.0) this fan speed held below 85°C. 1.0 = full load.
+        public let maxSustainableLoad: Float?
 
-        public init(rpmPercent: Float, coolingRate: Float, heatingRate: Float, steadyState: Float) {
+        public init(rpmPercent: Float, coolingRate: Float, heatingRate: Float, steadyState: Float, maxSustainableLoad: Float? = nil) {
             self.rpmPercent = rpmPercent
             self.coolingRate = coolingRate
             self.heatingRate = heatingRate
             self.steadyState = steadyState
+            self.maxSustainableLoad = maxSustainableLoad
         }
     }
 
@@ -313,6 +316,12 @@ public final class CalibrationRunner {
         return mode.rank < existing.modeRank
     }
 
+    /// Performance ceiling — stop increasing load if temp reaches this
+    private static let performanceCeiling: Float = 85.0
+
+    /// Load steps: 25%, 50%, 75%, 100%
+    private static let loadSteps: [Float] = [0.25, 0.50, 0.75, 1.00]
+
     /// Run full calibration. Blocks until complete.
     public func run() throws -> CalibrationData {
         let fanCount = try fanControl.fanCount()
@@ -329,6 +338,7 @@ public final class CalibrationRunner {
 
         log("Mode: \(mode.description)")
         log("Stress: \(stressType.description)")
+        log("Ceiling: \(Self.performanceCeiling)°C")
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -341,7 +351,7 @@ public final class CalibrationRunner {
         logPath = csvURL
 
         // CSV header
-        csvWrite("timestamp,phase,rpm_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c,stress_active")
+        csvWrite("timestamp,phase,rpm_pct,load_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c")
 
         // Calculate RPM levels — ensure none go below machine minimum
         let rpmLevels: [(pct: Float, label: String)] = ([0.25, 0.50, 0.75, 1.00] as [Float]).map { pct in
@@ -359,45 +369,114 @@ public final class CalibrationRunner {
             let targetRPM = maxRPM * pct
             let label = level.label
 
-            // Phase A: Heat — stress CPU at fixed fan speed
-            log("[\(label)] Heating with fans at \(Int(targetRPM)) RPM...")
+            log("[\(label)] Setting fans to \(Int(targetRPM)) RPM")
             try fanControl.setAllFans(rpm: targetRPM)
-            startStress()
 
-            let heatingResult = samplePhase(
-                maxSeconds: mode.heatSeconds,
-                phase: "heating", rpmPct: pct, stressActive: true
-            )
+            // Ramp load through steps, monitoring temp at each
+            var maxLoad: Float = 0
+            var peakTemp: Float = 0
+            var hitCeiling = false
+            var allReadings: [Float] = []
 
-            // If safety triggered, discard this level entirely
-            stopStress()
-            if heatingResult.safetyTriggered {
-                log("[\(label)] Level discarded — safety override triggered")
-                Thread.sleep(forTimeInterval: 5)
-                continue
+            for loadStep in Self.loadSteps {
+                let loadLabel = "\(Int(loadStep * 100))%"
+                log("[\(label)] Load \(loadLabel) — ramping stress")
+
+                // Start stress at this intensity
+                stopStress()
+                startStress(intensity: loadStep)
+
+                // Sample at this load step
+                let ticksPerStep = mode.heatSeconds / (Self.loadSteps.count * 2)
+                let maxTicks = Swift.max(ticksPerStep, 5) // at least 10 seconds
+
+                var stepReadings: [Float] = []
+                for _ in 0..<maxTicks {
+                    if let status = try? fanControl.status() {
+                        let cpuTemp = status.temperatures
+                            .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+                            .values.max() ?? 0
+                        let gpuTemp = status.temperatures
+                            .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
+                            .values.max() ?? 0
+                        let temp = Swift.max(cpuTemp, gpuTemp)
+                        stepReadings.append(temp)
+                        allReadings.append(temp)
+
+                        let fan0rpm = status.fans.first.map { $0.actualRPM } ?? 0
+                        let fan1rpm = status.fans.count > 1 ? status.fans[1].actualRPM : 0
+                        let ts = isoFormatter.string(from: Date())
+                        csvWrite("\(ts),heating,\(String(format: "%.2f", pct)),\(String(format: "%.2f", loadStep)),\(fan0rpm),\(fan1rpm),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp))")
+
+                        // 85°C ceiling — this fan speed can't hold the line at this load
+                        if temp >= Self.performanceCeiling {
+                            log("[\(label)] Hit \(String(format: "%.0f", temp))°C at \(loadLabel) load — ceiling reached")
+                            hitCeiling = true
+                            peakTemp = temp
+                            maxLoad = loadStep
+                            break
+                        }
+
+                        peakTemp = Swift.max(peakTemp, temp)
+                    }
+                    Thread.sleep(forTimeInterval: 2)
+
+                    // Optimized mode: check if temp stabilized at this load step
+                    if mode.usesSteadyStateDetection && stepReadings.count >= 15 {
+                        let recent = stepReadings.suffix(15)
+                        if (recent.max() ?? 0) - (recent.min() ?? 0) < 0.5 {
+                            log("[\(label)] Steady state at \(loadLabel) load: \(String(format: "%.1f", stepReadings.last ?? 0))°C")
+                            break
+                        }
+                    }
+                }
+
+                if hitCeiling { break }
+                maxLoad = loadStep
             }
 
-            let heatingRate = rateFromReadings(heatingResult.readings)
-            let steadyState = heatingResult.readings.last ?? 0
+            // Stop stress, measure cooling
+            stopStress()
 
-            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, temp: \(String(format: "%.1f", steadyState))°C (\(heatingResult.readings.count * 2)s)")
+            if !hitCeiling {
+                log("[\(label)] Handled full load — peak \(String(format: "%.1f", peakTemp))°C")
+            }
 
-            // Phase B: Cool — stop stress, keep fans at same speed
+            // Cooling phase
             log("[\(label)] Cooling at \(Int(targetRPM)) RPM...")
+            let coolTicks = mode.coolSeconds / 2
+            var coolingReadings: [Float] = []
+            for _ in 0..<coolTicks {
+                if let status = try? fanControl.status() {
+                    let cpuTemp = status.temperatures
+                        .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+                        .values.max() ?? 0
+                    let gpuTemp = status.temperatures
+                        .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
+                        .values.max() ?? 0
+                    let temp = Swift.max(cpuTemp, gpuTemp)
+                    coolingReadings.append(temp)
 
-            let coolingResult = samplePhase(
-                maxSeconds: mode.coolSeconds,
-                phase: "cooling", rpmPct: pct, stressActive: false
-            )
-            let coolingRate = rateFromReadings(coolingResult.readings)
+                    let fan0rpm = status.fans.first.map { $0.actualRPM } ?? 0
+                    let fan1rpm = status.fans.count > 1 ? status.fans[1].actualRPM : 0
+                    let ts = isoFormatter.string(from: Date())
+                    csvWrite("\(ts),cooling,\(String(format: "%.2f", pct)),0.00,\(fan0rpm),\(fan1rpm),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp))")
+                }
+                Thread.sleep(forTimeInterval: 2)
+            }
 
-            log("[\(label)] Cooling rate: \(String(format: "%.2f", coolingRate))°C/s (\(coolingResult.readings.count * 2)s)")
+            let heatingRate = rateFromReadings(allReadings)
+            let coolingRate = rateFromReadings(coolingReadings)
+            let steadyState = peakTemp
+
+            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, cooling: \(String(format: "%.2f", coolingRate))°C/s, max load: \(Int(maxLoad * 100))%")
 
             measurements.append(CalibrationData.Measurement(
                 rpmPercent: pct,
                 coolingRate: coolingRate,
                 heatingRate: heatingRate,
-                steadyState: steadyState
+                steadyState: steadyState,
+                maxSustainableLoad: maxLoad
             ))
 
             // Brief pause between levels
@@ -427,14 +506,18 @@ public final class CalibrationRunner {
     // CPU, GPU, and Neural Engine share the same die and unified memory.
     // This is the Notebookcheck standard (Prime95 + FurMark simultaneously).
 
-    private func startStress() {
+    /// Start stress at a given intensity (0.0–1.0).
+    /// CPU: intensity * coreCount threads active.
+    /// GPU: intensity * 4M grid size.
+    private func startStress(intensity: Float = 1.0) {
         guard !stressRunning else { return }
         stressRunning = true
 
-        // CPU stress: saturate all cores
+        // CPU stress: use intensity * cores
         if stressType == .combined || stressType == .cpu {
             let coreCount = ProcessInfo.processInfo.activeProcessorCount
-            for _ in 0..<coreCount {
+            let activeCores = Swift.max(Int(Float(coreCount) * intensity), 1)
+            for _ in 0..<activeCores {
                 let thread = Thread {
                     while self.stressRunning {
                         var x: Double = 1.0
@@ -450,13 +533,13 @@ public final class CalibrationRunner {
             }
         }
 
-        // GPU stress: Metal compute shader doing dense floating point math
+        // GPU stress: scale grid size by intensity
         if stressType == .combined || stressType == .gpu {
-            startGPUStress()
+            startGPUStress(intensity: intensity)
         }
     }
 
-    private func startGPUStress() {
+    private func startGPUStress(intensity: Float = 1.0) {
         guard let device = MTLCreateSystemDefaultDevice() else {
             log("Warning: Metal device not available, running CPU-only stress")
             return
@@ -488,8 +571,9 @@ public final class CalibrationRunner {
             return
         }
 
-        // Allocate a large buffer to keep the GPU busy
-        let elementCount = 1024 * 1024 * 4 // 4M floats = 16MB
+        // Scale GPU work by intensity — grid size controls utilization
+        let baseCount = 1024 * 1024 * 4 // 4M floats at 100%
+        let elementCount = Swift.max(Int(Float(baseCount) * intensity), 1024)
         let bufferSize = elementCount * MemoryLayout<Float>.stride
         guard let buffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
             log("Warning: Metal buffer allocation failed, running CPU-only stress")

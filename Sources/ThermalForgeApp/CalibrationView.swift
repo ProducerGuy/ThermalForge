@@ -110,9 +110,6 @@ final class CalibrationState: ObservableObject {
             return (pct, "\(Int(pct * 100))%")
         }
 
-        let heatTicks = mode.heatSeconds / 2
-        let coolTicks = mode.coolSeconds / 2
-
         var measurements: [CalibrationData.Measurement] = []
         let isoFormatter = ISO8601DateFormatter()
 
@@ -126,7 +123,7 @@ final class CalibrationState: ObservableObject {
         func csvWrite(_ line: String) {
             if let d = (line + "\n").data(using: .utf8) { csvHandle?.write(d) }
         }
-        csvWrite("timestamp,phase,rpm_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c,stress_active")
+        csvWrite("timestamp,phase,rpm_pct,load_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c")
 
         // Machine info
         var sysSize = 0
@@ -135,18 +132,14 @@ final class CalibrationState: ObservableObject {
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
 
-        var daemonDied = false
-        var consecutiveZeros = 0
+        let loadSteps: [Float] = [0.25, 0.50, 0.75, 1.00]
+        let performanceCeiling: Float = 85.0
+        let ticksPerStep = max(mode.heatSeconds / (loadSteps.count * 2), 5)
 
         for (_, level) in rpmLevels.enumerated() {
-            guard !Task.isCancelled && !daemonDied else { break }
+            guard !Task.isCancelled else { break }
 
             let targetRPM = Int(maxRPM * level.pct)
-            await MainActor.run {
-                phase = "[\(level.label)] Heating at \(targetRPM) RPM"
-            }
-
-            var safetyTriggered = false
 
             // Set fan speed — abort if daemon unreachable
             do {
@@ -157,86 +150,86 @@ final class CalibrationState: ObservableObject {
                 break
             }
 
-            // Start stress threads — store flag so stop() can kill them
-            let stressFlag = StressFlag()
-            await MainActor.run { activeStressFlag = stressFlag }
-            startStress(flag: stressFlag)
+            var maxLoad: Float = 0
+            var peakTemp: Float = 0
+            var hitCeiling = false
+            var allReadings: [Float] = []
 
-            // Sample heating
-            var heatingReadings: [Float] = []
-            for _ in 0..<heatTicks {
-                guard !Task.isCancelled else {
-                    stressFlag.stop()
-                    break
+            // Ramp load through steps
+            for loadStep in loadSteps {
+                guard !Task.isCancelled else { break }
+
+                let loadLabel = "\(Int(loadStep * 100))%"
+                await MainActor.run {
+                    phase = "[\(level.label)] Load \(loadLabel) at \(targetRPM) RPM"
                 }
-                let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
 
-                // Daemon unreachable check — zero readings mean no data
-                if peak == 0 && cpuT == 0 && gpuT == 0 {
-                    consecutiveZeros += 1
-                    if consecutiveZeros >= 3 {
+                // Start stress at this intensity
+                let stressFlag = StressFlag()
+                await MainActor.run { activeStressFlag = stressFlag }
+                startStress(flag: stressFlag, intensity: loadStep)
+
+                for _ in 0..<ticksPerStep {
+                    guard !Task.isCancelled else {
                         stressFlag.stop()
-                        TFLogger.shared.error("Daemon unreachable during calibration — aborting")
-                        await MainActor.run { phase = "ERROR: Daemon not responding" }
-                        daemonDied = true
                         break
                     }
-                } else {
-                    consecutiveZeros = 0
+
+                    let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
+                    allReadings.append(peak)
+                    peakTemp = max(peakTemp, peak)
+                    await MainActor.run { currentTemp = peak }
+
+                    let ts = isoFormatter.string(from: Date())
+                    csvWrite("\(ts),heating,\(String(format: "%.2f", level.pct)),\(String(format: "%.2f", loadStep)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT))")
+
+                    // 85°C ceiling
+                    if peak >= performanceCeiling {
+                        TFLogger.shared.calibration("[\(level.label)] Hit \(String(format: "%.0f", peak))°C at \(loadLabel) — ceiling reached")
+                        hitCeiling = true
+                        maxLoad = loadStep
+                        break
+                    }
+
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
 
-                heatingReadings.append(peak)
-                await MainActor.run { currentTemp = peak }
-                csvWrite("\(isoFormatter.string(from: Date())),heating,\(String(format: "%.2f", level.pct)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT)),true")
-
-                // Safety override: if any reading hits 95°C, stop stress and max fans
-                if peak >= 95.0 {
-                    stressFlag.stop()
-                    try? client.execute(.setMax)
-                    TFLogger.shared.safety("Calibration safety override at \(String(format: "%.0f", peak))°C — level \(level.label) discarded")
-                    await MainActor.run { phase = "SAFETY: \(String(format: "%.0f", peak))°C — level discarded" }
-                    try? await Task.sleep(nanoseconds: 10_000_000_000)
-                    safetyTriggered = true
-                    break
-                }
-
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                stressFlag.stop()
+                if hitCeiling { break }
+                maxLoad = loadStep
             }
-
-            // Always stop stress before moving on
-            stressFlag.stop()
 
             guard !Task.isCancelled else { break }
 
-            let heatingRate = rate(from: heatingReadings)
-            let steadyState = heatingReadings.last ?? 0
+            // Cooling phase
             await MainActor.run {
                 phase = "[\(level.label)] Cooling at \(targetRPM) RPM"
             }
 
             var coolingReadings: [Float] = []
+            let coolTicks = mode.coolSeconds / 2
             for _ in 0..<coolTicks {
                 guard !Task.isCancelled else { break }
                 let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
                 coolingReadings.append(peak)
                 await MainActor.run { currentTemp = peak }
-                csvWrite("\(isoFormatter.string(from: Date())),cooling,\(String(format: "%.2f", level.pct)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT)),false")
+
+                let ts = isoFormatter.string(from: Date())
+                csvWrite("\(ts),cooling,\(String(format: "%.2f", level.pct)),0.00,\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT))")
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
 
+            let heatingRate = rate(from: allReadings)
             let coolingRate = rate(from: coolingReadings)
 
-            // Only save this level's data if safety didn't trigger
-            if !safetyTriggered {
-                measurements.append(CalibrationData.Measurement(
-                    rpmPercent: level.pct,
-                    coolingRate: coolingRate,
-                    heatingRate: heatingRate,
-                    steadyState: steadyState
-                ))
-            }
+            measurements.append(CalibrationData.Measurement(
+                rpmPercent: level.pct,
+                coolingRate: coolingRate,
+                heatingRate: heatingRate,
+                steadyState: peakTemp,
+                maxSustainableLoad: maxLoad
+            ))
 
-            // Brief pause
             try? await Task.sleep(nanoseconds: 5_000_000_000)
         }
 
@@ -318,10 +311,11 @@ final class CalibrationState: ObservableObject {
     private var gpuBuffer: MTLBuffer?
     private var gpuElementCount: Int = 0
 
-    private func startStress(flag: StressFlag) {
-        // CPU stress: saturate all cores
+    private func startStress(flag: StressFlag, intensity: Float = 1.0) {
+        // CPU stress: intensity * cores
         let coreCount = ProcessInfo.processInfo.activeProcessorCount
-        for _ in 0..<coreCount {
+        let activeCores = max(Int(Float(coreCount) * intensity), 1)
+        for _ in 0..<activeCores {
             Thread.detachNewThread {
                 while flag.running {
                     var x: Double = 1.0
@@ -355,7 +349,8 @@ final class CalibrationState: ObservableObject {
               let queue = device.makeCommandQueue()
         else { return }
 
-        let elementCount = 1024 * 1024 * 4
+        let baseCount = 1024 * 1024 * 4
+        let elementCount = max(Int(Float(baseCount) * intensity), 1024)
         guard let buffer = device.makeBuffer(length: elementCount * MemoryLayout<Float>.stride, options: .storageModeShared)
         else { return }
 
