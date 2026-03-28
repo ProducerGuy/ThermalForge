@@ -213,20 +213,37 @@ public final class ThermalMonitor {
 
         if let cal = calibration {
             // Calibrated path: use machine-specific data
-            // What RPM % holds us at the ceiling temp under load?
-            let basePct = cal.rpmPercentForTarget(Self.smartCeiling) ?? 0.5
+            // Find the minimum fan level that can sustain current thermal conditions.
+            // Each measurement tells us: at this fan %, the machine holds X% load below 85°C.
+            let tempPosition = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+
+            // Start with the lowest fan speed and go up until we find one that can handle it
+            let sorted = cal.measurements.sorted { $0.rpmPercent < $1.rpmPercent }
+            var basePct: Float = sorted.last?.rpmPercent ?? 1.0
+
+            for m in sorted {
+                // If this fan speed held full load (1.0), it can handle anything
+                if m.maxSustainableLoad ?? 1.0 >= 1.0 {
+                    basePct = m.rpmPercent
+                    break
+                }
+                // If steady state was well below ceiling, this level has headroom
+                if m.steadyState < Self.smartCeiling - 5 {
+                    basePct = m.rpmPercent
+                    break
+                }
+            }
+
+            // Scale by how close we are to the ceiling
+            targetPct = basePct * tempPosition
 
             if rate > 0 {
-                // Rising: ramp harder based on how fast and how close to ceiling
-                let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
-                let coolingNeeded = rate / abs(cal.coolingRateAt(rpmPercent: basePct))
-                targetPct = min(basePct + coolingNeeded * (0.5 + urgency * 0.5), 1.0)
+                // Rising: boost proportionally to rate and proximity to ceiling
+                let urgency = tempPosition
+                targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
             } else if peakTemp > Self.smartCeiling {
-                // Above ceiling: push hard
-                targetPct = min(basePct + 0.3, 1.0)
-            } else {
-                // Stable or falling: hold at the calibrated baseline
-                targetPct = basePct * min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+                // Above ceiling: push to max
+                targetPct = 1.0
             }
         } else {
             // Uncalibrated fallback: conservative S-curve
