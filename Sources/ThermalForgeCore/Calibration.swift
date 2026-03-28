@@ -84,6 +84,10 @@ public struct CalibrationData: Codable {
             if m.heatingRate > 5 {
                 return "Heating rate \(m.heatingRate)°C/s at \(Int(m.rpmPercent * 100))% is unreasonably high"
             }
+            // Max sustainable load should be 0-1 range
+            if let load = m.maxSustainableLoad, (load < 0 || load > 1) {
+                return "Max sustainable load \(load) at \(Int(m.rpmPercent * 100))% is out of range (0-1)"
+            }
         }
 
         // Steady-state temps should generally decrease as RPM increases
@@ -642,58 +646,7 @@ public final class CalibrationRunner {
         gpuDevice = nil
     }
 
-    // MARK: - Sampling
-
-    /// Sample for up to maxSeconds. In Optimized mode, exits early if steady state detected.
-    /// Steady state: temperature change <0.5°C over the last 60 seconds (30 readings).
-    private func samplePhase(maxSeconds: Int, phase: String, rpmPct: Float, stressActive: Bool) -> (readings: [Float], safetyTriggered: Bool) {
-        var readings: [Float] = []
-        var safetyHit = false
-        let maxTicks = maxSeconds / 2
-
-        for tick in 0..<maxTicks {
-            if let status = try? fanControl.status() {
-                let cpuTemp = status.temperatures
-                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
-                    .values.max() ?? 0
-                let gpuTemp = status.temperatures
-                    .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
-                    .values.max() ?? 0
-                let peakTemp = Swift.max(cpuTemp, gpuTemp)
-                readings.append(peakTemp)
-
-                // Write CSV row
-                let fan0 = status.fans.first.map { $0.actualRPM } ?? 0
-                let fan1 = status.fans.count > 1 ? status.fans[1].actualRPM : 0
-                let ts = isoFormatter.string(from: Date())
-                csvWrite("\(ts),\(phase),\(String(format: "%.2f", rpmPct)),\(fan0),\(fan1),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp)),\(stressActive)")
-
-                // Safety override: 95°C — stop stress, max fans, cool down
-                if stressActive && peakTemp >= 95.0 {
-                    log("  SAFETY: \(String(format: "%.0f", peakTemp))°C — stopping stress, maxing fans, level discarded")
-                    stopStress()
-                    try? fanControl.setMax()
-                    Thread.sleep(forTimeInterval: 10)
-                    safetyHit = true
-                    break
-                }
-
-                // Steady-state detection for Optimized mode
-                // Check after at least 60 seconds (30 readings at 2s intervals)
-                if mode.usesSteadyStateDetection && readings.count >= 30 {
-                    let recent = readings.suffix(30)
-                    let recentMin = recent.min() ?? 0
-                    let recentMax = recent.max() ?? 0
-                    if recentMax - recentMin < 0.5 {
-                        log("  Steady state detected at \(tick * 2)s (\(String(format: "%.1f", peakTemp))°C)")
-                        break
-                    }
-                }
-            }
-            Thread.sleep(forTimeInterval: 2)
-        }
-        return (readings, safetyHit)
-    }
+    // MARK: - Helpers
 
     private func rateFromReadings(_ readings: [Float]) -> Float {
         guard readings.count >= 2 else { return 0 }

@@ -110,9 +110,9 @@ Smart uses this data to make proportional decisions: match fan speed to current 
 
 | Mode | Time | What it does |
 |---|---|---|
-| **Quick** | ~10 min | 30s per load step, 30s cool per level. Good baseline data. |
-| **Standard** | ~20 min | 60s per load step, 1 min cool per level. Reliable data for all Macs. Recommended. |
-| **Optimized** | ~30-45 min | Runs until temperature stabilizes at each load step (<0.5°C change over 30s). Best data. |
+| **Quick** | ~10 min | 30s per load step (4 steps), 30s cool per level. Good baseline data. |
+| **Standard** | ~28 min | 75s per load step (4 steps), 2 min cool per level. Reliable data for all Macs. Recommended. |
+| **Optimized** | ~30-45 min | Up to 2.5 min per load step, exits early when temperature stabilizes (<0.5°C change over 30s). Best data. |
 
 Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's timing.
 
