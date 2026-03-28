@@ -132,9 +132,18 @@ final class CalibrationState: ObservableObject {
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
 
-        let loadSteps: [Float] = [0.25, 0.50, 0.75, 1.00]
+        // Load steps targeting ~1°C/sec ramp (real workloads, not synthetic max)
+        let loadSteps: [Float] = [0.05, 0.10, 0.15, 0.25]
         let performanceCeiling: Float = 85.0
         let ticksPerStep = max(mode.heatSeconds / (loadSteps.count * 2), 5)
+
+        // Wait for machine to cool to baseline
+        await MainActor.run { phase = "Waiting for machine to cool..." }
+        for _ in 0..<60 {
+            let (peak, _, _, _, _) = readTemps(client: client)
+            if peak > 0 && peak < 45 { break }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
 
         for (_, level) in rpmLevels.enumerated() {
             guard !Task.isCancelled else { break }
@@ -149,6 +158,9 @@ final class CalibrationState: ObservableObject {
                 await MainActor.run { phase = "ERROR: Daemon not responding" }
                 break
             }
+
+            // Wait for fans to reach target speed
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
 
             var maxLoad: Float = 0
             var peakTemp: Float = 0
@@ -168,6 +180,11 @@ final class CalibrationState: ObservableObject {
                 let stressFlag = StressFlag()
                 await MainActor.run { activeStressFlag = stressFlag }
                 startStress(flag: stressFlag, intensity: loadStep)
+
+                // Discard first 3 readings as transition noise
+                for _ in 0..<3 {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
 
                 var stepReadings: [Float] = []
                 for _ in 0..<ticksPerStep {

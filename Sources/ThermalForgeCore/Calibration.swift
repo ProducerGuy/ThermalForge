@@ -323,8 +323,11 @@ public final class CalibrationRunner {
     /// Performance ceiling — stop increasing load if temp reaches this
     private static let performanceCeiling: Float = 85.0
 
-    /// Load steps: 25%, 50%, 75%, 100%
-    private static let loadSteps: [Float] = [0.25, 0.50, 0.75, 1.00]
+    /// Load steps targeting ~1°C/sec ramp rate.
+    /// Research: real workloads heat Apple Silicon at ~1-2°C/sec.
+    /// Max synthetic load heats at ~5-8°C/sec (Notebookcheck, Max Tech).
+    /// These lower steps produce realistic thermal behavior for calibration.
+    private static let loadSteps: [Float] = [0.05, 0.10, 0.15, 0.25]
 
     /// Cleanup: always stop stress, reset fans, close CSV on any exit path
     private func cleanup() {
@@ -354,6 +357,35 @@ public final class CalibrationRunner {
         log("Mode: \(mode.description)")
         log("Stress: \(stressType.description)")
         log("Ceiling: \(Self.performanceCeiling)°C")
+        log("Load steps: \(Self.loadSteps.map { "\(Int($0 * 100))%" }.joined(separator: ", "))")
+
+        // Record ambient temperature
+        let ambientTemp: Float
+        if let status = try? fanControl.status() {
+            ambientTemp = status.temperatures
+                .filter { k, _ in k.hasPrefix("TA") }
+                .values.first ?? 0
+        } else {
+            ambientTemp = 0
+        }
+        if ambientTemp > 0 {
+            log("Ambient: \(String(format: "%.1f", ambientTemp))°C")
+        }
+
+        // Wait for machine to cool to baseline before starting
+        log("Waiting for machine to cool below 45°C...")
+        for _ in 0..<60 { // max 2 minutes wait
+            if let status = try? fanControl.status() {
+                let peak = status.temperatures
+                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+                    .values.max() ?? 0
+                if peak < 45 {
+                    log("Baseline reached: \(String(format: "%.1f", peak))°C")
+                    break
+                }
+            }
+            Thread.sleep(forTimeInterval: 2)
+        }
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -387,6 +419,9 @@ public final class CalibrationRunner {
             log("[\(label)] Setting fans to \(Int(targetRPM)) RPM")
             try fanControl.setAllFans(rpm: targetRPM)
 
+            // Wait for fans to physically reach target speed
+            Thread.sleep(forTimeInterval: 5)
+
             // Ramp load through steps, monitoring temp at each
             var maxLoad: Float = 0
             var peakTemp: Float = 0
@@ -400,6 +435,12 @@ public final class CalibrationRunner {
                 // Stop previous stress level before starting new one
                 if stressRunning { stopStress() }
                 startStress(intensity: loadStep)
+
+                // Discard first 3 readings (6 seconds) as transition noise
+                for _ in 0..<3 {
+                    Thread.sleep(forTimeInterval: 2)
+                    _ = try? fanControl.status()
+                }
 
                 // Sample at this load step
                 let ticksPerStep = mode.heatSeconds / (Self.loadSteps.count * 2)
