@@ -269,7 +269,20 @@ final class CalibrationState: ObservableObject {
             mode: mode.rawValue,
             measurements: measurements
         )
+
+        // Validate before saving — don't write garbage data
+        if let error = calibration.validationError {
+            TFLogger.shared.error("Calibration data failed validation: \(error)")
+            await MainActor.run {
+                timerTask?.cancel()
+                phase = "Failed — invalid data: \(error)"
+                isRunning = false
+            }
+            return
+        }
+
         try? calibration.save()
+        TFLogger.shared.calibration("Calibration complete — \(measurements.count) levels saved")
 
         await MainActor.run {
             timerTask?.cancel()

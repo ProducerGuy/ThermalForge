@@ -256,6 +256,9 @@ public final class ThermalMonitor {
             }
         }
 
+        // Clamp to valid range
+        targetPct = min(max(targetPct, 0), 1.0)
+
         // Ramp-down governor: reduce RPM at half the rate we ramp up
         if targetPct < lastSmartRPMPercent {
             let maxDrop: Float = 0.05

@@ -116,6 +116,8 @@ public final class DaemonClient {
 public final class DaemonServer {
     private let socketFD: Int32
     private let fanControl: FanControl
+    /// Serializes all SMC access — prevents data race between client handler and watchdog
+    private let smcLock = NSLock()
     /// Last fan command — re-applied after sleep/wake
     private var lastCommand: String?
     /// Heartbeat: last time the app checked in
@@ -201,7 +203,9 @@ public final class DaemonServer {
 
                 if Date().timeIntervalSince(beat) > 15 {
                     NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                    smcLock.lock()
                     try? fanControl.resetAuto()
+                    smcLock.unlock()
                     heartbeatLock.lock()
                     lastCommand = nil
                     lastHeartbeat = nil
@@ -261,6 +265,8 @@ public final class DaemonServer {
 
         // Delay slightly — SMC needs a moment after wake
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [self] in
+            smcLock.lock()
+            defer { smcLock.unlock() }
             let parts = command.split(separator: " ")
             do {
                 switch parts.first.map(String.init) {
@@ -291,6 +297,8 @@ public final class DaemonServer {
         NSLog("ThermalForge daemon: received: %@", command)
 
         let response: String
+        smcLock.lock()
+        defer { smcLock.unlock() }
         do {
             let parts = command.split(separator: " ")
             switch parts.first.map(String.init) {

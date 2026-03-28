@@ -330,8 +330,8 @@ public final class CalibrationRunner {
     public func run() throws -> CalibrationData {
         let fanCount = try fanControl.fanCount()
         let fan0 = try fanControl.fanInfo(0)
-        let maxRPM = fan0.maxRPM
-        let minRPM = fan0.minRPM
+        let maxRPM = fan0.maxRPM > 0 ? fan0.maxRPM : 7826
+        let minRPM = fan0.minRPM > 0 ? fan0.minRPM : 1200
 
         // Machine info
         var sysSize = 0
@@ -386,8 +386,8 @@ public final class CalibrationRunner {
                 let loadLabel = "\(Int(loadStep * 100))%"
                 log("[\(label)] Load \(loadLabel) — ramping stress")
 
-                // Start stress at this intensity
-                stopStress()
+                // Stop previous stress level before starting new one
+                if stressRunning { stopStress() }
                 startStress(intensity: loadStep)
 
                 // Sample at this load step
