@@ -204,12 +204,23 @@ public final class DaemonServer {
                 if Date().timeIntervalSince(beat) > 15 {
                     NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
                     smcLock.lock()
-                    try? fanControl.resetAuto()
+                    let resetSucceeded: Bool
+                    do {
+                        try fanControl.resetAuto()
+                        resetSucceeded = true
+                    } catch {
+                        NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
+                        resetSucceeded = false
+                    }
                     smcLock.unlock()
-                    heartbeatLock.lock()
-                    lastCommand = nil
-                    lastHeartbeat = nil
-                    heartbeatLock.unlock()
+
+                    // Only clear state if reset actually worked — otherwise retry next cycle
+                    if resetSucceeded {
+                        heartbeatLock.lock()
+                        lastCommand = nil
+                        lastHeartbeat = nil
+                        heartbeatLock.unlock()
+                    }
                 }
             }
         }

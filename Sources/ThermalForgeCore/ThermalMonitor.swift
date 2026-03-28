@@ -222,10 +222,13 @@ public final class ThermalMonitor {
             var basePct: Float = sorted.last?.rpmPercent ?? 1.0
 
             for m in sorted {
-                // If this fan speed held full load (1.0), it can handle anything
-                if m.maxSustainableLoad ?? 1.0 >= 1.0 {
-                    basePct = m.rpmPercent
-                    break
+                // If maxSustainableLoad is nil (legacy data), fall back to steady state check only
+                if let load = m.maxSustainableLoad {
+                    // If this fan speed held full load, it can handle anything
+                    if load >= 1.0 {
+                        basePct = m.rpmPercent
+                        break
+                    }
                 }
                 // If steady state was well below ceiling, this level has headroom
                 if m.steadyState < Self.smartCeiling - 5 {

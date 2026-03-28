@@ -169,6 +169,7 @@ final class CalibrationState: ObservableObject {
                 await MainActor.run { activeStressFlag = stressFlag }
                 startStress(flag: stressFlag, intensity: loadStep)
 
+                var stepReadings: [Float] = []
                 for _ in 0..<ticksPerStep {
                     guard !Task.isCancelled else {
                         stressFlag.stop()
@@ -176,6 +177,7 @@ final class CalibrationState: ObservableObject {
                     }
 
                     let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
+                    stepReadings.append(peak)
                     allReadings.append(peak)
                     peakTemp = max(peakTemp, peak)
                     await MainActor.run { currentTemp = peak }
@@ -189,6 +191,15 @@ final class CalibrationState: ObservableObject {
                         hitCeiling = true
                         maxLoad = loadStep
                         break
+                    }
+
+                    // Optimized mode: steady-state detection at this load step
+                    if mode.usesSteadyStateDetection && stepReadings.count >= 15 {
+                        let recent = stepReadings.suffix(15)
+                        if (recent.max() ?? 0) - (recent.min() ?? 0) < 0.5 {
+                            TFLogger.shared.calibration("[\(level.label)] Steady state at \(loadLabel): \(String(format: "%.1f", peak))°C")
+                            break
+                        }
                     }
 
                     try? await Task.sleep(nanoseconds: 2_000_000_000)

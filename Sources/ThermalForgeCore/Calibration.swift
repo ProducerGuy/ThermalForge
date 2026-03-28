@@ -326,8 +326,19 @@ public final class CalibrationRunner {
     /// Load steps: 25%, 50%, 75%, 100%
     private static let loadSteps: [Float] = [0.25, 0.50, 0.75, 1.00]
 
+    /// Cleanup: always stop stress, reset fans, close CSV on any exit path
+    private func cleanup() {
+        stopStress()
+        try? fanControl.resetAuto()
+        csvHandle?.closeFile()
+        csvHandle = nil
+    }
+
     /// Run full calibration. Blocks until complete.
     public func run() throws -> CalibrationData {
+        // Ensure cleanup on any exit — normal, error, or exception
+        defer { cleanup() }
+
         let fanCount = try fanControl.fanCount()
         let fan0 = try fanControl.fanInfo(0)
         let maxRPM = fan0.maxRPM > 0 ? fan0.maxRPM : 7826
@@ -486,12 +497,6 @@ public final class CalibrationRunner {
             // Brief pause between levels
             Thread.sleep(forTimeInterval: 5)
         }
-
-        // Reset fans
-        try fanControl.resetAuto()
-        stopStress()
-        csvHandle?.closeFile()
-        csvHandle = nil
 
         return CalibrationData(
             machine: machine,
