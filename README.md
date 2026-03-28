@@ -95,19 +95,26 @@ sudo thermalforge calibrate --mode quick       # Quick (~10 min)
 sudo thermalforge calibrate --mode optimized    # Until stable (~35-50 min)
 ```
 
-Calibration stresses both CPU and GPU simultaneously using Metal compute shaders — the same combined-load approach used by [Notebookcheck](https://www.notebookcheck.net) (Prime95 + FurMark) and [Gamers Nexus](https://gamersnexus.net/guides/3561-cpu-cooler-testing-methodology-most-tests-are-flawed) for thermal testing. On Apple Silicon, CPU and GPU share the same die and unified memory, so combined stress is the only way to capture real-world worst-case thermal behavior.
+Calibration stresses both CPU and GPU simultaneously using Metal compute shaders — the same combined-load approach used by [Notebookcheck](https://www.notebookcheck.net) (Prime95 + FurMark) and [Gamers Nexus](https://gamersnexus.net/guides/3561-cpu-cooler-testing-methodology-most-tests-are-flawed) for thermal testing. On Apple Silicon, CPU and GPU share the same die and unified memory, so combined stress captures real-world thermal behavior.
 
-At each of 4 fan speed levels (25%, 50%, 75%, 100%), calibration measures how fast the machine heats, where temperature stabilizes, and how fast it cools. Results are saved permanently.
+At each of 4 fan speed levels (min, 50%, 75%, 100%), calibration gradually increases load in steps (25% → 50% → 75% → 100%) while monitoring temperature. The performance ceiling is 85°C — the point where Apple Silicon starts throttling. If a fan speed can't hold the line at a given load step, calibration records that and moves on. The machine never exceeds the temperature threshold that Smart exists to prevent.
+
+For each fan level, calibration records:
+- **Max sustainable load** — the highest load this fan speed held below 85°C
+- **Temperature curve** — how temp rose across load steps
+- **Cooling rate** — how fast the fan speed brings temp down after load stops
+
+Smart uses this data to make proportional decisions: match fan speed to current system load and temperature, keeping the machine below 85°C at all times.
 
 ### Calibration modes
 
 | Mode | Time | What it does |
 |---|---|---|
-| **Quick** | ~10 min | 2 min heat + 30s cool per level. Reaches ~75% of steady state. Good baseline. |
-| **Standard** | ~28 min | 5 min heat + 2 min cool per level. Reaches ~95% of steady state. Recommended. |
-| **Optimized** | ~35-50 min | Runs until temperature stabilizes (<0.5°C change over 60s). Guaranteed steady state. Best data. |
+| **Quick** | ~10 min | 30s per load step, 30s cool per level. Good baseline data. |
+| **Standard** | ~20 min | 60s per load step, 1 min cool per level. Reliable data for all Macs. Recommended. |
+| **Optimized** | ~30-45 min | Runs until temperature stabilizes at each load step (<0.5°C change over 30s). Best data. |
 
-Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Three time constants (5 min) reaches 95% of steady state. Five time constants (10 min) reaches 99.3%. Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's 5-minute heating phase.
+Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's timing.
 
 **Smart works without calibration** — it uses a conservative default curve. Calibration makes it precise for your hardware.
 
@@ -155,7 +162,7 @@ The `thermalforge auto` command also kills the app automatically to prevent it f
 
 ### Disclaimer
 
-Calibration pushes your CPU and GPU to full load and cycles fan speeds. This is within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
+Calibration gradually increases CPU and GPU load while cycling fan speeds, capping temperature at 85°C. This is well within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
 
 ## CLI
 
