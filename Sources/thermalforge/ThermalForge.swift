@@ -270,6 +270,9 @@ struct Watch: ParsableCommand {
         // Set up signal handler for clean shutdown
         signal(SIGINT) { _ in
             print("\nResetting fans to auto...")
+            if let resetFC = try? FanControl() {
+                try? resetFC.resetAuto()
+            }
             Darwin.exit(0)
         }
 
@@ -377,6 +380,9 @@ struct Log: ParsableCommand {
         abstract: "Record thermal data to CSV for research and analysis"
     )
 
+    /// Static reference for SIGINT handler (can't capture context in C function pointer)
+    nonisolated(unsafe) static var activeLogger: ThermalLogger?
+
     @Option(name: .shortAndLong, help: "Sample rate in Hz (default: 1)")
     var rate: Double = 1.0
 
@@ -415,8 +421,11 @@ struct Log: ParsableCommand {
         print("\nLogging... Ctrl-C to stop.\n")
 
         // Clean shutdown on Ctrl-C
+        Log.activeLogger = logger
         signal(SIGINT) { _ in
             print("\n\nStopping...")
+            Log.activeLogger?.stop()
+            Thread.sleep(forTimeInterval: 1)
             Darwin.exit(0)
         }
 

@@ -82,8 +82,8 @@ public final class DaemonClient {
             write(fd, buf.baseAddress!, buf.count)
         }
 
-        // Read response
-        var buffer = [UInt8](repeating: 0, count: 1024)
+        // Read response — 8KB handles status JSON on sensor-rich machines
+        var buffer = [UInt8](repeating: 0, count: 8192)
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { throw DaemonError.connectionFailed }
 

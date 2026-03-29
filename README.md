@@ -43,11 +43,15 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 
 ## Features
 
+- **Smart profile** — proactive fan curve that ramps before throttling, calibrated to your machine
+- **Calibration** — measures your machine's thermal response so Smart makes precise decisions
+- **Thermal logging** — CSV + JSON data export with process correlation for research
 - Real-time CPU, GPU, RAM, SSD, and ambient temperatures in the menu bar
-- Four fan profiles: Silent, Balanced (60%), Performance (85%), Max (100%)
+- Five profiles: Silent, Balanced (60%), Performance (85%), Max (100%), Smart
 - Automatic fan re-apply after sleep/wake
 - Fahrenheit / Celsius toggle
 - Safety override: forces max fans if any sensor hits 95°C
+- Crash recovery: heartbeat watchdog resets fans if app dies
 - Privileged daemon — one-time sudo, zero password prompts after
 - Native Swift — lightweight, no Electron, no bloat
 
@@ -112,7 +116,7 @@ sudo thermalforge calibrate --mode optimized    # Until stable (~35-50 min)
 
 Calibration stresses both CPU and GPU simultaneously using Metal compute shaders — the same combined-load approach used by [Notebookcheck](https://www.notebookcheck.net) (Prime95 + FurMark) and [Gamers Nexus](https://gamersnexus.net/guides/3561-cpu-cooler-testing-methodology-most-tests-are-flawed) for thermal testing. On Apple Silicon, CPU and GPU share the same die and unified memory, so combined stress captures real-world thermal behavior.
 
-At each of 4 fan speed levels (min, 50%, 75%, 100%), calibration gradually increases load in steps (25% → 50% → 75% → 100%) while monitoring temperature. The performance ceiling is 85°C — the point where Apple Silicon starts throttling. If a fan speed can't hold the line at a given load step, calibration records that and moves on. The machine never exceeds the temperature threshold that Smart exists to prevent.
+At each of 4 fan speed levels (min, 50%, 75%, 100%), calibration gradually increases load in steps (5% → 10% → 15% → 25%) while monitoring temperature. Load intensity is calibrated to produce realistic ~1°C/sec ramp rates matching real-world workloads (research: Notebookcheck, Max Tech), not synthetic maximum load. The performance ceiling is 85°C — the point where Apple Silicon starts throttling. If a fan speed can't hold the line at a given load step, calibration records that and moves on. The machine never exceeds the temperature threshold that Smart exists to prevent.
 
 For each fan level, calibration records:
 - **Max sustainable load** — the highest load this fan speed held below 85°C
@@ -125,9 +129,9 @@ Smart uses this data to make proportional decisions: match fan speed to current 
 
 | Mode | Time | What it does |
 |---|---|---|
-| **Quick** | ~10 min | 30s per load step (4 steps), 30s cool per level. Good baseline data. |
-| **Standard** | ~28 min | 75s per load step (4 steps), 2 min cool per level. Reliable data for all Macs. Recommended. |
-| **Optimized** | ~30-45 min | Up to 2.5 min per load step, exits early when temperature stabilizes (<0.5°C change over 30s). Best data. |
+| **Quick** | ~14 min | 30s sample per load step (4 steps), 30s cool per level. Includes cooldown wait, fan spin-up, and transition discard. Good baseline data. |
+| **Standard** | ~32 min | 75s sample per load step (4 steps), 2 min cool per level. Reliable data for all Macs. Recommended. |
+| **Optimized** | ~35-50 min | Up to 2.5 min per load step, exits early when temperature stabilizes (<0.5°C change over 30s). Best data. |
 
 Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's timing.
 
@@ -158,7 +162,7 @@ Yes. If you initially ran Quick, running Standard or Optimized will replace it w
 Press the Stop button in the app or Ctrl-C in the terminal. Stress threads are killed immediately, fans reset to Apple defaults. No calibration data is saved. Smart continues to work with the default curve.
 
 **What if ThermalForge closes during normal use?**
-The background daemon keeps running with the last fan setting. On next launch, Smart picks up your calibration data and resumes.
+The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app resets fans to auto, then Smart picks up your calibration data when you activate it.
 
 **What does calibration save?**
 Two files in `~/Library/Application Support/ThermalForge/`:
@@ -223,12 +227,7 @@ sudo thermalforge uninstall
 sudo thermalforge uninstall
 ```
 
-Or manually:
-
-```bash
-sudo thermalforge uninstall
-sudo rm -rf /Applications/ThermalForge.app
-```
+This removes the daemon, binary, app bundle, calibration data, and all logs.
 
 ## Contributing
 

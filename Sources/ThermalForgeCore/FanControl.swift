@@ -206,7 +206,7 @@ public final class FanControl {
 
         for i in 0..<count {
             let info = try fanInfo(i)
-            let maxRPM = info.maxRPM > 0 ? info.maxRPM : 6000
+            let maxRPM = info.maxRPM > 0 ? info.maxRPM : 7826
 
             let targetKey = SMCFanKey.key(SMCFanKey.target, fan: i)
             guard smc.writeKey(targetKey, bytes: floatToSMCBytes(maxRPM)) else {
@@ -416,23 +416,6 @@ public final class FanControl {
     }
 
     private func log(_ message: String) {
-        let logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/ThermalForge")
-
-        try? FileManager.default.createDirectory(
-            at: logDir, withIntermediateDirectories: true
-        )
-
-        let logFile = logDir.appendingPathComponent("thermalforge.log")
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let entry = "[\(timestamp)] \(message)\n"
-
-        if let handle = try? FileHandle(forWritingTo: logFile) {
-            handle.seekToEndOfFile()
-            handle.write(entry.data(using: .utf8)!)
-            handle.closeFile()
-        } else {
-            try? entry.write(to: logFile, atomically: true, encoding: .utf8)
-        }
+        TFLogger.shared.fan(message)
     }
 }

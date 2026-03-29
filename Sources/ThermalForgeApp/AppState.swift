@@ -155,7 +155,8 @@ final class AppState: ObservableObject {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            // Silently fail — user can retry
+            TFLogger.shared.error("Launch at login toggle failed: \(error)")
+            launchAtLogin = !launchAtLogin // revert toggle
         }
     }
 }

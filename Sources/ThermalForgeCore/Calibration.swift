@@ -345,7 +345,7 @@ public final class CalibrationRunner {
         let fanCount = try fanControl.fanCount()
         let fan0 = try fanControl.fanInfo(0)
         let maxRPM = fan0.maxRPM > 0 ? fan0.maxRPM : 7826
-        let minRPM = fan0.minRPM > 0 ? fan0.minRPM : 1200
+        let minRPM = fan0.minRPM > 0 ? fan0.minRPM : 2317
 
         // Machine info
         var sysSize = 0

@@ -270,7 +270,8 @@ public final class ThermalMonitor {
 
         // Apply if changed meaningfully (avoid SMC write spam)
         if abs(targetPct - lastSmartRPMPercent) > 0.02 {
-            let targetRPM = maxRPM * targetPct
+            let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 1200
+            let targetRPM = max(maxRPM * targetPct, minRPM)
             applyCommand(.setRPM(targetRPM))
             lastSmartRPMPercent = targetPct
             state = .active(profileName: "Smart")
@@ -326,7 +327,7 @@ public final class ThermalMonitor {
         do {
             try onFanCommand?(command)
         } catch {
-            // Log but don't crash — monitor should keep running
+            TFLogger.shared.error("Fan command failed: \(command) — \(error)")
         }
     }
 

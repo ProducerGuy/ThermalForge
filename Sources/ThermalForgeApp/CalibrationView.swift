@@ -145,7 +145,7 @@ final class CalibrationState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        for (_, level) in rpmLevels.enumerated() {
+        for level in rpmLevels {
             guard !Task.isCancelled else { break }
 
             let targetRPM = Int(maxRPM * level.pct)
