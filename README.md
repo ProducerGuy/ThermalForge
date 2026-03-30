@@ -182,15 +182,33 @@ Two files in `~/Library/Application Support/ThermalForge/`:
 - `calibration.json` — machine-specific thermal data that Smart reads
 - `calibration_<timestamp>.csv` — every sensor reading taken during calibration (for research use)
 
-### Emergency reset
+### Resets and troubleshooting
 
-If fans are stuck or behaving unexpectedly, this command kills the app and resets fans to Apple defaults:
-
+**Reset fans right now:**
 ```bash
-sudo killall ThermalForgeApp; sudo /usr/local/bin/thermalforge auto
+thermalforge auto
 ```
+Kills the app and resets fans to Apple defaults. Calibration data is preserved.
 
-The `thermalforge auto` command also kills the app automatically to prevent it from overriding the reset.
+**Clear calibration and start over:**
+```bash
+thermalforge calibrate --reset
+```
+Deletes calibration data. Smart falls back to the default curve. No sudo needed.
+
+**Emergency reset (if nothing else works):**
+```bash
+sudo killall ThermalForgeApp && sudo /usr/local/bin/thermalforge auto
+```
+Force-kills the app and resets fans directly via the daemon.
+
+**Completely remove ThermalForge:**
+```bash
+sudo thermalforge uninstall
+```
+Removes the daemon, binary, app, calibration data, and all logs. Clean slate.
+
+If installed via Homebrew, run `brew uninstall thermalforge` first.
 
 ### Disclaimer
 
@@ -206,6 +224,7 @@ thermalforge set 4000      # Set specific RPM
 thermalforge discover      # Dump all SMC keys (for new hardware)
 thermalforge watch          # Monitor mode with auto-boost profiles
 thermalforge calibrate     # Calibrate Smart profile for this machine (sudo)
+thermalforge calibrate --reset   # Clear calibration data
 thermalforge log           # Record thermal data to CSV (1Hz, auto-delete 24h)
 thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep forever
 ```

@@ -291,13 +291,28 @@ struct Calibrate: ParsableCommand {
         abstract: "Measure this machine's thermal characteristics for the Smart profile"
     )
 
-    @Option(name: .shortAndLong, help: "Calibration mode: quick (~10 min), standard (~28 min), optimized (until stable)")
+    @Option(name: .shortAndLong, help: "Calibration mode: quick (~14 min), standard (~32 min), optimized (until stable)")
     var mode: String = "standard"
 
     @Option(name: .shortAndLong, help: "Stress type: combined (CPU+GPU, default), cpu, gpu")
     var stress: String = "combined"
 
+    @Flag(name: .long, help: "Clear calibration data and start fresh")
+    var reset: Bool = false
+
     func run() throws {
+        // Reset doesn't need sudo — it's user data
+        if reset {
+            if CalibrationData.exists {
+                try? FileManager.default.removeItem(at: CalibrationData.filePath)
+                print("Calibration data cleared. Smart will use the default curve.")
+                TFLogger.shared.calibration("Calibration data reset by user")
+            } else {
+                print("No calibration data to clear.")
+            }
+            return
+        }
+
         guard geteuid() == 0 else {
             throw ValidationError("Run with sudo: sudo thermalforge calibrate")
         }
