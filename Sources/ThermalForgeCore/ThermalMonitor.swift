@@ -52,6 +52,11 @@ public final class ThermalMonitor {
     private var anomalyHistory: [Float] = []
     private var isCalibrating = false
 
+    // Rolling process buffer — captures what was running BEFORE a spike
+    // 15 snapshots × 2 seconds = 30 seconds of pre-spike history
+    private var processBuffer: [(timestamp: String, processes: String)] = []
+    private let isoFormatter = ISO8601DateFormatter()
+
     /// Call this to suppress anomaly logging during calibration
     public func setCalibrating(_ value: Bool) {
         queue.async { self.isCalibrating = value }
@@ -140,24 +145,31 @@ public final class ThermalMonitor {
         let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
         let maxTemp = max(cpuTemp, gpuTemp)
 
+        // Rolling process buffer — always capturing, like a security camera
+        let currentProcs = captureTopProcesses()
+        let ts = isoFormatter.string(from: Date())
+        processBuffer.append((timestamp: ts, processes: currentProcs))
+        if processBuffer.count > 15 { processBuffer.removeFirst() }
+
         // Anomaly detection: two tiers
         // Tier 1: instant spike — >5°C between consecutive readings (2 seconds)
         // Tier 2: sustained change — >10°C over 30 seconds
         if !isCalibrating {
+            var spikeDetected = false
+
             // Tier 1: check against previous reading
             if let prevTemp = anomalyHistory.last {
                 let instantDelta = maxTemp - prevTemp
                 if abs(instantDelta) > 5 {
                     let direction = instantDelta > 0 ? "spike" : "drop"
                     let fan0 = status.fans.first
-                    let topProcs = captureTopProcesses()
                     TFLogger.shared.info(
                         "Instant \(direction): \(String(format: "%.1f", prevTemp))→\(String(format: "%.1f", maxTemp))°C " +
                         "(\(String(format: "%+.1f", instantDelta))°C in 2s) | " +
                         "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
-                        "Profile: \(activeProfile.name) | " +
-                        "Processes: \(topProcs)"
+                        "Profile: \(activeProfile.name)"
                     )
+                    spikeDetected = true
                 }
             }
 
@@ -168,15 +180,22 @@ public final class ThermalMonitor {
                 if abs(sustainedDelta) > 10 {
                     let direction = sustainedDelta > 0 ? "spike" : "drop"
                     let fan0 = status.fans.first
-                    let topProcs = captureTopProcesses()
                     TFLogger.shared.info(
                         "Sustained \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
                         "(\(String(format: "%+.1f", sustainedDelta))°C in 30s) | " +
                         "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
-                        "Profile: \(activeProfile.name) | " +
-                        "Processes: \(topProcs)"
+                        "Profile: \(activeProfile.name)"
                     )
+                    spikeDetected = true
                     anomalyHistory.removeAll()
+                }
+            }
+
+            // Dump the rolling buffer on any spike — shows what was running BEFORE
+            if spikeDetected {
+                TFLogger.shared.info("Pre-spike process history (last \(processBuffer.count * 2)s):")
+                for entry in processBuffer {
+                    TFLogger.shared.info("  \(entry.timestamp): \(entry.processes)")
                 }
             }
         }
