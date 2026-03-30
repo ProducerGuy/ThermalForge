@@ -43,17 +43,30 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 
 ## Features
 
-- **Smart profile** — proactive fan curve that ramps before throttling, calibrated to your machine
-- **Calibration** — measures your machine's thermal response so Smart makes precise decisions
-- **Thermal logging** — CSV + JSON data export with process correlation for research
 - Real-time CPU, GPU, RAM, SSD, and ambient temperatures in the menu bar
-- Five profiles: Silent, Balanced (60%), Performance (85%), Max (100%), Smart
+- Five fan profiles with proportional curves (not binary on/off)
+- Thermal logging — CSV + JSON data export with process correlation for research
 - Automatic fan re-apply after sleep/wake
 - Fahrenheit / Celsius toggle
 - Safety override: forces max fans if any sensor hits 95°C
 - Crash recovery: heartbeat watchdog resets fans if app dies
+- Temperature anomaly detection: logs instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with process capture
 - Privileged daemon — one-time sudo, zero password prompts after
 - Native Swift — lightweight, no Electron, no bloat
+
+## Profiles
+
+Every profile uses a proportional curve — fans ramp gradually with temperature, not as binary switches. Ramp rates match Apple's hardware behavior (~400 RPM/sec up, ~200 RPM/sec down) to minimize fan bearing wear. Once fans are on, they stay on until temperature is clearly stable below the threshold (at least 5°C hysteresis) to avoid damaging start/stop cycling.
+
+| Profile | Fans off below | Fans ramp from | Max fan speed | Target |
+|---|---|---|---|---|
+| **Silent** | Always off | N/A — hands-off | Apple default | Monitoring only. Lets Apple handle fans. |
+| **Balanced** | 50°C | 60–70°C | 60% | Good balance of noise and cooling for everyday use. |
+| **Performance** | 45°C | 50–65°C | 85% | For sustained workloads where cooling matters more than noise. |
+| **Max** | Never | Always on | 100% | Full cooling, maximum noise. |
+| **Smart** | 55°C | 60–85°C | 100% (adapts) | Proactive curve with rate-of-change awareness. Uses calibration data when available. |
+
+**How the curves work:** Between the ramp start and target ceiling temperatures, fan speed scales proportionally. At 65°C on Balanced (midpoint of 60–70°C range), fans run at 30% of max RPM. At the ceiling they reach the profile's max. Below the off threshold, fans stop completely. In the gap between off and ramp start (hysteresis zone), fans maintain their current state — if already running they stay at minimum, if already off they stay off.
 
 ## Install
 
