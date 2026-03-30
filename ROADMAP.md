@@ -114,13 +114,38 @@ Smart uses the same three-zone model but with:
 - Calibration data: the adaptive intensity finder discovers the machine's thermal response, and calibration maps how each fan speed handles proportional load
 - Without calibration: conservative S-curve (already built, stays as fallback)
 
-### Calibration redesign
+### Calibration redesign — temp-first, not fan-first
 
-Calibration needs to work with the new curve system:
-- Pre-calibration: adaptive intensity finder discovers ~1°C/sec stress level (already built)
-- At each fan level: ramp load using discovered baseline, measure where temp stabilizes within the curve
-- Records: at what fan percentage does this machine hold each temperature target?
-- Smart uses this to choose the right point on its curve for current conditions
+Previous calibration was fan-first: fix fan speed, blast stress, see where temp lands. This caused temp to blow past 85°C because we held fans low while pushing load. Fundamentally wrong approach.
+
+New calibration is temp-first: heat the machine to a target temperature, then find what fan speed holds it there. This directly maps temperature → required fan speed, which is exactly what the proportional curves need.
+
+**How it works:**
+1. Pre-calibration: adaptive intensity finder discovers ~1°C/sec stress level (already built)
+2. Start calibrated stress at discovered intensity
+3. Let machine heat to 60°C → adjust fan speed up/down until temp holds at 60°C → record: "60°C needs X% fan speed on this machine"
+4. Continue stress, let machine heat to 65°C → find holding fan speed → record
+5. Repeat at 70°C, 75°C, 80°C, 85°C
+6. Stop stress, measure cooling rates at each fan speed discovered
+
+**What this produces:**
+A temperature-to-fan-speed lookup table specific to this machine:
+
+| Temperature | Fan speed to hold |
+|---|---|
+| 60°C | 30% (min RPM) |
+| 65°C | 38% |
+| 70°C | 52% |
+| 75°C | 67% |
+| 80°C | 81% |
+| 85°C | 95% |
+
+Smart reads this table and interpolates: "current temp is 72°C → I need ~58% fan speed." No guessing, no generic curves — machine-specific data.
+
+**Why this never exceeds 85°C:**
+We control the temperature target, not the fan speed. At each step we let the fans adjust to hold the target. If the machine can't hold 85°C even at 100% fans, that's the data point — "this machine's limit under this load is X°C at max fans."
+
+**The adaptive intensity finder stays unchanged** — it finds the right stress level for ~1°C/sec heating. The fan level sweep gets replaced with a temperature target sweep.
 
 ### Logging changes
 
