@@ -140,27 +140,49 @@ public final class ThermalMonitor {
         let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
         let maxTemp = max(cpuTemp, gpuTemp)
 
-        // Anomaly detection: log significant temperature changes
-        anomalyHistory.append(maxTemp)
-        if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
-        if !isCalibrating && anomalyHistory.count >= 15 {
-            let oldest = anomalyHistory.first!
-            let delta = maxTemp - oldest
-            if abs(delta) > 10 {
-                let direction = delta > 0 ? "spike" : "drop"
-                let fan0 = status.fans.first
-                let topProcs = captureTopProcesses()
-                TFLogger.shared.info(
-                    "Temperature \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
-                    "(\(String(format: "%+.1f", delta))°C in 30s) | " +
-                    "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
-                    "Profile: \(activeProfile.name) | " +
-                    "Processes: \(topProcs)"
-                )
-                // Reset so we don't log the same event repeatedly
-                anomalyHistory.removeAll()
+        // Anomaly detection: two tiers
+        // Tier 1: instant spike — >5°C between consecutive readings (2 seconds)
+        // Tier 2: sustained change — >10°C over 30 seconds
+        if !isCalibrating {
+            // Tier 1: check against previous reading
+            if let prevTemp = anomalyHistory.last {
+                let instantDelta = maxTemp - prevTemp
+                if abs(instantDelta) > 5 {
+                    let direction = instantDelta > 0 ? "spike" : "drop"
+                    let fan0 = status.fans.first
+                    let topProcs = captureTopProcesses()
+                    TFLogger.shared.info(
+                        "Instant \(direction): \(String(format: "%.1f", prevTemp))→\(String(format: "%.1f", maxTemp))°C " +
+                        "(\(String(format: "%+.1f", instantDelta))°C in 2s) | " +
+                        "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
+                        "Profile: \(activeProfile.name) | " +
+                        "Processes: \(topProcs)"
+                    )
+                }
+            }
+
+            // Tier 2: check over 30-second window
+            if anomalyHistory.count >= 15 {
+                let oldest = anomalyHistory.first!
+                let sustainedDelta = maxTemp - oldest
+                if abs(sustainedDelta) > 10 {
+                    let direction = sustainedDelta > 0 ? "spike" : "drop"
+                    let fan0 = status.fans.first
+                    let topProcs = captureTopProcesses()
+                    TFLogger.shared.info(
+                        "Sustained \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
+                        "(\(String(format: "%+.1f", sustainedDelta))°C in 30s) | " +
+                        "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
+                        "Profile: \(activeProfile.name) | " +
+                        "Processes: \(topProcs)"
+                    )
+                    anomalyHistory.removeAll()
+                }
             }
         }
+
+        anomalyHistory.append(maxTemp)
+        if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
 
         // Safety override: any sensor > 95°C
         if maxTemp >= FanProfile.safetyTempThreshold {
