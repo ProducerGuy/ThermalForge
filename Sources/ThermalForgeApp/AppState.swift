@@ -120,28 +120,23 @@ final class AppState: ObservableObject {
     }
 
     func selectProfile(_ profile: FanProfile) {
-        NSLog("ThermalForge: selecting profile: %@", profile.name)
         activeProfile = profile
         monitor?.switchProfile(profile)
+        TFLogger.shared.profile("Selected: \(profile.name)")
 
+        // Only Max applies fans immediately — all other profiles
+        // are handled by tick() curve evaluation each cycle
         do {
-            if profile.id == "smart" {
-                // Smart — tick() handles fan control dynamically
-                return
-            } else if profile.fanBehavior.mode == .auto {
-                // Silent — return to Apple defaults
-                try executor.execute(.resetAuto)
-            } else if profile.fanBehavior.rpmPercent >= 1.0 {
-                // Max — full speed
+            if profile.curve.alwaysOn {
                 try executor.execute(.setMax)
-            } else {
-                // Balanced/Performance — apply immediately at the profile's RPM %
-                let maxRPM: Float = Float(latestStatus?.fans.first?.maxRPM ?? 7826)
-                let targetRPM = maxRPM * profile.fanBehavior.rpmPercent
-                try executor.execute(.setRPM(targetRPM))
+            } else if profile.curve.handsOff || profile.id == "smart" {
+                // Silent and Smart: tick() handles it, reset to auto first
+                try executor.execute(.resetAuto)
             }
+            // Balanced/Performance: tick() will ramp proportionally
+            // based on current temperature — no immediate fan command
         } catch {
-            NSLog("ThermalForge: profile %@ failed: %@", profile.name, "\(error)")
+            TFLogger.shared.error("Profile \(profile.name) failed: \(error)")
         }
     }
 

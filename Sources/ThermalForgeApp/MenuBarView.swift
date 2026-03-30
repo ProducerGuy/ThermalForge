@@ -72,8 +72,8 @@ struct MenuBarView: View {
                     HStack {
                         Text(profile.name)
                         Spacer()
-                        if let cpu = profile.triggers.cpuTemp {
-                            Text("CPU>\(Int(cpu))°")
+                        if !profile.curve.handsOff && !profile.curve.alwaysOn {
+                            Text("<\(Int(profile.curve.ceilingTemp))°")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -215,8 +215,8 @@ private struct ProfileButton: View {
                     .foregroundStyle(isActive ? .blue : .secondary)
                 Text(profile.name)
                 Spacer()
-                if let cpu = profile.triggers.cpuTemp {
-                    Text("CPU>\(Int(cpu))°")
+                if !profile.curve.handsOff && !profile.curve.alwaysOn {
+                    Text("<\(Int(profile.curve.ceilingTemp))°")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -11,22 +11,28 @@ import Testing
 @Suite("Profiles")
 struct ProfileTests {
 
-    @Test("Built-in profiles have correct thresholds")
-    func builtInThresholds() {
-        #expect(FanProfile.silent.triggers.cpuTemp == nil)
-        #expect(FanProfile.silent.fanBehavior.mode == .auto)
+    @Test("Built-in profiles have correct curve parameters")
+    func builtInCurves() {
+        // Silent: hands-off, 73-78°C intervention
+        #expect(FanProfile.silent.curve.handsOff == true)
+        #expect(FanProfile.silent.curve.stopTemp == 73)
+        #expect(FanProfile.silent.curve.startTemp == 78)
 
-        #expect(FanProfile.balanced.triggers.cpuTemp == 70)
-        #expect(FanProfile.balanced.triggers.gpuTemp == 65)
-        #expect(FanProfile.balanced.fanBehavior.rpmPercent == 0.60)
+        // Balanced: 50-60-70°C, 60% max
+        #expect(FanProfile.balanced.curve.stopTemp == 50)
+        #expect(FanProfile.balanced.curve.startTemp == 60)
+        #expect(FanProfile.balanced.curve.ceilingTemp == 70)
+        #expect(FanProfile.balanced.curve.maxRPMPercent == 0.60)
 
-        #expect(FanProfile.performance.triggers.cpuTemp == 80)
-        #expect(FanProfile.performance.triggers.gpuTemp == 75)
-        #expect(FanProfile.performance.triggers.memPressure == 70)
-        #expect(FanProfile.performance.fanBehavior.rpmPercent == 0.85)
+        // Performance: 45-50-65°C, 85% max
+        #expect(FanProfile.performance.curve.stopTemp == 45)
+        #expect(FanProfile.performance.curve.startTemp == 50)
+        #expect(FanProfile.performance.curve.ceilingTemp == 65)
+        #expect(FanProfile.performance.curve.maxRPMPercent == 0.85)
 
-        #expect(FanProfile.max.fanBehavior.rpmPercent == 1.0)
-        #expect(FanProfile.max.fanBehavior.mode == .manual)
+        // Max: always on at 100%
+        #expect(FanProfile.max.curve.alwaysOn == true)
+        #expect(FanProfile.max.curve.maxRPMPercent == 1.0)
     }
 
     @Test("Four built-in profiles exist")
@@ -53,8 +59,7 @@ struct ProfileTests {
         let custom = FanProfile(
             id: "test_custom",
             name: "Test Custom",
-            triggers: FanProfile.Triggers(cpuTemp: 60, gpuTemp: 55),
-            fanBehavior: FanProfile.FanBehavior(mode: .manual, rpmPercent: 0.50)
+            curve: FanProfile.Curve(stopTemp: 45, startTemp: 55, ceilingTemp: 65, maxRPMPercent: 0.50)
         )
 
         try custom.save()
@@ -62,8 +67,8 @@ struct ProfileTests {
         let loaded = FanProfile.loadAll()
         let found = loaded.first { $0.id == "test_custom" }
         #expect(found != nil)
-        #expect(found?.triggers.cpuTemp == 60)
-        #expect(found?.fanBehavior.rpmPercent == 0.50)
+        #expect(found?.curve.startTemp == 55)
+        #expect(found?.curve.maxRPMPercent == 0.50)
 
         // Clean up
         let path = FileManager.default.homeDirectoryForCurrentUser
@@ -79,5 +84,42 @@ struct ProfileTests {
     @Test("Hysteresis deadband is 5°C")
     func hysteresis() {
         #expect(FanProfile.hysteresisDegrees == 5.0)
+    }
+
+    @Test("Balanced curve produces correct fan percentages")
+    func balancedCurve() {
+        let curve = FanProfile.balanced.curve
+
+        // Below stop: fans off
+        #expect(curve.targetPercent(at: 45, fansCurrentlyRunning: false) == nil)
+
+        // At start: should return a value (fans start)
+        let atStart = curve.targetPercent(at: 60, fansCurrentlyRunning: false)
+        #expect(atStart != nil)
+        #expect(atStart! >= 0)
+
+        // At ceiling: should be at maxRPMPercent
+        let atCeiling = curve.targetPercent(at: 70, fansCurrentlyRunning: true)
+        #expect(atCeiling == 0.60)
+
+        // Midpoint: should be proportional
+        let atMid = curve.targetPercent(at: 65, fansCurrentlyRunning: true)
+        #expect(atMid != nil)
+        #expect(atMid! > 0)
+        #expect(atMid! < 0.60)
+    }
+
+    @Test("Max profile is always on")
+    func maxAlwaysOn() {
+        let curve = FanProfile.max.curve
+        #expect(curve.targetPercent(at: 30, fansCurrentlyRunning: false) == 1.0)
+        #expect(curve.targetPercent(at: 90, fansCurrentlyRunning: true) == 1.0)
+    }
+
+    @Test("Silent profile is hands-off")
+    func silentHandsOff() {
+        let curve = FanProfile.silent.curve
+        #expect(curve.targetPercent(at: 50, fansCurrentlyRunning: false) == nil)
+        #expect(curve.targetPercent(at: 70, fansCurrentlyRunning: false) == nil)
     }
 }

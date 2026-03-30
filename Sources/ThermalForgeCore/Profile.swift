@@ -2,7 +2,14 @@
 //  Profile.swift
 //  ThermalForge
 //
-//  Fan control profiles with temperature-based triggers.
+//  Fan control profiles with proportional temperature curves.
+//
+//  Each profile defines a curve that maps temperature to fan speed.
+//  Based on Apple fan hardware research:
+//  - 0 to minimum RPM is binary (hardware limitation)
+//  - Above minimum, proportional ramping
+//  - Start/stop cycles are the #1 fan bearing wear factor
+//  - At least 5°C hysteresis between start and stop thresholds
 //
 
 import Foundation
@@ -12,84 +19,143 @@ import Foundation
 public struct FanProfile: Codable, Identifiable, Equatable {
     public let id: String
     public let name: String
-    public let triggers: Triggers
-    public let fanBehavior: FanBehavior
+    public let curve: Curve
 
-    public struct Triggers: Codable, Equatable {
-        /// CPU temperature threshold in °C (nil = manual only)
-        public let cpuTemp: Float?
-        /// GPU temperature threshold in °C
-        public let gpuTemp: Float?
-        /// Memory pressure percentage 0–100
-        public let memPressure: Float?
+    /// Defines how the profile maps temperature to fan speed.
+    public struct Curve: Codable, Equatable {
+        /// Below this temperature, fans turn off (return to Apple auto).
+        /// Must be at least 5°C below startTemp for hysteresis.
+        public let stopTemp: Float
 
-        public init(cpuTemp: Float? = nil, gpuTemp: Float? = nil, memPressure: Float? = nil) {
-            self.cpuTemp = cpuTemp
-            self.gpuTemp = gpuTemp
-            self.memPressure = memPressure
+        /// Above this temperature, fans start at minimum RPM and begin ramping.
+        public let startTemp: Float
+
+        /// Temperature at which fan speed reaches maxRPMPercent.
+        public let ceilingTemp: Float
+
+        /// Maximum fan speed as fraction of max RPM (0.0–1.0).
+        /// Fan speed scales proportionally between startTemp and ceilingTemp.
+        public let maxRPMPercent: Float
+
+        /// If true, this profile doesn't control fans — stays in Apple auto mode.
+        /// Only intervenes at ceilingTemp to ensure Apple is handling it.
+        public let handsOff: Bool
+
+        /// If true, fans are always at maxRPMPercent regardless of temperature.
+        public let alwaysOn: Bool
+
+        public init(stopTemp: Float = 50, startTemp: Float = 60, ceilingTemp: Float = 70,
+                    maxRPMPercent: Float = 0.6, handsOff: Bool = false, alwaysOn: Bool = false) {
+            self.stopTemp = stopTemp
+            self.startTemp = startTemp
+            self.ceilingTemp = ceilingTemp
+            self.maxRPMPercent = maxRPMPercent
+            self.handsOff = handsOff
+            self.alwaysOn = alwaysOn
+        }
+
+        /// Calculate the target fan speed percentage (0.0–1.0) for a given temperature.
+        /// Returns nil if fans should be off (Apple auto).
+        /// Returns the proportional value between minRPM and maxRPMPercent if in the curve zone.
+        public func targetPercent(at temp: Float, fansCurrentlyRunning: Bool) -> Float? {
+            // Always-on profiles ignore temperature
+            if alwaysOn { return maxRPMPercent }
+
+            // Hands-off profiles don't control fans
+            if handsOff { return nil }
+
+            // Below stop threshold and fans not running: stay off
+            if temp <= stopTemp && !fansCurrentlyRunning { return nil }
+
+            // In hysteresis band (between stop and start): maintain current state
+            if temp > stopTemp && temp < startTemp {
+                return fansCurrentlyRunning ? 0.001 : nil // 0.001 signals "keep at minimum"
+            }
+
+            // Below stop threshold but fans are running: turn off
+            if temp <= stopTemp && fansCurrentlyRunning { return nil }
+
+            // Above start: proportional curve
+            if temp >= startTemp {
+                if temp >= ceilingTemp { return maxRPMPercent }
+                let position = (temp - startTemp) / (ceilingTemp - startTemp)
+                return position * maxRPMPercent
+            }
+
+            return nil
         }
     }
 
-    public struct FanBehavior: Codable, Equatable {
-        public let mode: Mode
-        /// Fan speed as fraction of max RPM (0.0–1.0)
-        public let rpmPercent: Float
-
-        public enum Mode: String, Codable, Equatable {
-            case auto
-            case manual
-        }
-
-        public init(mode: Mode, rpmPercent: Float) {
-            self.mode = mode
-            self.rpmPercent = rpmPercent
-        }
-    }
-
-    public init(id: String, name: String, triggers: Triggers, fanBehavior: FanBehavior) {
+    public init(id: String, name: String, curve: Curve) {
         self.id = id
         self.name = name
-        self.triggers = triggers
-        self.fanBehavior = fanBehavior
+        self.curve = curve
+    }
+
+    // Legacy support — old profiles used triggers/fanBehavior
+    public struct Triggers: Codable, Equatable {
+        public let cpuTemp: Float?
+        public let gpuTemp: Float?
+        public let memPressure: Float?
+        public init(cpuTemp: Float? = nil, gpuTemp: Float? = nil, memPressure: Float? = nil) {
+            self.cpuTemp = cpuTemp; self.gpuTemp = gpuTemp; self.memPressure = memPressure
+        }
+    }
+    public struct FanBehavior: Codable, Equatable {
+        public let mode: Mode
+        public let rpmPercent: Float
+        public enum Mode: String, Codable, Equatable { case auto, manual }
+        public init(mode: Mode, rpmPercent: Float) { self.mode = mode; self.rpmPercent = rpmPercent }
     }
 }
 
 // MARK: - Built-in Profiles
 
 extension FanProfile {
+    /// Silent: hands-off, let Apple handle fans. Only monitors.
+    /// Intervenes at 78°C to ensure Apple's thermal management is active.
+    /// Returns to hands-off below 73°C.
     public static let silent = FanProfile(
         id: "silent",
         name: "Silent",
-        triggers: Triggers(),
-        fanBehavior: FanBehavior(mode: .auto, rpmPercent: 0)
+        curve: Curve(stopTemp: 73, startTemp: 78, ceilingTemp: 78,
+                     maxRPMPercent: 0, handsOff: true)
     )
 
+    /// Balanced: moderate curve targeting below 70°C.
+    /// Fans off below 50°C. Ramp from 60–70°C up to 60% max RPM.
+    /// Good balance of noise and cooling for everyday use.
     public static let balanced = FanProfile(
         id: "balanced",
         name: "Balanced",
-        triggers: Triggers(cpuTemp: 70, gpuTemp: 65),
-        fanBehavior: FanBehavior(mode: .manual, rpmPercent: 0.60)
+        curve: Curve(stopTemp: 50, startTemp: 60, ceilingTemp: 70,
+                     maxRPMPercent: 0.60)
     )
 
+    /// Performance: aggressive curve targeting below 65°C.
+    /// Fans off below 45°C. Ramp from 50–65°C up to 85% max RPM.
+    /// For sustained workloads where cooling matters more than noise.
     public static let performance = FanProfile(
         id: "performance",
         name: "Performance",
-        triggers: Triggers(cpuTemp: 80, gpuTemp: 75, memPressure: 70),
-        fanBehavior: FanBehavior(mode: .manual, rpmPercent: 0.85)
+        curve: Curve(stopTemp: 45, startTemp: 50, ceilingTemp: 65,
+                     maxRPMPercent: 0.85)
     )
 
+    /// Max: fans always at 100%. No curve, no temperature logic.
     public static let max = FanProfile(
         id: "max",
         name: "Max",
-        triggers: Triggers(),
-        fanBehavior: FanBehavior(mode: .manual, rpmPercent: 1.0)
+        curve: Curve(alwaysOn: true, maxRPMPercent: 1.0)
     )
 
+    /// Smart: adaptive curve with rate-of-change awareness.
+    /// Uses calibration data when available. 60–85°C range, up to 100%.
     public static let smart = FanProfile(
         id: "smart",
         name: "Smart",
-        triggers: Triggers(),
-        fanBehavior: FanBehavior(mode: .manual, rpmPercent: 0)
+        curve: Curve(stopTemp: 60, startTemp: 60, ceilingTemp: 85,
+                     maxRPMPercent: 1.0)
     )
 
     public static let builtIn: [FanProfile] = [silent, balanced, performance, max]
@@ -123,7 +189,6 @@ extension FanProfile {
             if let data = try? Data(contentsOf: file),
                let profile = try? JSONDecoder().decode(FanProfile.self, from: data)
             {
-                // Replace built-in if same ID, otherwise append
                 if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
                     profiles[idx] = profile
                 } else {
@@ -142,4 +207,18 @@ extension FanProfile {
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
+}
+
+// MARK: - Curve Initializer Convenience
+
+extension FanProfile.Curve {
+    /// Convenience for always-on profiles (Max)
+    public init(alwaysOn: Bool, maxRPMPercent: Float) {
+        self.stopTemp = 0
+        self.startTemp = 0
+        self.ceilingTemp = 0
+        self.maxRPMPercent = maxRPMPercent
+        self.handsOff = false
+        self.alwaysOn = alwaysOn
+    }
 }

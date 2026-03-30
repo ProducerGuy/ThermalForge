@@ -35,6 +35,16 @@ public final class ThermalMonitor {
     public private(set) var state: MonitorState = .idle
     public private(set) var latestStatus: ThermalStatus?
 
+    // Curve state
+    private var lastAppliedRPMPercent: Float = 0
+    private var fansCurrentlyRunning = false
+
+    /// Max ramp-up rate: ~400 RPM/sec = ~5% per 2-second tick
+    /// Research: Apple ramps at ~350-550 RPM/sec. ADM1031 fastest = ~460 RPM/sec.
+    private static let maxRampUp: Float = 0.05
+    /// Max ramp-down rate: ~200 RPM/sec = ~2.5% per 2-second tick
+    private static let maxRampDown: Float = 0.025
+
     // Smart profile state
     private var tempHistory: [Float] = []
     private var lastSmartRPMPercent: Float = 0
@@ -91,12 +101,12 @@ public final class ThermalMonitor {
         timer = nil
     }
 
-    /// Update the active profile. Does NOT execute fan commands —
-    /// the caller is responsible for immediate actions (Max/Auto).
-    /// Threshold-based commands are handled by tick().
+    /// Update the active profile.
     public func switchProfile(_ profile: FanProfile) {
         queue.async { [self] in
             activeProfile = profile
+            lastAppliedRPMPercent = 0
+            fansCurrentlyRunning = false
 
             if profile.id == "smart" {
                 // Reset Smart state and reload calibration data
@@ -109,13 +119,11 @@ public final class ThermalMonitor {
                 } else {
                     calibration = loaded
                 }
-                state = .idle
-            } else if profile.id == "max" {
-                state = .active(profileName: "Max")
-            } else if profile.id == "silent" || profile.fanBehavior.mode == .auto {
-                state = .idle
+            }
+
+            if profile.curve.alwaysOn {
+                state = .active(profileName: profile.name)
             } else {
-                // Balanced/Performance — let tick() evaluate thresholds
                 state = .idle
             }
         }
@@ -161,6 +169,8 @@ public final class ThermalMonitor {
             if state != .safetyOverride {
                 applyCommand(.setMax)
                 state = .safetyOverride
+                fansCurrentlyRunning = true
+                lastAppliedRPMPercent = 1.0
                 TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
             onUpdate?(status, activeProfile, state)
@@ -174,43 +184,15 @@ public final class ThermalMonitor {
             state = .idle
         }
 
-        // Smart profile: graduated curve with rate-of-change awareness
+        // Smart profile: uses curve + rate-of-change + calibration
         if activeProfile.id == "smart" {
             tickSmart(status: status, peakTemp: maxTemp)
             onUpdate?(status, activeProfile, state)
             return
         }
 
-        // Skip trigger evaluation for manual-only profiles
-        if activeProfile.id == "silent" || activeProfile.id == "max" {
-            onUpdate?(status, activeProfile, state)
-            return
-        }
-
-        // Evaluate profile triggers
-        let triggered = isTriggered(
-            profile: activeProfile, cpuTemp: cpuTemp, gpuTemp: gpuTemp
-        )
-
-        let currentlyActive: Bool
-        if case .active = state { currentlyActive = true } else { currentlyActive = false }
-
-        if triggered && !currentlyActive {
-            // Threshold crossed — ramp fans
-            let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
-            let targetRPM = maxRPM * activeProfile.fanBehavior.rpmPercent
-            applyCommand(.setRPM(targetRPM))
-            state = .active(profileName: activeProfile.name)
-        } else if !triggered && currentlyActive {
-            // Below threshold with hysteresis — return to auto
-            let belowHysteresis = isBelowHysteresis(
-                profile: activeProfile, cpuTemp: cpuTemp, gpuTemp: gpuTemp
-            )
-            if belowHysteresis {
-                applyCommand(.resetAuto)
-                state = .idle
-            }
-        }
+        // All other profiles: use curve
+        tickCurve(status: status, peakTemp: maxTemp)
 
         onUpdate?(status, activeProfile, state)
     }
@@ -320,30 +302,83 @@ public final class ThermalMonitor {
         return (newest - oldest) / seconds
     }
 
-    // MARK: - Trigger Evaluation
+    // MARK: - Curve-Based Profiles
 
-    private func isTriggered(profile: FanProfile, cpuTemp: Float, gpuTemp: Float) -> Bool {
-        if let threshold = profile.triggers.cpuTemp, cpuTemp >= threshold {
-            return true
-        }
-        if let threshold = profile.triggers.gpuTemp, gpuTemp >= threshold {
-            return true
-        }
-        if let threshold = profile.triggers.memPressure, memoryPressure() >= threshold {
-            return true
-        }
-        return false
-    }
+    private func tickCurve(status: ThermalStatus, peakTemp: Float) {
+        let curve = activeProfile.curve
+        let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
+        let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
 
-    private func isBelowHysteresis(profile: FanProfile, cpuTemp: Float, gpuTemp: Float) -> Bool {
-        let deadband = FanProfile.hysteresisDegrees
-        if let threshold = profile.triggers.cpuTemp, cpuTemp > threshold - deadband {
-            return false
+        // Hands-off profiles (Silent): don't control fans, just monitor
+        if curve.handsOff {
+            if fansCurrentlyRunning {
+                applyCommand(.resetAuto)
+                fansCurrentlyRunning = false
+                lastAppliedRPMPercent = 0
+                state = .idle
+            }
+            onUpdate?(status, activeProfile, state)
+            return
         }
-        if let threshold = profile.triggers.gpuTemp, gpuTemp > threshold - deadband {
-            return false
+
+        // Always-on (Max): set and hold
+        if curve.alwaysOn {
+            if lastAppliedRPMPercent < curve.maxRPMPercent {
+                applyCommand(.setMax)
+                lastAppliedRPMPercent = curve.maxRPMPercent
+                fansCurrentlyRunning = true
+                state = .active(profileName: activeProfile.name)
+            }
+            onUpdate?(status, activeProfile, state)
+            return
         }
-        return true
+
+        // Get target from curve
+        guard let rawTarget = curve.targetPercent(at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning) else {
+            // Curve says fans should be off
+            if fansCurrentlyRunning {
+                applyCommand(.resetAuto)
+                fansCurrentlyRunning = false
+                lastAppliedRPMPercent = 0
+                state = .idle
+                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
+            }
+            onUpdate?(status, activeProfile, state)
+            return
+        }
+
+        // 0.001 signals "keep at minimum" (hysteresis band)
+        var targetPct = rawTarget <= 0.001 ? minRPM / maxRPM : rawTarget
+
+        // Clamp to valid range
+        targetPct = min(max(targetPct, minRPM / maxRPM), curve.maxRPMPercent)
+
+        // Apply ramp governors
+        if targetPct > lastAppliedRPMPercent {
+            // Ramp up: max ~400 RPM/sec
+            targetPct = min(targetPct, lastAppliedRPMPercent + Self.maxRampUp)
+        } else if targetPct < lastAppliedRPMPercent {
+            // Ramp down: max ~200 RPM/sec
+            targetPct = max(targetPct, lastAppliedRPMPercent - Self.maxRampDown)
+        }
+
+        // Apply if changed meaningfully
+        if abs(targetPct - lastAppliedRPMPercent) > 0.01 {
+            let targetRPM = max(maxRPM * targetPct, minRPM)
+            applyCommand(.setRPM(targetRPM))
+
+            if !fansCurrentlyRunning {
+                TFLogger.shared.fan("Fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C [\(activeProfile.name)]")
+            }
+
+            lastAppliedRPMPercent = targetPct
+            fansCurrentlyRunning = true
+            state = .active(profileName: activeProfile.name)
+        } else if fansCurrentlyRunning {
+            state = .active(profileName: activeProfile.name)
+        }
+
+        onUpdate?(status, activeProfile, state)
     }
 
     // MARK: - Process Capture
