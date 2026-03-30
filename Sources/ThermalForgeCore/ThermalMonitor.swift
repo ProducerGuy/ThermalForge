@@ -38,6 +38,15 @@ public final class ThermalMonitor {
     // Smart profile state
     private var tempHistory: [Float] = []
     private var lastSmartRPMPercent: Float = 0
+
+    // Anomaly detection — tracks temps over 30 seconds (15 readings at 2s)
+    private var anomalyHistory: [Float] = []
+    private var isCalibrating = false
+
+    /// Call this to suppress anomaly logging during calibration
+    public func setCalibrating(_ value: Bool) {
+        queue.async { self.isCalibrating = value }
+    }
     private var calibration: CalibrationData? = {
         guard let data = CalibrationData.load() else { return nil }
         if let error = data.validationError {
@@ -124,6 +133,28 @@ public final class ThermalMonitor {
         // GPU: ioft keys (M5) + flt keys (M1-M4)
         let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
         let maxTemp = max(cpuTemp, gpuTemp)
+
+        // Anomaly detection: log significant temperature changes
+        anomalyHistory.append(maxTemp)
+        if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
+        if !isCalibrating && anomalyHistory.count >= 15 {
+            let oldest = anomalyHistory.first!
+            let delta = maxTemp - oldest
+            if abs(delta) > 10 {
+                let direction = delta > 0 ? "spike" : "drop"
+                let fan0 = status.fans.first
+                let topProcs = captureTopProcesses()
+                TFLogger.shared.info(
+                    "Temperature \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
+                    "(\(String(format: "%+.1f", delta))°C in 30s) | " +
+                    "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
+                    "Profile: \(activeProfile.name) | " +
+                    "Processes: \(topProcs)"
+                )
+                // Reset so we don't log the same event repeatedly
+                anomalyHistory.removeAll()
+            }
+        }
 
         // Safety override: any sensor > 95°C
         if maxTemp >= FanProfile.safetyTempThreshold {
@@ -313,6 +344,44 @@ public final class ThermalMonitor {
             return false
         }
         return true
+    }
+
+    // MARK: - Process Capture
+
+    /// Capture top 5 processes by CPU for anomaly logging
+    private func captureTopProcesses() -> String {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size = 0
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return "unavailable" }
+
+        let count = size / MemoryLayout<kinfo_proc>.stride
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
+        guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0 else { return "unavailable" }
+
+        let actualCount = size / MemoryLayout<kinfo_proc>.stride
+        var results: [(name: String, cpu: Double)] = []
+
+        for i in 0..<actualCount {
+            let proc = procs[i]
+            let pid = proc.kp_proc.p_pid
+            guard pid > 0 else { continue }
+
+            let name = withUnsafePointer(to: proc.kp_proc.p_comm) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN)) {
+                    String(cString: $0)
+                }
+            }
+
+            guard !name.isEmpty, name != "kernel_task" else { continue }
+            let cpuPct = Double(proc.kp_proc.p_pctcpu) / 100.0
+            if cpuPct > 0.1 {
+                results.append((name, cpuPct))
+            }
+        }
+
+        let top5 = results.sorted { $0.cpu > $1.cpu }.prefix(5)
+        if top5.isEmpty { return "idle" }
+        return top5.map { "\($0.name)(\(String(format: "%.1f", $0.cpu))%)" }.joined(separator: ", ")
     }
 
     // MARK: - Helpers
