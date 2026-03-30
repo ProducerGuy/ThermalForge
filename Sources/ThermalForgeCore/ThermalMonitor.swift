@@ -47,7 +47,6 @@ public final class ThermalMonitor {
 
     // Smart profile state
     private var tempHistory: [Float] = []
-    private var lastSmartRPMPercent: Float = 0
 
     // Anomaly detection — tracks temps over 30 seconds (15 readings at 2s)
     private var anomalyHistory: [Float] = []
@@ -111,7 +110,6 @@ public final class ThermalMonitor {
             if profile.id == "smart" {
                 // Reset Smart state and reload calibration data
                 tempHistory.removeAll()
-                lastSmartRPMPercent = 0
                 let loaded = CalibrationData.load()
                 if let error = loaded?.validationError {
                     TFLogger.shared.error("Calibration data rejected on reload: \(error)")
@@ -204,91 +202,81 @@ public final class ThermalMonitor {
     /// Below this temperature, hand control back to Apple (fans off / idle)
     private static let smartFloor: Float = 60.0
 
+    /// Smart stop threshold: 5°C below floor for hysteresis (research: min 5°C gap)
+    private static let smartStopTemp: Float = 55.0
+
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
         // Track temperature history (keep last 4 readings = 8 seconds at 2s interval)
         tempHistory.append(peakTemp)
         if tempHistory.count > 4 { tempHistory.removeFirst() }
 
         let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
+        let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
+        let minPct = minRPM / maxRPM
 
-        // Below floor: return to auto
-        if peakTemp < Self.smartFloor && rateOfChange() <= 0 {
-            if lastSmartRPMPercent > 0 {
-                applyCommand(.resetAuto)
-                lastSmartRPMPercent = 0
-                state = .idle
-            }
+        // Below stop threshold and fans running: turn off (with hysteresis)
+        if peakTemp < Self.smartStopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
+            applyCommand(.resetAuto)
+            lastAppliedRPMPercent = 0
+            fansCurrentlyRunning = false
+            state = .idle
+            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(Self.smartStopTemp))°C")
+            return
+        }
+
+        // Below floor and fans not running: stay off
+        if peakTemp < Self.smartFloor && !fansCurrentlyRunning {
+            return
+        }
+
+        // In hysteresis band (55-60°C): maintain current state
+        if peakTemp >= Self.smartStopTemp && peakTemp < Self.smartFloor && !fansCurrentlyRunning {
             return
         }
 
         let rate = rateOfChange()
         var targetPct: Float
 
-        if let cal = calibration {
-            // Calibrated path: use machine-specific data
-            // Find the minimum fan level that can sustain current thermal conditions.
-            // Each measurement tells us: at this fan %, the machine holds X% load below 85°C.
-            let tempPosition = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+        // Uncalibrated: conservative S-curve
+        // (Calibrated path will be rewritten in #37 with temp-first data)
+        let range = Self.smartCeiling - Self.smartFloor
+        let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
+        targetPct = position * position * (3 - 2 * position)
 
-            // Start with the lowest fan speed and go up until we find one that can handle it
-            let sorted = cal.measurements.sorted { $0.rpmPercent < $1.rpmPercent }
-            var basePct: Float = sorted.last?.rpmPercent ?? 1.0
-
-            for m in sorted {
-                // If maxSustainableLoad is nil (legacy data), fall back to steady state check only
-                if let load = m.maxSustainableLoad {
-                    // If this fan speed held full load, it can handle anything
-                    if load >= 1.0 {
-                        basePct = m.rpmPercent
-                        break
-                    }
-                }
-                // If steady state was well below ceiling, this level has headroom
-                if m.steadyState < Self.smartCeiling - 5 {
-                    basePct = m.rpmPercent
-                    break
-                }
-            }
-
-            // Scale by how close we are to the ceiling
-            targetPct = basePct * tempPosition
-
-            if rate > 0 {
-                // Rising: boost proportionally to rate and proximity to ceiling
-                let urgency = tempPosition
-                targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
-            } else if peakTemp > Self.smartCeiling {
-                // Above ceiling: push to max
-                targetPct = 1.0
-            }
-        } else {
-            // Uncalibrated fallback: conservative S-curve
-            let range = Self.smartCeiling - Self.smartFloor
-            let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
-            targetPct = position * position * (3 - 2 * position)
-
-            if rate > 0 {
-                targetPct = min(targetPct + rate * 0.2, 1.0)
-            }
+        if rate > 0 {
+            // Rising: boost proportionally to rate
+            targetPct = min(targetPct + rate * 0.2, 1.0)
+        } else if peakTemp > Self.smartCeiling {
+            // Above ceiling: max
+            targetPct = 1.0
         }
 
-        // Clamp to valid range
+        // Clamp to valid range, enforce minimum RPM
         targetPct = min(max(targetPct, 0), 1.0)
+        if targetPct > 0 && targetPct < minPct {
+            targetPct = minPct
+        }
 
-        // Ramp-down governor: reduce RPM at half the rate we ramp up
-        if targetPct < lastSmartRPMPercent {
-            let maxDrop: Float = 0.05
-            targetPct = max(targetPct, lastSmartRPMPercent - maxDrop)
+        // Ramp governors (matching Apple: ~400 RPM/sec up, ~200 RPM/sec down)
+        if targetPct > lastAppliedRPMPercent {
+            targetPct = min(targetPct, lastAppliedRPMPercent + Self.maxRampUp)
+        } else if targetPct < lastAppliedRPMPercent {
+            targetPct = max(targetPct, lastAppliedRPMPercent - Self.maxRampDown)
         }
 
         // Apply if changed meaningfully (avoid SMC write spam)
-        if abs(targetPct - lastSmartRPMPercent) > 0.02 {
-            let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 1200
+        if abs(targetPct - lastAppliedRPMPercent) > 0.01 {
             let targetRPM = max(maxRPM * targetPct, minRPM)
             applyCommand(.setRPM(targetRPM))
-            lastSmartRPMPercent = targetPct
+
+            if !fansCurrentlyRunning {
+                TFLogger.shared.fan("Smart fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C")
+            }
+
+            lastAppliedRPMPercent = targetPct
+            fansCurrentlyRunning = true
             state = .active(profileName: "Smart")
-        } else if lastSmartRPMPercent > 0 {
+        } else if fansCurrentlyRunning {
             state = .active(profileName: "Smart")
         }
     }
