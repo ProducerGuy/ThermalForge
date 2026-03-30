@@ -89,16 +89,8 @@ public final class TFLogger {
               size >= maxFileSize
         else { return }
 
-        let fm = FileManager.default
-        let log2 = logDir.appendingPathComponent("thermalforge.log.2")
-        let log1 = logDir.appendingPathComponent("thermalforge.log.1")
-
-        // Remove oldest, rotate
-        try? fm.removeItem(at: log2)
-        if fm.fileExists(atPath: log1.path) {
-            try? fm.moveItem(at: log1, to: log2)
-        }
-        try? fm.moveItem(at: logFile, to: log1)
+        // 1GB total cap — when hit, overwrite. No accumulation.
+        try? FileManager.default.removeItem(at: logFile)
     }
 
     // MARK: - Cleanup
