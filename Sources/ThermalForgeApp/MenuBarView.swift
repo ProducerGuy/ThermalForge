@@ -73,7 +73,10 @@ struct MenuBarView: View {
                         Text(profile.name)
                         Spacer()
                         if !profile.curve.handsOff && !profile.curve.alwaysOn {
-                            Text("<\(Int(profile.curve.ceilingTemp))°")
+                            let tempC = profile.curve.ceilingTemp
+                            let display = appState.useFahrenheit ? tempC * 9 / 5 + 32 : tempC
+                            let unit = appState.useFahrenheit ? "F" : "C"
+                            Text("<\(Int(display))°\(unit)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
