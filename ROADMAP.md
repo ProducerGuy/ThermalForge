@@ -59,7 +59,7 @@ Research-grade data export: `thermalforge log`
 
 ---
 
-## Profile + Smart + Calibration Redesign (In Progress)
+## Profile + Smart Redesign (Complete) + Calibration Redesign (Pending)
 
 The entire profile system, Smart curve, and calibration need to be redesigned as one cohesive system. Current profiles are binary switches that immediately set fans to a fixed percentage. They should be proportional curves that respect Apple's fan hardware behavior.
 

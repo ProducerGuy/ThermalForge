@@ -185,13 +185,12 @@ public final class ThermalMonitor {
         // Smart profile: uses curve + rate-of-change + calibration
         if activeProfile.id == "smart" {
             tickSmart(status: status, peakTemp: maxTemp)
-            onUpdate?(status, activeProfile, state)
-            return
+        } else {
+            // All other profiles: use curve
+            tickCurve(status: status, peakTemp: maxTemp)
         }
 
-        // All other profiles: use curve
-        tickCurve(status: status, peakTemp: maxTemp)
-
+        // Single onUpdate call per tick — never inside tickCurve/tickSmart
         onUpdate?(status, activeProfile, state)
     }
 
@@ -305,7 +304,6 @@ public final class ThermalMonitor {
                 lastAppliedRPMPercent = 0
                 state = .idle
             }
-            onUpdate?(status, activeProfile, state)
             return
         }
 
@@ -317,7 +315,6 @@ public final class ThermalMonitor {
                 fansCurrentlyRunning = true
                 state = .active(profileName: activeProfile.name)
             }
-            onUpdate?(status, activeProfile, state)
             return
         }
 
@@ -331,7 +328,6 @@ public final class ThermalMonitor {
                 state = .idle
                 TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
             }
-            onUpdate?(status, activeProfile, state)
             return
         }
 
@@ -365,8 +361,6 @@ public final class ThermalMonitor {
         } else if fansCurrentlyRunning {
             state = .active(profileName: activeProfile.name)
         }
-
-        onUpdate?(status, activeProfile, state)
     }
 
     // MARK: - Process Capture
@@ -423,24 +417,4 @@ public final class ThermalMonitor {
         }
     }
 
-    /// Read system memory pressure via Mach VM stats
-    private func memoryPressure() -> Float {
-        var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<vm_statistics64>.stride / MemoryLayout<natural_t>.stride
-        )
-        let result = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return 0 }
-
-        let pageSize = Float(vm_kernel_page_size)
-        let total = Float(stats.active_count + stats.inactive_count
-            + stats.wire_count + stats.free_count) * pageSize
-        let used = Float(stats.active_count + stats.wire_count) * pageSize
-        guard total > 0 else { return 0 }
-        return (used / total) * 100
-    }
 }

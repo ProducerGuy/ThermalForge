@@ -202,28 +202,3 @@ private struct TemperatureRow: View {
         return .primary
     }
 }
-
-private struct ProfileButton: View {
-    let profile: FanProfile
-    let isActive: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isActive ? .blue : .secondary)
-                Text(profile.name)
-                Spacer()
-                if !profile.curve.handsOff && !profile.curve.alwaysOn {
-                    Text("<\(Int(profile.curve.ceilingTemp))°")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 3)
-    }
-}

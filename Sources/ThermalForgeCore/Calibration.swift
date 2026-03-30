@@ -228,8 +228,8 @@ public enum CalibrationMode: String, CaseIterable {
 
     public var description: String {
         switch self {
-        case .quick: return "Quick (~10 min)"
-        case .standard: return "Standard (~28 min)"
+        case .quick: return "Quick (~14 min)"
+        case .standard: return "Standard (~32 min)"
         case .optimized: return "Optimized (until stable, ~35-50 min)"
         }
     }

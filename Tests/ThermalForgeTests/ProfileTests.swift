@@ -122,4 +122,41 @@ struct ProfileTests {
         #expect(curve.targetPercent(at: 50, fansCurrentlyRunning: false) == nil)
         #expect(curve.targetPercent(at: 70, fansCurrentlyRunning: false) == nil)
     }
+
+    @Test("Smart profile has correct curve parameters")
+    func smartCurve() {
+        let smart = FanProfile.smart
+        #expect(smart.curve.stopTemp == 60)
+        #expect(smart.curve.startTemp == 60)
+        #expect(smart.curve.ceilingTemp == 85)
+        #expect(smart.curve.maxRPMPercent == 1.0)
+        #expect(smart.curve.handsOff == false)
+        #expect(smart.curve.alwaysOn == false)
+    }
+
+    @Test("Balanced hysteresis: fans stay on between stop and start temps")
+    func balancedHysteresis() {
+        let curve = FanProfile.balanced.curve
+
+        // 55°C: above stop (50), below start (60), fans running → keep at minimum
+        let keepOn = curve.targetPercent(at: 55, fansCurrentlyRunning: true)
+        #expect(keepOn != nil) // should return 0.001 (minimum hold signal)
+
+        // 55°C: above stop (50), below start (60), fans NOT running → stay off
+        let stayOff = curve.targetPercent(at: 55, fansCurrentlyRunning: false)
+        #expect(stayOff == nil)
+
+        // 48°C: below stop (50), fans running → turn off
+        let turnOff = curve.targetPercent(at: 48, fansCurrentlyRunning: true)
+        #expect(turnOff == nil)
+    }
+
+    @Test("Balanced curve midpoint produces exact expected value")
+    func balancedMidpoint() {
+        let curve = FanProfile.balanced.curve
+        // At 65°C: position = (65-60)/(70-60) = 0.5, target = 0.5 * 0.60 = 0.30
+        let atMid = curve.targetPercent(at: 65, fansCurrentlyRunning: true)
+        #expect(atMid != nil)
+        #expect(abs(atMid! - 0.30) < 0.001)
+    }
 }
