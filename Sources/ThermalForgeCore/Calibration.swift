@@ -40,24 +40,41 @@ public struct CalibrationData: Codable {
     }
 
     public struct Measurement: Codable {
-        /// Fan speed as fraction of max RPM (0.0–1.0)
-        public let rpmPercent: Float
-        /// Cooling rate in °C/sec (negative = cooling)
-        public let coolingRate: Float
-        /// Heating rate under load in °C/sec (positive = heating)
-        public let heatingRate: Float
-        /// Temperature at the highest load step this fan speed sustained below 85°C
-        public let steadyState: Float
-        /// Maximum load (0.0–1.0) this fan speed held below 85°C. 1.0 = full load.
-        public let maxSustainableLoad: Float?
+        /// Target temperature this measurement was taken at
+        public let targetTemp: Float
+        /// Fan speed (0.0–1.0 of max RPM) that held temp at targetTemp
+        public let holdingRPMPercent: Float
+        /// How long (seconds) it took to find the holding speed
+        public let settleTime: Float?
 
-        public init(rpmPercent: Float, coolingRate: Float, heatingRate: Float, steadyState: Float, maxSustainableLoad: Float? = nil) {
-            self.rpmPercent = rpmPercent
-            self.coolingRate = coolingRate
-            self.heatingRate = heatingRate
-            self.steadyState = steadyState
-            self.maxSustainableLoad = maxSustainableLoad
+        public init(targetTemp: Float, holdingRPMPercent: Float, settleTime: Float? = nil) {
+            self.targetTemp = targetTemp
+            self.holdingRPMPercent = holdingRPMPercent
+            self.settleTime = settleTime
         }
+    }
+
+    /// Look up the fan speed needed to hold a given temperature.
+    /// Interpolates between measured points.
+    public func fanPercentForTemp(_ temp: Float) -> Float? {
+        guard measurements.count >= 2 else { return nil }
+        let sorted = measurements.sorted { $0.targetTemp < $1.targetTemp }
+
+        // Below lowest measured temp — use lowest fan speed
+        if temp <= sorted.first!.targetTemp { return sorted.first!.holdingRPMPercent }
+        // Above highest measured temp — use highest fan speed
+        if temp >= sorted.last!.targetTemp { return sorted.last!.holdingRPMPercent }
+
+        // Interpolate between bracketing measurements
+        for i in 0..<(sorted.count - 1) {
+            let low = sorted[i]
+            let high = sorted[i + 1]
+            if temp >= low.targetTemp && temp <= high.targetTemp {
+                let t = (temp - low.targetTemp) / (high.targetTemp - low.targetTemp)
+                return low.holdingRPMPercent + t * (high.holdingRPMPercent - low.holdingRPMPercent)
+            }
+        }
+        return sorted.last!.holdingRPMPercent
     }
 
     /// Validate that calibration data is physically consistent.
@@ -68,35 +85,21 @@ public struct CalibrationData: Codable {
         }
 
         for m in measurements {
-            // Heating rate should be positive (temps rise under load)
-            if m.heatingRate <= 0 {
-                return "Heating rate \(m.heatingRate) at \(Int(m.rpmPercent * 100))% is not positive"
+            // Target temp should be in sane range
+            if m.targetTemp < 40 || m.targetTemp > 100 {
+                return "Target temp \(m.targetTemp)°C is out of range (40-100°C)"
             }
-            // Cooling rate should be negative (temps drop without load)
-            if m.coolingRate >= 0 {
-                return "Cooling rate \(m.coolingRate) at \(Int(m.rpmPercent * 100))% is not negative"
-            }
-            // Steady state should be in a sane range
-            if m.steadyState < 20 || m.steadyState > 105 {
-                return "Steady state \(m.steadyState)°C at \(Int(m.rpmPercent * 100))% is out of range (20-105°C)"
-            }
-            // Heating rate shouldn't be insane
-            if m.heatingRate > 5 {
-                return "Heating rate \(m.heatingRate)°C/s at \(Int(m.rpmPercent * 100))% is unreasonably high"
-            }
-            // Max sustainable load should be 0-1 range
-            if let load = m.maxSustainableLoad, (load < 0 || load > 1) {
-                return "Max sustainable load \(load) at \(Int(m.rpmPercent * 100))% is out of range (0-1)"
+            // Holding RPM should be 0-1
+            if m.holdingRPMPercent < 0 || m.holdingRPMPercent > 1 {
+                return "Holding RPM \(m.holdingRPMPercent) at \(Int(m.targetTemp))°C is out of range (0-1)"
             }
         }
 
-        // Steady-state temps should generally decrease as RPM increases
-        // (more fan = more cooling = lower steady state)
-        let sorted = measurements.sorted { $0.rpmPercent < $1.rpmPercent }
+        // Higher temps should need higher fan speeds
+        let sorted = measurements.sorted { $0.targetTemp < $1.targetTemp }
         for i in 0..<(sorted.count - 1) {
-            if sorted[i + 1].steadyState > sorted[i].steadyState + 5 {
-                // Allow small inversions (noise) but not large ones
-                return "Steady state increases from \(Int(sorted[i].rpmPercent * 100))% to \(Int(sorted[i + 1].rpmPercent * 100))% — data inconsistent"
+            if sorted[i + 1].holdingRPMPercent < sorted[i].holdingRPMPercent - 0.05 {
+                return "Fan speed decreases from \(Int(sorted[i].targetTemp))°C to \(Int(sorted[i + 1].targetTemp))°C — data inconsistent"
             }
         }
 
@@ -106,53 +109,6 @@ public struct CalibrationData: Codable {
     public var isValid: Bool { validationError == nil }
 
     /// Interpolate the RPM percentage needed to hold a target temperature under load.
-    /// Returns nil if calibration data can't answer the question.
-    public func rpmPercentForTarget(_ targetTemp: Float) -> Float? {
-        guard measurements.count >= 2 else { return nil }
-
-        // Find the two measurements that bracket the target steady-state
-        let sorted = measurements.sorted { $0.steadyState > $1.steadyState }
-
-        // Target is hotter than our lowest RPM steady state — even minimum fans keep it cooler
-        if targetTemp >= sorted.first!.steadyState {
-            return sorted.first!.rpmPercent
-        }
-        // Target is cooler than our highest RPM steady state — need max fans
-        if targetTemp <= sorted.last!.steadyState {
-            return sorted.last!.rpmPercent
-        }
-
-        // Interpolate between the two bracketing measurements
-        for i in 0..<(sorted.count - 1) {
-            let high = sorted[i]
-            let low = sorted[i + 1]
-            if targetTemp <= high.steadyState && targetTemp >= low.steadyState {
-                let t = (high.steadyState - targetTemp) / (high.steadyState - low.steadyState)
-                return high.rpmPercent + t * (low.rpmPercent - high.rpmPercent)
-            }
-        }
-
-        return nil
-    }
-
-    /// Get the cooling rate at a given RPM percentage (interpolated)
-    public func coolingRateAt(rpmPercent: Float) -> Float {
-        guard measurements.count >= 2 else { return -1.0 }
-        let sorted = measurements.sorted { $0.rpmPercent < $1.rpmPercent }
-
-        if rpmPercent <= sorted.first!.rpmPercent { return sorted.first!.coolingRate }
-        if rpmPercent >= sorted.last!.rpmPercent { return sorted.last!.coolingRate }
-
-        for i in 0..<(sorted.count - 1) {
-            let low = sorted[i]
-            let high = sorted[i + 1]
-            if rpmPercent >= low.rpmPercent && rpmPercent <= high.rpmPercent {
-                let t = (rpmPercent - low.rpmPercent) / (high.rpmPercent - low.rpmPercent)
-                return low.coolingRate + t * (high.coolingRate - low.coolingRate)
-            }
-        }
-        return sorted.last!.coolingRate
-    }
 }
 
 // MARK: - Persistence
@@ -403,15 +359,18 @@ public final class CalibrationRunner {
         csvHandle = nil
     }
 
+    /// Temperature targets for calibration: what fan speed holds each point?
+    private static let tempTargets: [Float] = [60, 65, 70, 75, 80, 85]
+
     /// Run full calibration. Blocks until complete.
     public func run() throws -> CalibrationData {
-        // Ensure cleanup on any exit — normal, error, or exception
         defer { cleanup() }
 
         let fanCount = try fanControl.fanCount()
         let fan0 = try fanControl.fanInfo(0)
         let maxRPM = fan0.maxRPM > 0 ? fan0.maxRPM : 7826
         let minRPM = fan0.minRPM > 0 ? fan0.minRPM : 2317
+        let minPct = minRPM / maxRPM
 
         // Machine info
         var sysSize = 0
@@ -422,7 +381,8 @@ public final class CalibrationRunner {
 
         log("Mode: \(mode.description)")
         log("Stress: \(stressType.description)")
-        log("Ceiling: \(Self.performanceCeiling)°C")
+        log("Approach: temp-first (heat to target, find holding fan speed)")
+        log("Targets: \(Self.tempTargets.map { "\(Int($0))°C" }.joined(separator: ", "))")
 
         // Record ambient temperature
         let ambientTemp: Float
@@ -437,45 +397,18 @@ public final class CalibrationRunner {
             log("Ambient: \(String(format: "%.1f", ambientTemp))°C")
         }
 
-        // Wait for machine to cool to baseline before starting
+        // Wait for machine to cool to baseline
         log("Waiting for machine to cool below 45°C...")
-        for _ in 0..<60 { // max 2 minutes wait
-            if let status = try? fanControl.status() {
-                let peak = status.temperatures
-                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
-                    .values.max() ?? 0
-                if peak < 45 {
-                    log("Baseline reached: \(String(format: "%.1f", peak))°C")
-                    break
-                }
-            }
-            Thread.sleep(forTimeInterval: 2)
-        }
+        waitForCooldown(below: 45)
 
-        // Find the right stress intensity for this machine.
-        // Target: ~1°C/sec heating rate. Fans on auto (Apple default).
+        // Find stress intensity that produces ~1°C/sec
         let baselineIntensity = findBaselineIntensity()
-        let loadSteps: [Float] = [
-            baselineIntensity,
-            baselineIntensity * 2,
-            baselineIntensity * 3,
-            baselineIntensity * 4
-        ]
         log("Baseline intensity: \(String(format: "%.3f", baselineIntensity))")
-        log("Load steps: \(loadSteps.map { String(format: "%.1f%%", $0 * 100) }.joined(separator: ", "))")
 
-        // Cool down again after intensity finding
+        // Cool down after intensity finding
         stopStress()
         try fanControl.resetAuto()
-        for _ in 0..<30 {
-            if let status = try? fanControl.status() {
-                let peak = status.temperatures
-                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
-                    .values.max() ?? 0
-                if peak < 45 { break }
-            }
-            Thread.sleep(forTimeInterval: 2)
-        }
+        waitForCooldown(below: 45)
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -486,148 +419,111 @@ public final class CalibrationRunner {
         FileManager.default.createFile(atPath: csvURL.path, contents: nil)
         csvHandle = try FileHandle(forWritingTo: csvURL)
         logPath = csvURL
+        csvWrite("timestamp,target_temp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
 
-        // CSV header
-        csvWrite("timestamp,phase,rpm_pct,load_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c")
-
-        // Calculate RPM levels — ensure none go below machine minimum
-        let rpmLevels: [(pct: Float, label: String)] = ([0.25, 0.50, 0.75, 1.00] as [Float]).map { pct in
-            let targetRPM = maxRPM * pct
-            if targetRPM < minRPM {
-                let adjusted = minRPM / maxRPM
-                return (adjusted, "\(Int(adjusted * 100))% (min)")
-            }
-            return (pct, "\(Int(pct * 100))%")
-        }
         var measurements: [CalibrationData.Measurement] = []
 
-        for level in rpmLevels {
-            let pct = level.pct
-            let targetRPM = maxRPM * pct
-            let label = level.label
+        // Start stress at baseline intensity — keep it running throughout
+        startStress(intensity: baselineIntensity)
+        log("Stress started at \(String(format: "%.1f%%", baselineIntensity * 100)) intensity")
 
-            log("[\(label)] Setting fans to \(Int(targetRPM)) RPM")
-            try fanControl.setAllFans(rpm: targetRPM)
+        // For each target temperature, find the fan speed that holds it
+        for target in Self.tempTargets {
+            log("[Target \(Int(target))°C] Heating...")
 
-            // Wait for fans to physically reach target speed
-            Thread.sleep(forTimeInterval: 5)
+            // Let temp rise to target (fans on auto so it heats naturally)
+            try fanControl.resetAuto()
+            let startTime = Date()
+            var reachedTarget = false
 
-            // Ramp load through steps, monitoring temp at each
-            var maxLoad: Float = 0
-            var peakTemp: Float = 0
-            var hitCeiling = false
-            var allReadings: [Float] = []
+            // Wait for temp to reach target — timeout based on mode
+            let maxWait = mode.heatSeconds
+            for tick in 0..<(maxWait / 2) {
+                let temp = peakCPUTemp()
+                let ts = isoFormatter.string(from: Date())
+                csvWrite("\(ts),\(Int(target)),0.00,\(String(format: "%.1f", temp)),0,0,heating")
 
-            for loadStep in loadSteps {
-                let loadLabel = "\(Int(loadStep * 100))%"
-                log("[\(label)] Load \(loadLabel) — ramping stress")
-
-                // Stop previous stress level before starting new one
-                if stressRunning { stopStress() }
-                startStress(intensity: loadStep)
-
-                // Discard first 3 readings (6 seconds) as transition noise
-                for _ in 0..<3 {
-                    Thread.sleep(forTimeInterval: 2)
-                    _ = try? fanControl.status()
+                if temp >= target {
+                    reachedTarget = true
+                    log("[Target \(Int(target))°C] Reached at \(tick * 2)s")
+                    break
                 }
 
-                // Sample at this load step
-                let ticksPerStep = mode.heatSeconds / (loadSteps.count * 2)
-                let maxTicks = Swift.max(ticksPerStep, 5) // at least 10 seconds
-
-                var stepReadings: [Float] = []
-                for _ in 0..<maxTicks {
-                    if let status = try? fanControl.status() {
-                        let cpuTemp = status.temperatures
-                            .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
-                            .values.max() ?? 0
-                        let gpuTemp = status.temperatures
-                            .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
-                            .values.max() ?? 0
-                        let temp = Swift.max(cpuTemp, gpuTemp)
-                        stepReadings.append(temp)
-                        allReadings.append(temp)
-
-                        let fan0rpm = status.fans.first.map { $0.actualRPM } ?? 0
-                        let fan1rpm = status.fans.count > 1 ? status.fans[1].actualRPM : 0
-                        let ts = isoFormatter.string(from: Date())
-                        csvWrite("\(ts),heating,\(String(format: "%.2f", pct)),\(String(format: "%.2f", loadStep)),\(fan0rpm),\(fan1rpm),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp))")
-
-                        // 85°C ceiling — this fan speed can't hold the line at this load
-                        if temp >= Self.performanceCeiling {
-                            log("[\(label)] Hit \(String(format: "%.0f", temp))°C at \(loadLabel) load — ceiling reached")
-                            hitCeiling = true
-                            peakTemp = temp
-                            maxLoad = loadStep
-                            break
-                        }
-
-                        peakTemp = Swift.max(peakTemp, temp)
-                    }
-                    Thread.sleep(forTimeInterval: 2)
-
-                    // Optimized mode: check if temp stabilized at this load step
-                    if mode.usesSteadyStateDetection && stepReadings.count >= 15 {
-                        let recent = stepReadings.suffix(15)
-                        if (recent.max() ?? 0) - (recent.min() ?? 0) < 0.5 {
-                            log("[\(label)] Steady state at \(loadLabel) load: \(String(format: "%.1f", stepReadings.last ?? 0))°C")
-                            break
-                        }
-                    }
+                // Safety backstop
+                if temp >= 95 {
+                    log("[Target \(Int(target))°C] Safety backstop at \(String(format: "%.0f", temp))°C — stopping")
+                    stopStress()
+                    try fanControl.setMax()
+                    Thread.sleep(forTimeInterval: 10)
+                    break
                 }
 
-                if hitCeiling { break }
-                maxLoad = loadStep
-            }
-
-            // Stop stress, measure cooling
-            stopStress()
-
-            if !hitCeiling {
-                log("[\(label)] Handled full load — peak \(String(format: "%.1f", peakTemp))°C")
-            }
-
-            // Cooling phase
-            log("[\(label)] Cooling at \(Int(targetRPM)) RPM...")
-            let coolTicks = mode.coolSeconds / 2
-            var coolingReadings: [Float] = []
-            for _ in 0..<coolTicks {
-                if let status = try? fanControl.status() {
-                    let cpuTemp = status.temperatures
-                        .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
-                        .values.max() ?? 0
-                    let gpuTemp = status.temperatures
-                        .filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }
-                        .values.max() ?? 0
-                    let temp = Swift.max(cpuTemp, gpuTemp)
-                    coolingReadings.append(temp)
-
-                    let fan0rpm = status.fans.first.map { $0.actualRPM } ?? 0
-                    let fan1rpm = status.fans.count > 1 ? status.fans[1].actualRPM : 0
-                    let ts = isoFormatter.string(from: Date())
-                    csvWrite("\(ts),cooling,\(String(format: "%.2f", pct)),0.00,\(fan0rpm),\(fan1rpm),\(String(format: "%.1f", cpuTemp)),\(String(format: "%.1f", gpuTemp))")
-                }
                 Thread.sleep(forTimeInterval: 2)
             }
 
-            let heatingRate = rateFromReadings(allReadings)
-            let coolingRate = rateFromReadings(coolingReadings)
-            let steadyState = peakTemp
+            guard reachedTarget else {
+                log("[Target \(Int(target))°C] Not reached in time — skipping")
+                continue
+            }
 
-            log("[\(label)] Heating rate: \(String(format: "%.2f", heatingRate))°C/s, cooling: \(String(format: "%.2f", coolingRate))°C/s, max load: \(Int(maxLoad * 100))%")
+            // Binary search: find fan speed that holds temp at target
+            var lowPct = minPct
+            var highPct: Float = 1.0
+            var holdingPct = highPct
+            let searchIterations = mode == .quick ? 4 : mode == .standard ? 6 : 8
+
+            for iteration in 0..<searchIterations {
+                let testPct = (lowPct + highPct) / 2
+                let testRPM = maxRPM * testPct
+
+                try fanControl.setAllFans(rpm: testRPM)
+                Thread.sleep(forTimeInterval: 3) // let fans settle
+
+                // Hold for a few seconds and measure trend
+                let holdTime = mode == .quick ? 8 : mode == .standard ? 15 : 25
+                var readings: [Float] = []
+                for _ in 0..<(holdTime / 2) {
+                    let temp = peakCPUTemp()
+                    readings.append(temp)
+                    let ts = isoFormatter.string(from: Date())
+                    let fan0rpm = (try? fanControl.fanInfo(0))?.actualRPM ?? 0
+                    csvWrite("\(ts),\(Int(target)),\(String(format: "%.2f", testPct)),\(String(format: "%.1f", temp)),\(Int(fan0rpm)),0,searching")
+                    Thread.sleep(forTimeInterval: 2)
+                }
+
+                let avgTemp = readings.reduce(0, +) / Float(readings.count)
+                let trend = readings.count >= 2 ? (readings.last! - readings.first!) : 0
+
+                log("[Target \(Int(target))°C] Search \(iteration + 1): \(Int(testPct * 100))% fans → avg \(String(format: "%.1f", avgTemp))°C, trend \(String(format: "%+.1f", trend))°C")
+
+                if avgTemp > target + 1 || trend > 0.5 {
+                    // Too hot or rising — need more fan
+                    lowPct = testPct
+                } else if avgTemp < target - 2 && trend < -0.5 {
+                    // Too cool and dropping — less fan needed
+                    highPct = testPct
+                } else {
+                    // Holding — this is our answer
+                    holdingPct = testPct
+                    break
+                }
+                holdingPct = testPct
+            }
+
+            let settleTime = Float(Date().timeIntervalSince(startTime))
+            log("[Target \(Int(target))°C] Holding speed: \(Int(holdingPct * 100))% (\(Int(maxRPM * holdingPct)) RPM) — settled in \(Int(settleTime))s")
 
             measurements.append(CalibrationData.Measurement(
-                rpmPercent: pct,
-                coolingRate: coolingRate,
-                heatingRate: heatingRate,
-                steadyState: steadyState,
-                maxSustainableLoad: maxLoad
+                targetTemp: target,
+                holdingRPMPercent: holdingPct,
+                settleTime: settleTime
             ))
 
-            // Brief pause between levels
-            Thread.sleep(forTimeInterval: 5)
+            // Brief pause before next target
+            Thread.sleep(forTimeInterval: 3)
         }
+
+        stopStress()
 
         return CalibrationData(
             machine: machine,
@@ -638,6 +534,18 @@ public final class CalibrationRunner {
             mode: mode.rawValue,
             measurements: measurements
         )
+    }
+
+    /// Wait for machine to cool below a threshold
+    private func waitForCooldown(below threshold: Float) {
+        for _ in 0..<60 {
+            let temp = peakCPUTemp()
+            if temp > 0 && temp < threshold {
+                log("Cooled to \(String(format: "%.1f", temp))°C")
+                return
+            }
+            Thread.sleep(forTimeInterval: 2)
+        }
     }
 
     // MARK: - Stress (CPU + GPU combined)

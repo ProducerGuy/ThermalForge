@@ -88,8 +88,10 @@ final class CalibrationState: ObservableObject {
     private func runCalibration() async {
         let client = DaemonClient()
         let mode = selectedMode
+        let isoFormatter = ISO8601DateFormatter()
+        let tempTargets: [Float] = [60, 65, 70, 75, 80, 85]
 
-        // Get fan range from status
+        // Get fan range
         var maxRPM: Float = 7826
         var minRPM: Float = 2317
         if let response = try? client.send("status"),
@@ -99,19 +101,14 @@ final class CalibrationState: ObservableObject {
             maxRPM = Float(fan.maxRPM)
             minRPM = Float(fan.minRPM)
         }
+        let minPct = minRPM / maxRPM
 
-        // Calculate RPM levels — ensure none are below machine minimum
-        let rpmLevels: [(pct: Float, label: String)] = ([Float(0.25), 0.50, 0.75, 1.00]).map { pct in
-            let targetRPM = maxRPM * pct
-            if targetRPM < minRPM {
-                let adjustedPct = minRPM / maxRPM
-                return (adjustedPct, "\(Int(adjustedPct * 100))% (min)")
-            }
-            return (pct, "\(Int(pct * 100))%")
-        }
-
-        var measurements: [CalibrationData.Measurement] = []
-        let isoFormatter = ISO8601DateFormatter()
+        // Machine info
+        var sysSize = 0
+        sysctlbyname("hw.model", nil, &sysSize, nil, 0)
+        var modelBuf = [CChar](repeating: 0, count: max(sysSize, 1))
+        sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
+        let machine = String(cString: modelBuf)
 
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
@@ -123,18 +120,9 @@ final class CalibrationState: ObservableObject {
         func csvWrite(_ line: String) {
             if let d = (line + "\n").data(using: .utf8) { csvHandle?.write(d) }
         }
-        csvWrite("timestamp,phase,rpm_pct,load_pct,fan0_rpm,fan1_rpm,peak_cpu_c,peak_gpu_c")
+        csvWrite("timestamp,target_temp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
 
-        // Machine info
-        var sysSize = 0
-        sysctlbyname("hw.model", nil, &sysSize, nil, 0)
-        var modelBuf = [CChar](repeating: 0, count: max(sysSize, 1))
-        sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
-        let machine = String(cString: modelBuf)
-
-        let performanceCeiling: Float = 85.0
-
-        // Wait for machine to cool to baseline
+        // Wait for cooldown
         await MainActor.run { phase = "Waiting for machine to cool..." }
         for _ in 0..<60 {
             guard !Task.isCancelled else { return }
@@ -143,15 +131,9 @@ final class CalibrationState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        // Find stress intensity that produces ~1°C/sec on this machine
+        // Find baseline intensity (~1°C/sec)
         await MainActor.run { phase = "Finding baseline intensity..." }
         let baselineIntensity = await findBaselineIntensity(client: client)
-        let loadSteps: [Float] = [
-            baselineIntensity,
-            baselineIntensity * 2,
-            baselineIntensity * 3,
-            baselineIntensity * 4
-        ]
         TFLogger.shared.calibration("Baseline intensity: \(String(format: "%.3f", baselineIntensity))")
 
         // Cool down after intensity finding
@@ -162,144 +144,122 @@ final class CalibrationState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        let ticksPerStep = max(mode.heatSeconds / (loadSteps.count * 2), 5)
+        // Start stress at baseline intensity — keep running throughout
+        let stressFlag = StressFlag()
+        await MainActor.run { activeStressFlag = stressFlag }
+        startStress(flag: stressFlag, intensity: baselineIntensity)
 
-        for level in rpmLevels {
+        var measurements: [CalibrationData.Measurement] = []
+
+        // For each target temperature, find the fan speed that holds it
+        for target in tempTargets {
             guard !Task.isCancelled else { break }
 
-            let targetRPM = Int(maxRPM * level.pct)
+            await MainActor.run { phase = "Heating to \(Int(target))°C..." }
 
-            // Set fan speed — abort if daemon unreachable
-            do {
-                try client.execute(.setRPM(Float(targetRPM)))
-            } catch {
-                TFLogger.shared.error("Daemon unreachable during calibration: \(error)")
-                await MainActor.run { phase = "ERROR: Daemon not responding" }
-                break
-            }
+            // Let temp rise to target with fans on auto
+            try? client.execute(.resetAuto)
+            var reachedTarget = false
+            let maxWait = mode.heatSeconds
 
-            // Wait for fans to reach target speed
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-
-            var maxLoad: Float = 0
-            var peakTemp: Float = 0
-            var hitCeiling = false
-            var allReadings: [Float] = []
-
-            // Ramp load through steps
-            for loadStep in loadSteps {
+            for _ in 0..<(maxWait / 2) {
                 guard !Task.isCancelled else { break }
-
-                let loadLabel = "\(Int(loadStep * 100))%"
-                await MainActor.run {
-                    phase = "[\(level.label)] Load \(loadLabel) at \(targetRPM) RPM"
-                }
-
-                // Start stress at this intensity
-                let stressFlag = StressFlag()
-                await MainActor.run { activeStressFlag = stressFlag }
-                startStress(flag: stressFlag, intensity: loadStep)
-
-                // Discard first 3 readings as transition noise
-                for _ in 0..<3 {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
-
-                var stepReadings: [Float] = []
-                for _ in 0..<ticksPerStep {
-                    guard !Task.isCancelled else {
-                        stressFlag.stop()
-                        break
-                    }
-
-                    let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
-                    stepReadings.append(peak)
-                    allReadings.append(peak)
-                    peakTemp = max(peakTemp, peak)
-                    await MainActor.run { currentTemp = peak }
-
-                    let ts = isoFormatter.string(from: Date())
-                    csvWrite("\(ts),heating,\(String(format: "%.2f", level.pct)),\(String(format: "%.2f", loadStep)),\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT))")
-
-                    // 85°C ceiling
-                    if peak >= performanceCeiling {
-                        TFLogger.shared.calibration("[\(level.label)] Hit \(String(format: "%.0f", peak))°C at \(loadLabel) — ceiling reached")
-                        hitCeiling = true
-                        maxLoad = loadStep
-                        break
-                    }
-
-                    // Optimized mode: steady-state detection at this load step
-                    if mode.usesSteadyStateDetection && stepReadings.count >= 15 {
-                        let recent = stepReadings.suffix(15)
-                        if (recent.max() ?? 0) - (recent.min() ?? 0) < 0.5 {
-                            TFLogger.shared.calibration("[\(level.label)] Steady state at \(loadLabel): \(String(format: "%.1f", peak))°C")
-                            break
-                        }
-                    }
-
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
-
-                stressFlag.stop()
-                if hitCeiling { break }
-                maxLoad = loadStep
-            }
-
-            guard !Task.isCancelled else { break }
-
-            // Cooling phase
-            await MainActor.run {
-                phase = "[\(level.label)] Cooling at \(targetRPM) RPM"
-            }
-
-            var coolingReadings: [Float] = []
-            let coolTicks = mode.coolSeconds / 2
-            for _ in 0..<coolTicks {
-                guard !Task.isCancelled else { break }
-                let (peak, cpuT, gpuT, f0, f1) = readTemps(client: client)
-                coolingReadings.append(peak)
+                let (peak, _, _, _, _) = readTemps(client: client)
                 await MainActor.run { currentTemp = peak }
 
                 let ts = isoFormatter.string(from: Date())
-                csvWrite("\(ts),cooling,\(String(format: "%.2f", level.pct)),0.00,\(f0),\(f1),\(String(format: "%.1f", cpuT)),\(String(format: "%.1f", gpuT))")
+                csvWrite("\(ts),\(Int(target)),0.00,\(String(format: "%.1f", peak)),0,0,heating")
+
+                if peak >= target {
+                    reachedTarget = true
+                    break
+                }
+                if peak >= 95 {
+                    stressFlag.stop()
+                    try? client.execute(.setMax)
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    break
+                }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
 
-            let heatingRate = rate(from: allReadings)
-            let coolingRate = rate(from: coolingReadings)
+            guard reachedTarget && !Task.isCancelled else { continue }
+
+            // Binary search: find fan speed that holds temp at target
+            await MainActor.run { phase = "Finding fan speed for \(Int(target))°C..." }
+            var lowPct = minPct
+            var highPct: Float = 1.0
+            var holdingPct = highPct
+            let searchIterations = mode == .quick ? 4 : mode == .standard ? 6 : 8
+
+            for _ in 0..<searchIterations {
+                guard !Task.isCancelled else { break }
+
+                let testPct = (lowPct + highPct) / 2
+                let testRPM = maxRPM * testPct
+
+                try? client.execute(.setRPM(testRPM))
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+                let holdTime = mode == .quick ? 8 : mode == .standard ? 15 : 25
+                var readings: [Float] = []
+                for _ in 0..<(holdTime / 2) {
+                    guard !Task.isCancelled else { break }
+                    let (peak, _, _, f0, _) = readTemps(client: client)
+                    readings.append(peak)
+                    await MainActor.run { currentTemp = peak }
+
+                    let ts = isoFormatter.string(from: Date())
+                    csvWrite("\(ts),\(Int(target)),\(String(format: "%.2f", testPct)),\(String(format: "%.1f", peak)),\(f0),0,searching")
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+
+                let avgTemp = readings.reduce(0, +) / max(Float(readings.count), 1)
+                let trend = readings.count >= 2 ? (readings.last! - readings.first!) : 0
+
+                await MainActor.run {
+                    phase = "[\(Int(target))°C] \(Int(testPct * 100))% → \(String(format: "%.1f", avgTemp))°C"
+                }
+
+                if avgTemp > target + 1 || trend > 0.5 {
+                    lowPct = testPct
+                } else if avgTemp < target - 2 && trend < -0.5 {
+                    highPct = testPct
+                } else {
+                    holdingPct = testPct
+                    break
+                }
+                holdingPct = testPct
+            }
+
+            TFLogger.shared.calibration("[\(Int(target))°C] Holding speed: \(Int(holdingPct * 100))%")
 
             measurements.append(CalibrationData.Measurement(
-                rpmPercent: level.pct,
-                coolingRate: coolingRate,
-                heatingRate: heatingRate,
-                steadyState: peakTemp,
-                maxSustainableLoad: maxLoad
+                targetTemp: target,
+                holdingRPMPercent: holdingPct
             ))
 
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
         }
 
+        // Cleanup
+        stressFlag.stop()
         csvHandle?.closeFile()
-
-        // Always reset fans and clear stress flag
         try? client.execute(.resetAuto)
         await MainActor.run { activeStressFlag = nil }
 
         guard !Task.isCancelled else { return }
 
-        // If all levels were discarded by safety, don't save
         guard !measurements.isEmpty else {
-            TFLogger.shared.calibration("All levels hit safety threshold — no calibration data saved")
+            TFLogger.shared.calibration("No measurements captured")
             await MainActor.run {
                 timerTask?.cancel()
-                phase = "Failed — all levels hit 95°C"
+                phase = "Failed — no data captured"
                 isRunning = false
             }
             return
         }
 
-        // Get fan info for calibration data
         var fanCount = 2
         if let response = try? client.send("status"),
            let data = response.data(using: .utf8),
@@ -317,19 +277,18 @@ final class CalibrationState: ObservableObject {
             measurements: measurements
         )
 
-        // Validate before saving — don't write garbage data
         if let error = calibration.validationError {
             TFLogger.shared.error("Calibration data failed validation: \(error)")
             await MainActor.run {
                 timerTask?.cancel()
-                phase = "Failed — invalid data: \(error)"
+                phase = "Failed — \(error)"
                 isRunning = false
             }
             return
         }
 
         try? calibration.save()
-        TFLogger.shared.calibration("Calibration complete — \(measurements.count) levels saved")
+        TFLogger.shared.calibration("Calibration complete — \(measurements.count) temp points saved")
 
         await MainActor.run {
             timerTask?.cancel()

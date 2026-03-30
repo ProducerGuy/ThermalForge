@@ -378,7 +378,7 @@ struct Calibrate: ParsableCommand {
         }
         print("\nResults:")
         for m in data.measurements {
-            print("  \(Int(m.rpmPercent * 100))% RPM → steady state: \(String(format: "%.0f", m.steadyState))°C, cooling: \(String(format: "%.2f", m.coolingRate))°C/s")
+            print("  \(Int(m.targetTemp))°C → \(Int(m.holdingRPMPercent * 100))% fan speed")
         }
         print("\nThe Smart profile will now use these measurements for this machine.")
         if runner.logPath != nil {

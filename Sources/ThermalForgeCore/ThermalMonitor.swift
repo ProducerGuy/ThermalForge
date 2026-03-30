@@ -277,17 +277,27 @@ public final class ThermalMonitor {
         let rate = rateOfChange()
         var targetPct: Float
 
-        // Uncalibrated: conservative S-curve
-        // (Calibrated path will be rewritten in #37 with temp-first data)
-        let range = Self.smartCeiling - Self.smartFloor
-        let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
-        targetPct = position * position * (3 - 2 * position)
+        if let cal = calibration, let calPct = cal.fanPercentForTemp(peakTemp) {
+            // Calibrated: use machine-specific temp→fan lookup
+            targetPct = calPct
 
-        if rate > 0 {
-            // Rising: boost proportionally to rate
-            targetPct = min(targetPct + rate * 0.2, 1.0)
-        } else if peakTemp > Self.smartCeiling {
-            // Above ceiling: max
+            if rate > 0 {
+                // Rising: boost proportionally to rate and proximity to ceiling
+                let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+                targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
+            }
+        } else {
+            // Uncalibrated: conservative S-curve
+            let range = Self.smartCeiling - Self.smartFloor
+            let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
+            targetPct = position * position * (3 - 2 * position)
+
+            if rate > 0 {
+                targetPct = min(targetPct + rate * 0.2, 1.0)
+            }
+        }
+
+        if peakTemp > Self.smartCeiling {
             targetPct = 1.0
         }
 
