@@ -132,18 +132,37 @@ final class CalibrationState: ObservableObject {
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
 
-        // Load steps targeting ~1°C/sec ramp (real workloads, not synthetic max)
-        let loadSteps: [Float] = [0.05, 0.10, 0.15, 0.25]
         let performanceCeiling: Float = 85.0
-        let ticksPerStep = max(mode.heatSeconds / (loadSteps.count * 2), 5)
 
         // Wait for machine to cool to baseline
         await MainActor.run { phase = "Waiting for machine to cool..." }
         for _ in 0..<60 {
+            guard !Task.isCancelled else { return }
             let (peak, _, _, _, _) = readTemps(client: client)
             if peak > 0 && peak < 45 { break }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+
+        // Find stress intensity that produces ~1°C/sec on this machine
+        await MainActor.run { phase = "Finding baseline intensity..." }
+        let baselineIntensity = await findBaselineIntensity(client: client)
+        let loadSteps: [Float] = [
+            baselineIntensity,
+            baselineIntensity * 2,
+            baselineIntensity * 3,
+            baselineIntensity * 4
+        ]
+        TFLogger.shared.calibration("Baseline intensity: \(String(format: "%.3f", baselineIntensity))")
+
+        // Cool down after intensity finding
+        for _ in 0..<30 {
+            guard !Task.isCancelled else { return }
+            let (peak, _, _, _, _) = readTemps(client: client)
+            if peak > 0 && peak < 45 { break }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+
+        let ticksPerStep = max(mode.heatSeconds / (loadSteps.count * 2), 5)
 
         for level in rpmLevels {
             guard !Task.isCancelled else { break }
@@ -323,6 +342,54 @@ final class CalibrationState: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Find stress intensity that produces ~1°C/sec heating. Fans on auto.
+    private func findBaselineIntensity(client: DaemonClient) async -> Float {
+        // Reset fans to auto
+        try? client.execute(.resetAuto)
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        var intensity: Float = 0.01
+        let targetRate: Float = 1.0
+
+        for attempt in 0..<10 {
+            guard !Task.isCancelled else { return 0.02 }
+
+            let (startTemp, _, _, _, _) = readTemps(client: client)
+            guard startTemp > 0 else { return 0.02 }
+
+            // Run stress for 10 seconds
+            let flag = StressFlag()
+            await MainActor.run { activeStressFlag = flag }
+            startStress(flag: flag, intensity: intensity)
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            flag.stop()
+
+            let (endTemp, _, _, _, _) = readTemps(client: client)
+            let rate = (endTemp - startTemp) / 10.0
+
+            await MainActor.run {
+                phase = "Finding intensity: \(String(format: "%.1f", rate))°C/sec (attempt \(attempt + 1))"
+            }
+
+            if rate >= 0.8 && rate <= 1.2 {
+                return intensity
+            }
+
+            if rate < 0.1 {
+                intensity = min(intensity * 2, 0.5)
+            } else if rate > 0 {
+                intensity = intensity * (targetRate / rate)
+                intensity = min(max(intensity, 0.001), 0.5)
+            } else {
+                intensity = min(intensity * 3, 0.5)
+            }
+
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+
+        return intensity
+    }
 
     private func readTemps(client: DaemonClient) -> (peak: Float, cpu: Float, gpu: Float, fan0: Int, fan1: Int) {
         guard let response = try? client.send("status"),

@@ -323,11 +323,77 @@ public final class CalibrationRunner {
     /// Performance ceiling — stop increasing load if temp reaches this
     private static let performanceCeiling: Float = 85.0
 
-    /// Load steps targeting ~1°C/sec ramp rate.
+    /// Target heating rate for calibration — matches real-world workloads.
     /// Research: real workloads heat Apple Silicon at ~1-2°C/sec.
     /// Max synthetic load heats at ~5-8°C/sec (Notebookcheck, Max Tech).
-    /// These lower steps produce realistic thermal behavior for calibration.
-    private static let loadSteps: [Float] = [0.05, 0.10, 0.15, 0.25]
+    private static let targetHeatingRate: Float = 1.0 // °C/sec
+
+    /// Find the stress intensity that produces ~1°C/sec heating on this machine.
+    /// Fans on auto (Apple default). Starts at 1% and adjusts.
+    private func findBaselineIntensity() -> Float {
+        log("Finding baseline intensity for ~1°C/sec...")
+
+        // Reset fans to auto — we want to measure raw heating without fan interference
+        try? fanControl.resetAuto()
+        Thread.sleep(forTimeInterval: 2)
+
+        var intensity: Float = 0.01 // Start at 1%
+        let maxAttempts = 10
+
+        for attempt in 0..<maxAttempts {
+            // Record starting temp
+            let startTemp = peakCPUTemp()
+            guard startTemp > 0 else {
+                log("  Can't read temperature, using default intensity 0.02")
+                return 0.02
+            }
+
+            // Run stress at current intensity for 10 seconds
+            startStress(intensity: intensity)
+            Thread.sleep(forTimeInterval: 10)
+            stopStress()
+
+            // Measure how much temp rose
+            let endTemp = peakCPUTemp()
+            let rise = endTemp - startTemp
+            let rate = rise / 10.0 // °C/sec
+
+            log("  Attempt \(attempt + 1): intensity \(String(format: "%.3f", intensity)) → \(String(format: "%.2f", rate))°C/sec (\(String(format: "%.1f", startTemp))→\(String(format: "%.1f", endTemp))°C)")
+
+            // Check if we're in the target range (0.8-1.2 °C/sec)
+            if rate >= 0.8 && rate <= 1.2 {
+                log("  Found baseline: \(String(format: "%.3f", intensity)) at \(String(format: "%.2f", rate))°C/sec")
+                return intensity
+            }
+
+            // Adjust intensity proportionally
+            if rate < 0.1 {
+                // Way too low, double it
+                intensity = min(intensity * 2, 0.5)
+            } else if rate > 0 {
+                // Scale proportionally: if rate is 2°C/sec and target is 1, halve intensity
+                intensity = intensity * (Self.targetHeatingRate / rate)
+                intensity = min(max(intensity, 0.001), 0.5) // clamp to sane range
+            } else {
+                // No heating detected, increase
+                intensity = min(intensity * 3, 0.5)
+            }
+
+            // Brief cool between attempts
+            Thread.sleep(forTimeInterval: 5)
+        }
+
+        log("  Could not converge after \(maxAttempts) attempts, using \(String(format: "%.3f", intensity))")
+        return intensity
+    }
+
+    /// Read peak CPU temperature right now
+    private func peakCPUTemp() -> Float {
+        guard let status = try? fanControl.status() else { return 0 }
+        return status.temperatures
+            .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+            .values.max() ?? 0
+    }
 
     /// Cleanup: always stop stress, reset fans, close CSV on any exit path
     private func cleanup() {
@@ -357,7 +423,6 @@ public final class CalibrationRunner {
         log("Mode: \(mode.description)")
         log("Stress: \(stressType.description)")
         log("Ceiling: \(Self.performanceCeiling)°C")
-        log("Load steps: \(Self.loadSteps.map { "\(Int($0 * 100))%" }.joined(separator: ", "))")
 
         // Record ambient temperature
         let ambientTemp: Float
@@ -383,6 +448,31 @@ public final class CalibrationRunner {
                     log("Baseline reached: \(String(format: "%.1f", peak))°C")
                     break
                 }
+            }
+            Thread.sleep(forTimeInterval: 2)
+        }
+
+        // Find the right stress intensity for this machine.
+        // Target: ~1°C/sec heating rate. Fans on auto (Apple default).
+        let baselineIntensity = findBaselineIntensity()
+        let loadSteps: [Float] = [
+            baselineIntensity,
+            baselineIntensity * 2,
+            baselineIntensity * 3,
+            baselineIntensity * 4
+        ]
+        log("Baseline intensity: \(String(format: "%.3f", baselineIntensity))")
+        log("Load steps: \(loadSteps.map { String(format: "%.1f%%", $0 * 100) }.joined(separator: ", "))")
+
+        // Cool down again after intensity finding
+        stopStress()
+        try fanControl.resetAuto()
+        for _ in 0..<30 {
+            if let status = try? fanControl.status() {
+                let peak = status.temperatures
+                    .filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }
+                    .values.max() ?? 0
+                if peak < 45 { break }
             }
             Thread.sleep(forTimeInterval: 2)
         }
@@ -428,7 +518,7 @@ public final class CalibrationRunner {
             var hitCeiling = false
             var allReadings: [Float] = []
 
-            for loadStep in Self.loadSteps {
+            for loadStep in loadSteps {
                 let loadLabel = "\(Int(loadStep * 100))%"
                 log("[\(label)] Load \(loadLabel) — ramping stress")
 
@@ -443,7 +533,7 @@ public final class CalibrationRunner {
                 }
 
                 // Sample at this load step
-                let ticksPerStep = mode.heatSeconds / (Self.loadSteps.count * 2)
+                let ticksPerStep = mode.heatSeconds / (loadSteps.count * 2)
                 let maxTicks = Swift.max(ticksPerStep, 5) // at least 10 seconds
 
                 var stepReadings: [Float] = []
