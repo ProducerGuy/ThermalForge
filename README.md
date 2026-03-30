@@ -285,6 +285,16 @@ Each session produces a self-contained folder:
 - **Self-describing sessions** — every log folder contains everything needed to interpret the data. Hand it to someone with no context and they can work with it
 - **Auto-delete by default (24h)** — prevents disk bloat for casual users. `--no-expire` for researchers who need to keep data
 
+### Storage
+
+ThermalForge has two separate log systems:
+
+**Session logs** (`thermalforge log` exports) — the CSV/JSON research data. Auto-delete after 24 hours by default. Use `--no-expire` to keep data permanently. Stored in `~/Library/Application Support/ThermalForge/logs/`.
+
+**Error log** (`thermalforge.log`) — app events, profile changes, fan commands, temperature anomalies, safety overrides. 1GB cap — when the file reaches 1GB it starts fresh. Stored in `~/Library/Logs/ThermalForge/`.
+
+Researchers who need long-term data collection should use `thermalforge log --no-expire` for their sessions. The error log is diagnostic, not research data — it captures what happened and why, not continuous sensor readings.
+
 ## Coming Soon
 
 ### Enhanced Logging
