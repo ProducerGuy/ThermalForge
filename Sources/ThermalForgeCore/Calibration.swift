@@ -210,10 +210,6 @@ public enum CalibrationMode: String, CaseIterable {
     }
 
     /// Maximum seconds to wait at each fan level for stabilization
-    // Legacy — used by CalibrationView until it's rewritten
-    public var heatSeconds: Int { maxWaitPerLevel }
-    public var coolSeconds: Int { 30 }
-
     public var maxWaitPerLevel: Int {
         switch self {
         case .quick: return 150     // 2.5 minutes
