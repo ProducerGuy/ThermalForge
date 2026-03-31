@@ -167,23 +167,23 @@ extension CalibrationData {
 ///   ~20-50 J/K × 0.3-0.8 K/W = 60-180s for laptop heatsink assemblies
 /// - 3 time constants = 95% of steady state, 5 time constants = 99.3%
 public enum CalibrationMode: String, CaseIterable {
-    /// 6 target temps × 4 binary search iterations × ~11s each = ~5 min searching
-    /// plus heating time between targets. Total ~10-15 min.
+    /// 5 fan levels × ~100s each + intensity finding + cooldowns ≈ 15 min
+    /// 60-second stabilization window (~80% accuracy)
     case quick
 
-    /// 6 target temps × 6 iterations × ~18s each = ~11 min searching
-    /// plus heating time. Total ~20-25 min.
+    /// 5 fan levels × ~150s each + overhead ≈ 22 min
+    /// 90-second window (near one time constant, ~90% accuracy)
     case standard
 
-    /// 6 target temps × 8 iterations × ~28s each = ~22 min searching
-    /// plus heating time. Most accurate binary search convergence.
+    /// 5 fan levels × ~200s each + overhead ≈ 30 min
+    /// 120-second window (full time constant, ~95% accuracy)
     case optimized
 
     public var description: String {
         switch self {
-        case .quick: return "Quick (~15 min)"
-        case .standard: return "Standard (~25 min)"
-        case .optimized: return "Optimized (~40 min)"
+        case .quick: return "Quick (up to 15 min)"
+        case .standard: return "Standard (up to 22 min)"
+        case .optimized: return "Optimized (up to 30 min)"
         }
     }
 
@@ -196,21 +196,29 @@ public enum CalibrationMode: String, CaseIterable {
         }
     }
 
-    /// Heat phase duration in seconds per level
-    public var heatSeconds: Int {
+    /// Number of readings in stabilization window (2s per reading)
+    /// Based on thermal time constant research (90-120s):
+    /// - Quick: 60s ≈ ~80% of steady state
+    /// - Standard: 90s ≈ near one time constant
+    /// - Optimized: 120s ≈ one full time constant, ~95% accuracy
+    public var stabilizationWindowSize: Int {
         switch self {
-        case .quick: return 120       // 2 min
-        case .standard: return 300    // 5 min
-        case .optimized: return 600   // 10 min max, exits early on steady state
+        case .quick: return 30      // 60 seconds
+        case .standard: return 45   // 90 seconds
+        case .optimized: return 60  // 120 seconds
         }
     }
 
-    /// Cool phase duration in seconds per level
-    public var coolSeconds: Int {
+    /// Maximum seconds to wait at each fan level for stabilization
+    // Legacy — used by CalibrationView until it's rewritten
+    public var heatSeconds: Int { maxWaitPerLevel }
+    public var coolSeconds: Int { 30 }
+
+    public var maxWaitPerLevel: Int {
         switch self {
-        case .quick: return 30
-        case .standard: return 120    // 2 min
-        case .optimized: return 300   // 5 min max, exits early on steady state
+        case .quick: return 150     // 2.5 minutes
+        case .standard: return 240  // 4 minutes
+        case .optimized: return 360 // 6 minutes
         }
     }
 
@@ -352,8 +360,19 @@ public final class CalibrationRunner {
         csvHandle = nil
     }
 
-    /// Temperature targets for calibration: what fan speed holds each point?
-    private static let tempTargets: [Float] = [60, 65, 70, 75, 80, 85]
+    /// Fan levels to test (high to low). 5 levels cover the useful cooling range.
+    private static func fanLevels(minPct: Float) -> [Float] {
+        [1.0, 0.80, 0.60, 0.45, minPct]
+    }
+
+    /// Temperature targets for the control curve output
+    private static let controlCurveTemps: [Float] = [60, 65, 70, 75, 80, 85]
+
+    /// Ceiling: record data and skip remaining lower fan levels
+    private static let ceilingTemp: Float = 84.0
+
+    /// Safety: abort and max fans
+    private static let safetyTemp: Float = 90.0
 
     /// Run full calibration. Blocks until complete.
     public func run() throws -> CalibrationData {
@@ -372,33 +391,29 @@ public final class CalibrationRunner {
         sysctlbyname("hw.model", &modelBuf, &sysSize, nil, 0)
         let machine = String(cString: modelBuf)
 
+        let levels = Self.fanLevels(minPct: minPct)
         log("Mode: \(mode.description)")
         log("Stress: \(stressType.description)")
-        log("Approach: temp-first (heat to target, find holding fan speed)")
-        log("Targets: \(Self.tempTargets.map { "\(Int($0))°C" }.joined(separator: ", "))")
+        log("Approach: fan-first with stabilization (set fan speed, wait for equilibrium)")
+        log("Fan levels: \(levels.map { "\(Int($0 * 100))%" }.joined(separator: " → "))")
+        log("Stabilization window: \(mode.stabilizationWindowSize * 2)s, max wait: \(mode.maxWaitPerLevel)s/level")
 
         // Record ambient temperature
-        let ambientTemp: Float
         if let status = try? fanControl.status() {
-            ambientTemp = status.temperatures
-                .filter { k, _ in k.hasPrefix("TA") }
-                .values.first ?? 0
-        } else {
-            ambientTemp = 0
-        }
-        if ambientTemp > 0 {
-            log("Ambient: \(String(format: "%.1f", ambientTemp))°C")
+            let ambient = status.temperatures.filter { k, _ in k.hasPrefix("TA") }.values.first ?? 0
+            if ambient > 0 { log("Ambient: \(String(format: "%.1f", ambient))°C") }
         }
 
-        // Wait for machine to cool to baseline
-        log("Waiting for machine to cool below 45°C...")
+        // Phase 0: Cooldown to baseline
+        log("Phase 0: Cooling to baseline...")
         waitForCooldown(below: 45)
 
-        // Find stress intensity that produces ~1°C/sec
+        // Phase 1: Find stress intensity (~1°C/sec)
+        log("Phase 1: Finding baseline intensity...")
         let baselineIntensity = findBaselineIntensity()
         log("Baseline intensity: \(String(format: "%.3f", baselineIntensity))")
 
-        // Cool down after intensity finding
+        // Phase 1.5: Cool again after intensity finding
         stopStress()
         try fanControl.resetAuto()
         waitForCooldown(below: 45)
@@ -412,121 +427,87 @@ public final class CalibrationRunner {
         FileManager.default.createFile(atPath: csvURL.path, contents: nil)
         csvHandle = try FileHandle(forWritingTo: csvURL)
         logPath = csvURL
-        csvWrite("timestamp,target_temp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
+        csvWrite("timestamp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
 
-        var measurements: [CalibrationData.Measurement] = []
-
-        // Start stress at baseline intensity — keep it running throughout
+        // Phase 2: Fan-level stabilization sweep (high to low)
+        log("Phase 2: Starting fan-level sweep...")
         startStress(intensity: baselineIntensity)
-        log("Stress started at \(String(format: "%.1f%%", baselineIntensity * 100)) intensity")
 
-        // For each target temperature, find the fan speed that holds it
-        for target in Self.tempTargets {
-            log("[Target \(Int(target))°C] Heating...")
+        var rawData: [(fanPct: Float, equilTemp: Float)] = []
+        var abortLowerLevels = false
 
-            // Let temp rise to target (fans on auto so it heats naturally)
-            try fanControl.resetAuto()
-            let startTime = Date()
-            var reachedTarget = false
+        for fanPct in levels {
+            guard !abortLowerLevels else { break }
 
-            // Wait for temp to reach target — timeout based on mode
-            let maxWait = mode.heatSeconds
-            for tick in 0..<(maxWait / 2) {
+            let targetRPM = Swift.max(maxRPM * fanPct, minRPM)
+            log("[\(Int(fanPct * 100))%] Setting fans to \(Int(targetRPM)) RPM — waiting for stabilization...")
+
+            try fanControl.setAllFans(rpm: targetRPM)
+
+            var readings: [Float] = []
+            let deadline = Date().addingTimeInterval(TimeInterval(mode.maxWaitPerLevel))
+            var stabilized = false
+
+            while Date() < deadline {
                 let temp = peakCPUTemp()
-                let ts = isoFormatter.string(from: Date())
-                csvWrite("\(ts),\(Int(target)),0.00,\(String(format: "%.1f", temp)),0,0,heating")
+                readings.append(temp)
 
-                if temp >= target {
-                    reachedTarget = true
-                    log("[Target \(Int(target))°C] Reached at \(tick * 2)s")
+                // CSV logging
+                let fan0rpm = (try? fanControl.fanInfo(0))?.actualRPM ?? 0
+                let fan1rpm = fanCount > 1 ? ((try? fanControl.fanInfo(1))?.actualRPM ?? 0) : 0
+                let ts = isoFormatter.string(from: Date())
+                csvWrite("\(ts),\(String(format: "%.2f", fanPct)),\(String(format: "%.1f", temp)),\(Int(fan0rpm)),\(Int(fan1rpm)),stabilizing")
+
+                // Safety: abort if too hot
+                if temp >= Self.safetyTemp {
+                    log("[\(Int(fanPct * 100))%] Safety at \(String(format: "%.0f", temp))°C — maxing fans, skipping lower levels")
+                    try fanControl.setMax()
+                    Thread.sleep(forTimeInterval: 30)
+                    rawData.append((fanPct: fanPct, equilTemp: Self.ceilingTemp))
+                    abortLowerLevels = true
                     break
                 }
 
-                // Safety backstop
-                if temp >= 95 {
-                    log("[Target \(Int(target))°C] Safety backstop at \(String(format: "%.0f", temp))°C — stopping")
-                    stopStress()
-                    try fanControl.setMax()
-                    Thread.sleep(forTimeInterval: 10)
+                // Ceiling: record and skip lower levels
+                if temp >= Self.ceilingTemp {
+                    log("[\(Int(fanPct * 100))%] Ceiling reached at \(String(format: "%.1f", temp))°C")
+                    rawData.append((fanPct: fanPct, equilTemp: Self.ceilingTemp))
+                    abortLowerLevels = true
+                    break
+                }
+
+                // Check stabilization
+                if isStabilized(readings: readings) {
+                    let window = readings.suffix(mode.stabilizationWindowSize)
+                    let equilTemp = window.reduce(0, +) / Float(window.count)
+                    log("[\(Int(fanPct * 100))%] Stabilized at \(String(format: "%.1f", equilTemp))°C (\(readings.count * 2)s)")
+                    rawData.append((fanPct: fanPct, equilTemp: equilTemp))
+                    stabilized = true
                     break
                 }
 
                 Thread.sleep(forTimeInterval: 2)
             }
 
-            guard reachedTarget else {
-                log("[Target \(Int(target))°C] Not reached in time — skipping")
-                continue
+            // Timeout: use best estimate
+            if !stabilized && !abortLowerLevels {
+                let windowSize = min(readings.count, mode.stabilizationWindowSize)
+                let window = readings.suffix(windowSize)
+                let equilTemp = window.isEmpty ? peakCPUTemp() : window.reduce(0, +) / Float(window.count)
+                log("[\(Int(fanPct * 100))%] Timeout — best estimate: \(String(format: "%.1f", equilTemp))°C (\(readings.count * 2)s)")
+                rawData.append((fanPct: fanPct, equilTemp: equilTemp))
             }
-
-            // Binary search: find fan speed that holds temp at target
-            var lowPct = minPct
-            var highPct: Float = 1.0
-            var holdingPct = highPct
-            let searchIterations = mode == .quick ? 4 : mode == .standard ? 6 : 8
-
-            for iteration in 0..<searchIterations {
-                let testPct = (lowPct + highPct) / 2
-                let testRPM = Swift.max(maxRPM * testPct, minRPM) // never below minimum
-
-                try fanControl.setAllFans(rpm: testRPM)
-                Thread.sleep(forTimeInterval: 3) // let fans settle
-
-                // Safety backstop during search
-                let currentTemp = peakCPUTemp()
-                if currentTemp >= 95 {
-                    log("[Target \(Int(target))°C] Safety backstop at \(String(format: "%.0f", currentTemp))°C during search — aborting")
-                    stopStress()
-                    try fanControl.setMax()
-                    Thread.sleep(forTimeInterval: 10)
-                    break
-                }
-
-                // Hold for a few seconds and measure trend
-                let holdTime = mode == .quick ? 8 : mode == .standard ? 15 : 25
-                var readings: [Float] = []
-                for _ in 0..<(holdTime / 2) {
-                    let temp = peakCPUTemp()
-                    readings.append(temp)
-                    let ts = isoFormatter.string(from: Date())
-                    let fan0rpm = (try? fanControl.fanInfo(0))?.actualRPM ?? 0
-                    csvWrite("\(ts),\(Int(target)),\(String(format: "%.2f", testPct)),\(String(format: "%.1f", temp)),\(Int(fan0rpm)),0,searching")
-                    Thread.sleep(forTimeInterval: 2)
-                }
-
-                let avgTemp = readings.reduce(0, +) / Float(readings.count)
-                let trend = readings.count >= 2 ? (readings.last! - readings.first!) : 0
-
-                log("[Target \(Int(target))°C] Search \(iteration + 1): \(Int(testPct * 100))% fans → avg \(String(format: "%.1f", avgTemp))°C, trend \(String(format: "%+.1f", trend))°C")
-
-                if avgTemp > target + 1 || trend > 0.5 {
-                    // Too hot or rising — need more fan
-                    lowPct = testPct
-                } else if avgTemp < target - 2 && trend < -0.5 {
-                    // Too cool and dropping — less fan needed
-                    highPct = testPct
-                } else {
-                    // Holding — this is our answer
-                    holdingPct = testPct
-                    break
-                }
-                holdingPct = testPct
-            }
-
-            let settleTime = Float(Date().timeIntervalSince(startTime))
-            log("[Target \(Int(target))°C] Holding speed: \(Int(holdingPct * 100))% (\(Int(maxRPM * holdingPct)) RPM) — settled in \(Int(settleTime))s")
-
-            measurements.append(CalibrationData.Measurement(
-                targetTemp: target,
-                holdingRPMPercent: holdingPct,
-                settleTime: settleTime
-            ))
-
-            // Brief pause before next target
-            Thread.sleep(forTimeInterval: 3)
         }
 
         stopStress()
+
+        // Phase 3: Build control curve from raw equilibrium data
+        log("Phase 3: Building control curve...")
+        let measurements = buildControlCurve(rawData: rawData, minPct: minPct)
+
+        for m in measurements {
+            log("  \(Int(m.targetTemp))°C → \(Int(m.holdingRPMPercent * 100))% fans")
+        }
 
         return CalibrationData(
             machine: machine,
@@ -540,6 +521,78 @@ public final class CalibrationRunner {
     }
 
     /// Wait for machine to cool below a threshold
+    /// Check if temperature readings have stabilized.
+    /// Stable = stdev < 0.5°C AND slope < 0.05°C/sec over the window.
+    private func isStabilized(readings: [Float]) -> Bool {
+        guard readings.count >= mode.stabilizationWindowSize else { return false }
+        let window = Array(readings.suffix(mode.stabilizationWindowSize))
+        let n = Float(window.count)
+
+        // Standard deviation
+        let mean = window.reduce(0, +) / n
+        let variance = window.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / n
+        let stdev = sqrt(variance)
+
+        // Linear regression slope (least squares)
+        let xMean = (n - 1) / 2
+        var numerator: Float = 0
+        var denominator: Float = 0
+        for i in 0..<window.count {
+            let x = Float(i) - xMean
+            let y = window[i] - mean
+            numerator += x * y
+            denominator += x * x
+        }
+        let slope = denominator > 0 ? numerator / denominator : 0
+        let slopePerSecond = slope / 2.0 // readings are 2 seconds apart
+
+        return stdev < 0.5 && abs(slopePerSecond) < 0.05
+    }
+
+    /// Build monotonically increasing control curve from raw equilibrium data.
+    /// Raw data: (fanPct, equilTemp) — higher fan = lower equilibrium (physically correct).
+    /// Control curve: (targetTemp, holdingRPMPercent) — higher temp = higher fan (for Smart).
+    /// Formula: fan_control(T) = (1.0 + minPct) - F_equil(T)
+    private func buildControlCurve(rawData: [(fanPct: Float, equilTemp: Float)], minPct: Float) -> [CalibrationData.Measurement] {
+        guard rawData.count >= 2 else { return [] }
+
+        // Sort raw data by equilibrium temp ascending
+        let sorted = rawData.sorted { $0.equilTemp < $1.equilTemp }
+
+        var measurements: [CalibrationData.Measurement] = []
+
+        for target in Self.controlCurveTemps {
+            // Interpolate equilibrium fan speed for this target temp
+            let fEquil = interpolateEquilFanSpeed(temp: target, data: sorted)
+
+            // Flip: control fan speed = (1.0 + minPct) - equilibrium fan speed
+            var controlFan = (1.0 + minPct) - fEquil
+            controlFan = min(max(controlFan, minPct), 1.0)
+
+            measurements.append(CalibrationData.Measurement(
+                targetTemp: target,
+                holdingRPMPercent: controlFan
+            ))
+        }
+
+        return measurements
+    }
+
+    /// Interpolate the equilibrium fan speed for a given temperature from raw data.
+    private func interpolateEquilFanSpeed(temp: Float, data: [(fanPct: Float, equilTemp: Float)]) -> Float {
+        guard !data.isEmpty else { return 0.5 }
+        if temp <= data.first!.equilTemp { return data.first!.fanPct }
+        if temp >= data.last!.equilTemp { return data.last!.fanPct }
+
+        for i in 0..<(data.count - 1) {
+            if temp >= data[i].equilTemp && temp <= data[i + 1].equilTemp {
+                let t = (temp - data[i].equilTemp) / (data[i + 1].equilTemp - data[i].equilTemp)
+                return data[i].fanPct + t * (data[i + 1].fanPct - data[i].fanPct)
+            }
+        }
+        return data.last!.fanPct
+    }
+
     private func waitForCooldown(below threshold: Float) {
         for _ in 0..<60 {
             let temp = peakCPUTemp()
