@@ -117,6 +117,22 @@ The Smart profile eliminates this. It monitors temperature velocity — not just
 
 Apple doesn't do this because silence sells in store demos and most users never run sustained workloads. ThermalForge gives power users the choice Apple doesn't.
 
+### How Smart works
+
+**The curve:** Smart maps temperature to fan speed across a 60–85°C range. Below 60°C, fans stay off. Above 85°C, fans go to max. Between those points, fan speed scales proportionally using an S-curve (gentle at low temps, steeper approaching the ceiling).
+
+**Rate-of-change awareness:** Smart doesn't just look at where temperature is — it looks at how fast it's moving. If temp is rising at 1°C/sec, Smart boosts fan speed proportionally to get ahead of the climb. If temp is stable or falling, Smart holds steady or eases off gradually.
+
+**With calibration:** Smart reads a temperature-to-fan-speed lookup table specific to your machine (produced by `thermalforge calibrate`). At 72°C, Smart knows your machine needs exactly 58% fan speed — not a guess, a measurement. It interpolates between calibrated points for any temperature.
+
+**Without calibration:** Smart uses a conservative default S-curve. Works on any machine, just less precise.
+
+**Ramp governors:** Fan speed changes are rate-limited to match Apple's hardware behavior. Ramp up at ~400 RPM/sec, ramp down at ~200 RPM/sec. This prevents acoustic shock, reduces mechanical stress, and extends fan bearing lifespan by up to 50% compared to abrupt speed changes (source: [NMB fan engineering](https://nmbtc.com/white-papers/dc-brushless-cooling-fan-behavior/), [Analog Devices ADM1031 datasheet](https://www.onsemi.com/download/data-sheet/pdf/adm1031-d.pdf)).
+
+**Hysteresis:** Fans turn on at 60°C and turn off at 55°C — a 5°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
+
+**0 to minimum RPM is binary:** Apple Silicon MacBook fans cannot spin below their minimum RPM (2317 on M5 Max, 1200 on M1 Max). When Smart decides fans should run, they jump directly to minimum — this is a hardware limitation of brushless DC motors that require a startup burst to overcome static friction. Above minimum, all speed changes are smooth and governed.
+
 ### Calibration
 
 For best results, calibrate Smart to your specific machine:
