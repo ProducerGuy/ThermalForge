@@ -341,7 +341,7 @@ struct Calibrate: ParsableCommand {
         print("Mode: \(calMode.description)")
         print("Stress: \(calStress.description)")
         print("")
-        print("This will stress your \(calStress == .combined ? "CPU and GPU" : calStress == .cpu ? "CPU" : "GPU") and measure thermal response at 4 fan speed levels.")
+        print("This will stress your \(calStress == .combined ? "CPU and GPU" : calStress == .cpu ? "CPU" : "GPU") and measure thermal response at 5 fan speed levels.")
         print("Fans will be loud during the test.")
         print("")
         print("DISCLAIMER: Calibration pushes your Mac to full load and cycles fan speeds.")

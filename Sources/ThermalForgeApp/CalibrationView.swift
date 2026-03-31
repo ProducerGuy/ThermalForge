@@ -64,6 +64,12 @@ final class CalibrationState: ObservableObject {
         activeStressFlag?.stop()
         activeStressFlag = nil
 
+        // Release Metal resources
+        gpuPipeline = nil
+        gpuQueue = nil
+        gpuBuffer = nil
+        gpuElementCount = 0
+
         // Cancel async tasks
         task?.cancel()
         timerTask?.cancel()

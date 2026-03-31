@@ -15,15 +15,15 @@ Proactive thermal curve that monitors temperature velocity and ramps fans before
 
 ### Calibration (Built)
 
-Temp-first machine-specific thermal profiling. Heats to target temperatures, binary-searches for the fan speed that holds each one.
+Fan-first stabilization sweep. Sets fan speed, applies calibrated stress, waits for thermal equilibrium, records the stabilization temperature.
 
-- Adaptive intensity finder: discovers the ~1°C/sec stress level for this machine before calibration
-- 6 target temperatures: 60, 65, 70, 75, 80, 85°C
-- At each target: binary search for holding fan speed (4-8 iterations per target depending on mode)
-- Produces temp→fan lookup table: "60°C needs 30% fans, 70°C needs 55% fans, ..."
-- Machine never exceeds target temp — we control the target, not the fan speed
-- 95°C safety backstop always active during both heating and search phases
-- Three modes: Quick (~15 min), Standard (~25 min), Optimized (~40 min)
+- Adaptive intensity finder: discovers the ~1°C/sec stress level for this machine
+- 5 fan levels swept high to low: 100% → 80% → 60% → 45% → minimum
+- At each level: wait for temperature to stabilize (stdev < 0.5°C AND slope < 0.05°C/sec)
+- Raw data transformed to monotonically increasing control curve via `fan_control(T) = (1.0 + minPct) - F_equil(T)`
+- Smart reads the curve via `fanPercentForTemp()` with interpolation
+- Protection: 84°C ceiling (skip lower levels), 90°C safety (max fans), 95°C backstop (always active)
+- Three modes: Quick (up to 17 min), Standard (up to 25 min), Optimized (up to 35 min)
 - CPU+GPU combined, CPU only, or GPU only stress types
 - Downgrade prevention: Quick can't overwrite Standard or Optimized
 - In-app UI: mode picker, progress bar, live temp, stop button
@@ -61,7 +61,7 @@ Research-grade data export: `thermalforge log`
 
 ---
 
-## Profile + Smart Redesign (Complete) + Calibration Redesign (Pending)
+## Profile + Smart + Calibration Redesign (Complete)
 
 The entire profile system, Smart curve, and calibration need to be redesigned as one cohesive system. Current profiles are binary switches that immediately set fans to a fixed percentage. They should be proportional curves that respect Apple's fan hardware behavior.
 

@@ -107,8 +107,6 @@ public struct CalibrationData: Codable {
     }
 
     public var isValid: Bool { validationError == nil }
-
-    /// Interpolate the RPM percentage needed to hold a target temperature under load.
 }
 
 // MARK: - Persistence
@@ -167,23 +165,23 @@ extension CalibrationData {
 ///   ~20-50 J/K × 0.3-0.8 K/W = 60-180s for laptop heatsink assemblies
 /// - 3 time constants = 95% of steady state, 5 time constants = 99.3%
 public enum CalibrationMode: String, CaseIterable {
-    /// 5 fan levels × ~100s each + intensity finding + cooldowns ≈ 15 min
+    /// 5 fan levels × up to 2.5 min each + intensity finding + cooldowns
     /// 60-second stabilization window (~80% accuracy)
     case quick
 
-    /// 5 fan levels × ~150s each + overhead ≈ 22 min
+    /// 5 fan levels × up to 4 min each + overhead
     /// 90-second window (near one time constant, ~90% accuracy)
     case standard
 
-    /// 5 fan levels × ~200s each + overhead ≈ 30 min
+    /// 5 fan levels × up to 6 min each + overhead
     /// 120-second window (full time constant, ~95% accuracy)
     case optimized
 
     public var description: String {
         switch self {
-        case .quick: return "Quick (up to 15 min)"
-        case .standard: return "Standard (up to 22 min)"
-        case .optimized: return "Optimized (up to 30 min)"
+        case .quick: return "Quick (up to 17 min)"
+        case .standard: return "Standard (up to 25 min)"
+        case .optimized: return "Optimized (up to 35 min)"
         }
     }
 
@@ -274,8 +272,6 @@ public final class CalibrationRunner {
     }
 
     /// Performance ceiling — stop increasing load if temp reaches this
-    private static let performanceCeiling: Float = 85.0
-
     /// Target heating rate for calibration — matches real-world workloads.
     /// Research: real workloads heat Apple Silicon at ~1-2°C/sec.
     /// Max synthetic load heats at ~5-8°C/sec (Notebookcheck, Max Tech).
@@ -516,7 +512,6 @@ public final class CalibrationRunner {
         )
     }
 
-    /// Wait for machine to cool below a threshold
     /// Check if temperature readings have stabilized.
     /// Stable = stdev < 0.5°C AND slope < 0.05°C/sec over the window.
     private func isStabilized(readings: [Float]) -> Bool {

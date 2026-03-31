@@ -138,47 +138,45 @@ Apple doesn't do this because silence sells in store demos and most users never 
 For best results, calibrate Smart to your specific machine:
 
 ```bash
-sudo thermalforge calibrate                    # Standard (~25 min)
-sudo thermalforge calibrate --mode quick       # Quick (~15 min)
-sudo thermalforge calibrate --mode optimized   # Optimized (~40 min)
+sudo thermalforge calibrate                    # Standard (up to 25 min)
+sudo thermalforge calibrate --mode quick       # Quick (up to 17 min)
+sudo thermalforge calibrate --mode optimized   # Optimized (up to 35 min)
 ```
 
-Calibration answers one question per temperature point: **what fan speed holds this machine at this temperature?**
+Calibration answers one question per fan speed: **what temperature does this machine stabilize at with fans at X%?**
 
 It works in three phases:
 
 1. **Discover intensity** — finds the stress level that heats your machine at ~1°C/sec (matching real workloads, not synthetic maximum). Uses Metal compute + CPU stress.
-2. **Heat to target** — runs stress with fans on auto, lets the machine warm naturally to each target temperature (60°C, 65°C, 70°C, 75°C, 80°C, 85°C).
-3. **Find holding speed** — at each target, binary-searches for the fan speed that stabilizes temperature there. Tests a fan speed, measures whether temp is rising/falling/stable, adjusts up or down until it converges.
+2. **Fan-level stabilization sweep** — sets fans to 100%, applies calibrated stress, and waits for temperature to stabilize. Then reduces fans to 80% and waits again. Repeats at 60%, 45%, and minimum. At each level, the equilibrium temperature is recorded.
+3. **Build control curve** — transforms the raw data (higher fan = lower equilibrium temp) into a control curve (higher temp = more fan needed) that Smart reads at runtime.
 
 The result is a temperature-to-fan-speed lookup table specific to your machine:
 
 ```
-60°C → 30% fans
-65°C → 42% fans
-70°C → 55% fans
-75°C → 68% fans
-80°C → 82% fans
-85°C → 96% fans
+60°C → 39% fans
+65°C → 53% fans
+70°C → 65% fans
+75°C → 78% fans
+80°C → 90% fans
+85°C → 100% fans
 ```
 
-Smart reads this table and interpolates for any temperature. At 72°C on your machine, Smart knows it needs ~58% fan speed — not a guess, a measurement.
+Smart reads this table and interpolates for any temperature. At 72°C on your machine, Smart knows it needs ~70% fan speed — not a guess, a measurement.
 
-The machine never exceeds the target temperature because calibration controls the target, not the fan speed. A 95°C safety backstop is always active as a failsafe.
+Temperature is protected by three layers: an 84°C ceiling (skips lower fan levels), a 90°C safety stop (maxes fans immediately), and a 95°C backstop (always active regardless of what's running).
 
 ### Calibration modes
 
-Modes control how many binary search iterations per target and how long each test holds:
+Modes control how long the machine waits for thermal equilibrium at each fan level:
 
-| Mode | Time | Binary search iterations | Hold time per test |
+| Mode | Time | Stabilization window | Max wait per level |
 |---|---|---|---|
-| **Quick** | ~15 min | 4 per target | 8 seconds |
-| **Standard** | ~25 min | 6 per target | 15 seconds |
-| **Optimized** | ~40 min | 8 per target | 25 seconds |
+| **Quick** | up to 17 min | 60 seconds (30 readings) | 2.5 minutes |
+| **Standard** | up to 25 min | 90 seconds (45 readings) | 4 minutes |
+| **Optimized** | up to 35 min | 120 seconds (60 readings) | 6 minutes |
 
-More iterations and longer hold times produce more accurate data. Standard is recommended for most users.
-
-Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing). Mac Studio's larger thermal mass (~2-3x) is covered by Standard mode's timing.
+Longer stabilization windows produce more accurate equilibrium measurements. Standard is recommended for most users. Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing).
 
 **Smart works without calibration** — it uses a conservative default curve. Calibration makes it precise for your hardware.
 
