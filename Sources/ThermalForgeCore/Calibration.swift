@@ -167,26 +167,23 @@ extension CalibrationData {
 ///   ~20-50 J/K × 0.3-0.8 K/W = 60-180s for laptop heatsink assemblies
 /// - 3 time constants = 95% of steady state, 5 time constants = 99.3%
 public enum CalibrationMode: String, CaseIterable {
-    /// ~10 minutes. 2 min heat + 30s cool per level.
-    /// Reaches ~75% of steady state. Good baseline data.
+    /// 6 target temps × 4 binary search iterations × ~11s each = ~5 min searching
+    /// plus heating time between targets. Total ~10-15 min.
     case quick
 
-    /// ~28 minutes. 5 min heat + 2 min cool per level.
-    /// Reaches ~95% of steady state (3 thermal time constants).
-    /// Reliable for all Apple Silicon Macs including Mac Studio.
+    /// 6 target temps × 6 iterations × ~18s each = ~11 min searching
+    /// plus heating time. Total ~20-25 min.
     case standard
 
-    /// Varies (est. 35-50 min). Runs until temperature stabilizes.
-    /// Exits each phase when rate of change <0.5°C over 60 seconds.
-    /// Ceiling of 10 min heat + 5 min cool per level (5 time constants = 99.3%).
-    /// Produces the most accurate data and logs time-to-steady-state.
+    /// 6 target temps × 8 iterations × ~28s each = ~22 min searching
+    /// plus heating time. Most accurate binary search convergence.
     case optimized
 
     public var description: String {
         switch self {
-        case .quick: return "Quick (~14 min)"
-        case .standard: return "Standard (~32 min)"
-        case .optimized: return "Optimized (until stable, ~35-50 min)"
+        case .quick: return "Quick (~15 min)"
+        case .standard: return "Standard (~25 min)"
+        case .optimized: return "Optimized (~40 min)"
         }
     }
 
@@ -217,10 +214,6 @@ public enum CalibrationMode: String, CaseIterable {
         }
     }
 
-    /// Whether to use steady-state detection to exit phases early
-    public var usesSteadyStateDetection: Bool {
-        self == .optimized
-    }
 }
 
 /// What to stress during calibration
@@ -474,10 +467,20 @@ public final class CalibrationRunner {
 
             for iteration in 0..<searchIterations {
                 let testPct = (lowPct + highPct) / 2
-                let testRPM = maxRPM * testPct
+                let testRPM = Swift.max(maxRPM * testPct, minRPM) // never below minimum
 
                 try fanControl.setAllFans(rpm: testRPM)
                 Thread.sleep(forTimeInterval: 3) // let fans settle
+
+                // Safety backstop during search
+                let currentTemp = peakCPUTemp()
+                if currentTemp >= 95 {
+                    log("[Target \(Int(target))°C] Safety backstop at \(String(format: "%.0f", currentTemp))°C during search — aborting")
+                    stopStress()
+                    try fanControl.setMax()
+                    Thread.sleep(forTimeInterval: 10)
+                    break
+                }
 
                 // Hold for a few seconds and measure trend
                 let holdTime = mode == .quick ? 8 : mode == .standard ? 15 : 25
@@ -691,14 +694,6 @@ public final class CalibrationRunner {
     }
 
     // MARK: - Helpers
-
-    private func rateFromReadings(_ readings: [Float]) -> Float {
-        guard readings.count >= 2 else { return 0 }
-        let first = readings.first!
-        let last = readings.last!
-        let seconds = Float(readings.count - 1) * 2.0
-        return (last - first) / seconds
-    }
 
     // MARK: - Logging
 

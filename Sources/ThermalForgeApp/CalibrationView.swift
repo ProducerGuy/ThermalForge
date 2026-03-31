@@ -31,8 +31,8 @@ final class CalibrationState: ObservableObject {
     private let executor = PrivilegedExecutor()
 
     private var totalSeconds: Int {
-        // 4 levels × (heat + cool) + pauses
-        4 * (selectedMode.heatSeconds + selectedMode.coolSeconds) + 20
+        // 6 target temps × (heat to target + binary search + pause) + intensity finding + cooldowns
+        6 * (selectedMode.heatSeconds / 2 + 60) + 120
     }
 
     func start() {
@@ -196,10 +196,20 @@ final class CalibrationState: ObservableObject {
                 guard !Task.isCancelled else { break }
 
                 let testPct = (lowPct + highPct) / 2
-                let testRPM = maxRPM * testPct
+                let testRPM = Swift.max(maxRPM * testPct, minRPM)
 
                 try? client.execute(.setRPM(testRPM))
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+                // Safety backstop during search
+                let (checkTemp, _, _, _, _) = readTemps(client: client)
+                if checkTemp >= 95 {
+                    stressFlag.stop()
+                    try? client.execute(.setMax)
+                    TFLogger.shared.safety("Calibration safety backstop at \(String(format: "%.0f", checkTemp))°C during search")
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    break
+                }
 
                 let holdTime = mode == .quick ? 8 : mode == .standard ? 15 : 25
                 var readings: [Float] = []
@@ -570,9 +580,9 @@ struct CalibrationView: View {
 
     private var modePicker: some View {
         Picker("Mode", selection: $state.selectedMode) {
-            Text("Quick (~10 min)").tag(CalibrationMode.quick)
-            Text("Standard (~28 min)").tag(CalibrationMode.standard)
-            Text("Optimized (until stable)").tag(CalibrationMode.optimized)
+            Text(CalibrationMode.quick.description).tag(CalibrationMode.quick)
+            Text(CalibrationMode.standard.description).tag(CalibrationMode.standard)
+            Text(CalibrationMode.optimized.description).tag(CalibrationMode.optimized)
         }
         .pickerStyle(.inline)
         .labelsHidden()

@@ -8,20 +8,22 @@ Proactive thermal curve that monitors temperature velocity and ramps fans before
 
 - Graduated continuous curve from 60°C (floor) to 85°C (ceiling)
 - Rate-of-change awareness: ramps harder when temp is rising, eases off slowly when falling
-- Uses calibration data (maxSustainableLoad per fan level) when available
-- Falls back to conservative defaults when no calibration exists
-- Ramp-down governor prevents sawtooth oscillation
+- With calibration: uses temp→fan lookup table from `fanPercentForTemp()` with interpolation
+- Without calibration: conservative S-curve fallback
+- Ramp governors matching Apple hardware: ~400 RPM/sec up, ~200 RPM/sec down
+- 5°C hysteresis (stop at 55°C, start at 60°C)
 
 ### Calibration (Built)
 
-Machine-specific thermal profiling. Gradually increases CPU+GPU load (Metal compute + CPU stress) at each fan speed level, measuring what each fan speed can handle below 85°C.
+Temp-first machine-specific thermal profiling. Heats to target temperatures, binary-searches for the fan speed that holds each one.
 
-- Load steps: 5% → 10% → 15% → 25% (targeting ~1°C/sec realistic ramp rates)
-- Pre-calibration cooldown: waits for machine to reach <45°C baseline
-- Records ambient temperature from SMC sensors
-- Fan spin-up wait (5s) before sampling at each level
-- Transition noise discard (6s) at each load step change
-- Three modes: Quick (~14 min), Standard (~32 min), Optimized (until stable, ~35-50 min)
+- Adaptive intensity finder: discovers the ~1°C/sec stress level for this machine before calibration
+- 6 target temperatures: 60, 65, 70, 75, 80, 85°C
+- At each target: binary search for holding fan speed (4-8 iterations per target depending on mode)
+- Produces temp→fan lookup table: "60°C needs 30% fans, 70°C needs 55% fans, ..."
+- Machine never exceeds target temp — we control the target, not the fan speed
+- 95°C safety backstop always active during both heating and search phases
+- Three modes: Quick (~15 min), Standard (~25 min), Optimized (~40 min)
 - CPU+GPU combined, CPU only, or GPU only stress types
 - Downgrade prevention: Quick can't overwrite Standard or Optimized
 - In-app UI: mode picker, progress bar, live temp, stop button
@@ -114,44 +116,6 @@ Smart uses the same three-zone model but with:
 - Calibration data: the adaptive intensity finder discovers the machine's thermal response, and calibration maps how each fan speed handles proportional load
 - Without calibration: conservative S-curve (already built, stays as fallback)
 
-### Calibration redesign — temp-first, not fan-first
-
-Previous calibration was fan-first: fix fan speed, blast stress, see where temp lands. This caused temp to blow past 85°C because we held fans low while pushing load. Fundamentally wrong approach.
-
-New calibration is temp-first: heat the machine to a target temperature, then find what fan speed holds it there. This directly maps temperature → required fan speed, which is exactly what the proportional curves need.
-
-**How it works:**
-1. Pre-calibration: adaptive intensity finder discovers ~1°C/sec stress level (already built)
-2. Start calibrated stress at discovered intensity
-3. Let machine heat to 60°C → adjust fan speed up/down until temp holds at 60°C → record: "60°C needs X% fan speed on this machine"
-4. Continue stress, let machine heat to 65°C → find holding fan speed → record
-5. Repeat at 70°C, 75°C, 80°C, 85°C
-6. Stop stress, measure cooling rates at each fan speed discovered
-
-**What this produces:**
-A temperature-to-fan-speed lookup table specific to this machine:
-
-| Temperature | Fan speed to hold |
-|---|---|
-| 60°C | 30% (min RPM) |
-| 65°C | 38% |
-| 70°C | 52% |
-| 75°C | 67% |
-| 80°C | 81% |
-| 85°C | 95% |
-
-Smart reads this table and interpolates: "current temp is 72°C → I need ~58% fan speed." No guessing, no generic curves — machine-specific data.
-
-**Why this never exceeds 85°C:**
-We control the temperature target, not the fan speed. At each step we let the fans adjust to hold the target. If the machine can't hold 85°C even at 100% fans, that's the data point — "this machine's limit under this load is X°C at max fans."
-
-**The adaptive intensity finder stays unchanged** — it finds the right stress level for ~1°C/sec heating. The fan level sweep gets replaced with a temperature target sweep.
-
-### Logging changes
-
-- Log every fan speed change: from RPM, to RPM, what triggered it (profile curve, rate boost, safety)
-- Log when fans turn on from idle (with temperature that triggered it)
-- Log when fans return to idle (with temperature and stability confirmation)
 - Temperature anomaly logging with process capture (already built: >10°C in 30s)
 
 ### Build order
