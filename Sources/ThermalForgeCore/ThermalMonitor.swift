@@ -288,6 +288,9 @@ public final class ThermalMonitor {
 
         // Sustained trigger: don't engage for transient spikes
         if !fansCurrentlyRunning && sustainedAboveCount < Self.sustainedTriggerCount {
+            if sustainedAboveCount == 1 {
+                TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(Self.sustainedTriggerCount)) [Smart]")
+            }
             return
         }
 
@@ -392,6 +395,9 @@ public final class ThermalMonitor {
         // Must be above start threshold for 4 consecutive readings (8 seconds).
         // Once fans are running, they stay on (hysteresis handles turn-off).
         if !fansCurrentlyRunning && sustainedAboveCount < Self.sustainedTriggerCount {
+            if sustainedAboveCount == 1 {
+                TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(Self.sustainedTriggerCount)) [\(activeProfile.name)]")
+            }
             return
         }
 

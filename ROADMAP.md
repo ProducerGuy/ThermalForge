@@ -43,13 +43,15 @@ Research-grade data export: `thermalforge log`
 ### Safety Systems (Built)
 
 - 95°C safety override: forces max fans regardless of profile
+- Sustained trigger: fans only engage after 8 seconds above threshold (4 consecutive readings) — filters transient spikes
 - Heartbeat watchdog: daemon resets fans if app dies (15s timeout)
 - Clean state on app launch: fans reset to auto before any profile activates
 - Clean shutdown: fans reset on normal app quit
 - SMC lock: serializes all fan control operations across daemon threads
 - Duplicate instance prevention
 - Calibration data validation: rejects physically impossible data
-- Error logging to ~/Library/Logs/ThermalForge/thermalforge.log
+- Temperature anomaly detection: instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with 30-second rolling process buffer
+- Error logging to ~/Library/Logs/ThermalForge/thermalforge.log (1GB cap)
 
 ### In-App Calibration UI (Built)
 

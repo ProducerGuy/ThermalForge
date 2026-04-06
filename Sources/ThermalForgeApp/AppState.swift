@@ -113,7 +113,7 @@ final class AppState: ObservableObject {
             try executor.execute(.resetAuto)
             activeProfile = .silent
             monitor?.switchProfile(.silent)
-            TFLogger.shared.profile("Reset to Default (Silent)")
+            TFLogger.shared.profile("Reset to Default (Silent (Apple Default))")
         } catch {
             TFLogger.shared.error("Reset to Default failed: \(error)")
         }
