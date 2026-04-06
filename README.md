@@ -56,17 +56,25 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 
 ## Profiles
 
-Every profile uses a proportional curve — fans ramp gradually with temperature, not as binary switches. Ramp rates match Apple's hardware behavior (~400 RPM/sec up, ~200 RPM/sec down) to minimize fan bearing wear. Once fans are on, they stay on until temperature is clearly stable below the threshold (at least 5°C hysteresis) to avoid damaging start/stop cycling.
+Every profile uses a proportional curve — fans ramp gradually with temperature, not as binary switches. All profiles share a unified 50°C off threshold (matching Apple's observed behavior). Fans only engage after temperature stays above the start threshold for 8 consecutive seconds — transient 2-second spikes are ignored because they resolve on their own and reacting to them would cause the start/stop cycling that is the #1 cause of fan bearing wear (source: [Analog Devices fan control](https://www.analog.com/en/analog-dialogue/articles/how-to-control-fan-speed.html)).
 
-| Profile | Fans off below | Fans ramp from | Max fan speed | Target |
-|---|---|---|---|---|
-| **Silent** | Always off | N/A — hands-off | Apple default | Monitoring only. Lets Apple handle fans. |
-| **Balanced** | 50°C | 60–70°C | 60% | Good balance of noise and cooling for everyday use. |
-| **Performance** | 45°C | 50–65°C | 85% | For sustained workloads where cooling matters more than noise. |
-| **Max** | Never | Always on | 100% | Full cooling, maximum noise. |
-| **Smart** | 55°C | 60–85°C | 100% (adapts) | Proactive curve with rate-of-change awareness. Uses calibration data when available. |
+Ramp rates match Apple's hardware behavior (~400 RPM/sec up, ~200 RPM/sec down) for acoustic comfort (source: [MAX31760 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/max31760.pdf), [Microchip AN771](https://ww1.microchip.com/downloads/en/appnotes/00771a.pdf)).
 
-**How the curves work:** Between the ramp start and target ceiling temperatures, fan speed scales proportionally. At 65°C on Balanced (midpoint of 60–70°C range), fans run at 30% of max RPM. At the ceiling they reach the profile's max. Below the off threshold, fans stop completely. In the gap between off and ramp start (hysteresis zone), fans maintain their current state — if already running they stay at minimum, if already off they stay off.
+| Profile | Fans off | Fans start | Ceiling | Max fan | Behavior |
+|---|---|---|---|---|---|
+| **Silent (Apple Default)** | N/A | N/A | N/A | Apple | Monitoring only. Apple controls fans. |
+| **Balanced** | 50°C | 55°C | 70°C | 60% | Gentle ramp for everyday use. |
+| **Performance** | 50°C | 55°C | 65°C | 85% | Steeper curve, lower ceiling. |
+| **Max** | 50°C | 55°C | 65°C | 100% | Full cooling with ramp governor. |
+| **Smart** | 50°C | 53°C | 85°C | 100% | Proactive curve with rate-of-change awareness. Starts 2°C earlier. |
+
+**How profiles work:**
+- **Below 50°C:** All fans off. Machine is at idle.
+- **50–55°C (hysteresis zone):** Fans maintain current state. Already running → stay at minimum. Already off → stay off.
+- **Above 55°C for 8+ seconds:** Fans engage at minimum RPM and begin proportional ramp toward ceiling.
+- **Between start and ceiling:** Fan speed scales proportionally. At 62.5°C on Balanced (midpoint of 55–70°C), fans run at 30% of max RPM.
+- **At ceiling and above:** Fan speed at the profile's maximum (60%/85%/100%).
+- **Ramp down:** When temperature drops, fans reduce speed at ~200 RPM/sec — slower than ramp-up for smoother acoustics.
 
 ## Install
 

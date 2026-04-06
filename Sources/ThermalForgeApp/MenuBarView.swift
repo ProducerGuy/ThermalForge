@@ -72,11 +72,13 @@ struct MenuBarView: View {
                     HStack {
                         Text(profile.name)
                         Spacer()
-                        if !profile.curve.handsOff && !profile.curve.alwaysOn {
-                            let tempC = profile.curve.ceilingTemp
-                            let display = appState.useFahrenheit ? tempC * 9 / 5 + 32 : tempC
+                        if !profile.curve.handsOff {
+                            let offC = profile.curve.stopTemp
+                            let ceilC = profile.curve.ceilingTemp
+                            let offDisp = appState.useFahrenheit ? offC * 9 / 5 + 32 : offC
+                            let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
                             let unit = appState.useFahrenheit ? "F" : "C"
-                            Text("<\(Int(display))°\(unit)")
+                            Text("\(Int(offDisp))→\(Int(ceilDisp))°\(unit)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

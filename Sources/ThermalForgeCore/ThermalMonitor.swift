@@ -39,8 +39,17 @@ public final class ThermalMonitor {
     private var lastAppliedRPMPercent: Float = 0
     private var fansCurrentlyRunning = false
 
+    /// Sustained trigger: fans only engage after this many consecutive readings
+    /// above the profile's start threshold. 4 readings × 2 seconds = 8 seconds.
+    /// Prevents reacting to transient 2-second spikes that resolve on their own.
+    /// Research: die thermal time constant ~1-2ms means 12°C spikes in 2s are real
+    /// but harmless. Apple's thermalmonitord ignores them too.
+    private static let sustainedTriggerCount = 4
+    private var sustainedAboveCount = 0
+
     /// Max ramp-up rate: ~400 RPM/sec = ~5% per 2-second tick
-    /// Research: Apple ramps at ~350-550 RPM/sec. ADM1031 fastest = ~460 RPM/sec.
+    /// Research: acoustic comfort feature, not bearing protection.
+    /// Sources: MAX31760 datasheet, Microchip AN771, US Patent 20070124574.
     private static let maxRampUp: Float = 0.05
     /// Max ramp-down rate: ~200 RPM/sec = ~2.5% per 2-second tick
     private static let maxRampDown: Float = 0.025
@@ -111,6 +120,7 @@ public final class ThermalMonitor {
             activeProfile = profile
             lastAppliedRPMPercent = 0
             fansCurrentlyRunning = false
+            sustainedAboveCount = 0
 
             if profile.id == "smart" {
                 // Reset Smart state and reload calibration data
@@ -223,6 +233,16 @@ public final class ThermalMonitor {
             state = .idle
         }
 
+        // Sustained trigger: track consecutive readings above start threshold.
+        // Fans only engage after 4 consecutive readings (8 seconds).
+        // Prevents reacting to transient 2-second spikes.
+        let startThreshold = activeProfile.id == "smart" ? Self.smartFloor : activeProfile.curve.startTemp
+        if maxTemp >= startThreshold {
+            sustainedAboveCount += 1
+        } else {
+            sustainedAboveCount = 0
+        }
+
         // Smart profile: uses curve + rate-of-change + calibration
         if activeProfile.id == "smart" {
             tickSmart(status: status, peakTemp: maxTemp)
@@ -239,11 +259,11 @@ public final class ThermalMonitor {
 
     /// Target temperature ceiling — keep below this to avoid any throttling
     private static let smartCeiling: Float = 85.0
-    /// Below this temperature, hand control back to Apple (fans off / idle)
-    private static let smartFloor: Float = 60.0
+    /// Smart starts earlier than other profiles to get ahead of rising temps
+    private static let smartFloor: Float = 53.0
 
-    /// Smart stop threshold: 5°C below floor for hysteresis (research: min 5°C gap)
-    private static let smartStopTemp: Float = 55.0
+    /// All profiles share the same off threshold — 50°C matches Apple's observed stop range
+    private static let smartStopTemp: Float = 50.0
 
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
         // Track temperature history (keep last 4 readings = 8 seconds at 2s interval)
@@ -269,8 +289,13 @@ public final class ThermalMonitor {
             return
         }
 
-        // In hysteresis band (55-60°C): maintain current state
+        // In hysteresis band (50-53°C): maintain current state
         if peakTemp >= Self.smartStopTemp && peakTemp < Self.smartFloor && !fansCurrentlyRunning {
+            return
+        }
+
+        // Sustained trigger: don't engage for transient spikes
+        if !fansCurrentlyRunning && sustainedAboveCount < Self.sustainedTriggerCount {
             return
         }
 
@@ -358,17 +383,6 @@ public final class ThermalMonitor {
             return
         }
 
-        // Always-on (Max): set and hold
-        if curve.alwaysOn {
-            if lastAppliedRPMPercent < curve.maxRPMPercent {
-                applyCommand(.setMax)
-                lastAppliedRPMPercent = curve.maxRPMPercent
-                fansCurrentlyRunning = true
-                state = .active(profileName: activeProfile.name)
-            }
-            return
-        }
-
         // Get target from curve
         guard let rawTarget = curve.targetPercent(at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning) else {
             // Curve says fans should be off
@@ -379,6 +393,13 @@ public final class ThermalMonitor {
                 state = .idle
                 TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
             }
+            return
+        }
+
+        // Sustained trigger: don't engage fans for transient spikes.
+        // Must be above start threshold for 4 consecutive readings (8 seconds).
+        // Once fans are running, they stay on (hysteresis handles turn-off).
+        if !fansCurrentlyRunning && sustainedAboveCount < Self.sustainedTriggerCount {
             return
         }
 

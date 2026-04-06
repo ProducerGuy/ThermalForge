@@ -112,49 +112,49 @@ public struct FanProfile: Codable, Identifiable, Equatable {
 // MARK: - Built-in Profiles
 
 extension FanProfile {
-    /// Silent: hands-off, let Apple handle fans. Only monitors.
-    /// Intervenes at 78°C to ensure Apple's thermal management is active.
-    /// Returns to hands-off below 73°C.
+    /// Silent (Apple Default): hands-off, let Apple control fans. ThermalForge monitors only.
     public static let silent = FanProfile(
         id: "silent",
-        name: "Silent",
-        curve: Curve(stopTemp: 73, startTemp: 78, ceilingTemp: 78,
+        name: "Silent (Apple Default)",
+        curve: Curve(stopTemp: 50, startTemp: 55, ceilingTemp: 55,
                      maxRPMPercent: 0, handsOff: true)
     )
 
-    /// Balanced: moderate curve targeting below 70°C.
-    /// Fans off below 50°C. Ramp from 60–70°C up to 60% max RPM.
-    /// Good balance of noise and cooling for everyday use.
+    /// Balanced: gentle proportional ramp for everyday use.
+    /// Fans off below 50°C. Ramp 55–70°C up to 60% max RPM.
+    /// Sustained trigger: only engages after 8 seconds above 55°C.
     public static let balanced = FanProfile(
         id: "balanced",
         name: "Balanced",
-        curve: Curve(stopTemp: 50, startTemp: 60, ceilingTemp: 70,
+        curve: Curve(stopTemp: 50, startTemp: 55, ceilingTemp: 70,
                      maxRPMPercent: 0.60)
     )
 
-    /// Performance: aggressive curve targeting below 65°C.
-    /// Fans off below 45°C. Ramp from 50–65°C up to 85% max RPM.
-    /// For sustained workloads where cooling matters more than noise.
+    /// Performance: steeper curve, targets lower ceiling.
+    /// Fans off below 50°C. Ramp 55–65°C up to 85% max RPM.
     public static let performance = FanProfile(
         id: "performance",
         name: "Performance",
-        curve: Curve(stopTemp: 45, startTemp: 50, ceilingTemp: 65,
+        curve: Curve(stopTemp: 50, startTemp: 55, ceilingTemp: 65,
                      maxRPMPercent: 0.85)
     )
 
-    /// Max: fans always at 100%. No curve, no temperature logic.
+    /// Max: ramps to 100% with governor. Not always-on — off below 50°C.
+    /// Starts at 55°C, reaches 100% at 65°C ceiling.
     public static let max = FanProfile(
         id: "max",
         name: "Max",
-        curve: Curve(alwaysOn: true, maxRPMPercent: 1.0)
+        curve: Curve(stopTemp: 50, startTemp: 55, ceilingTemp: 65,
+                     maxRPMPercent: 1.0)
     )
 
-    /// Smart: adaptive curve with rate-of-change awareness.
-    /// Uses calibration data when available. 60–85°C range, up to 100%.
+    /// Smart: proactive adaptive curve with rate-of-change awareness.
+    /// Starts 2°C earlier (53°C) to get ahead of rising temps.
+    /// Uses calibration data when available. 53–85°C range, up to 100%.
     public static let smart = FanProfile(
         id: "smart",
         name: "Smart",
-        curve: Curve(stopTemp: 60, startTemp: 60, ceilingTemp: 85,
+        curve: Curve(stopTemp: 50, startTemp: 53, ceilingTemp: 85,
                      maxRPMPercent: 1.0)
     )
 
