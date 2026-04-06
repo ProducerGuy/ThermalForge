@@ -111,11 +111,6 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 4)
 
-            // Calibration
-            CalibrationView(state: appState.calibrationState)
-
-            Divider().padding(.vertical, 4)
-
             // Footer
             Toggle("°F / °C", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)

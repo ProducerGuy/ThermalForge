@@ -15,8 +15,6 @@ final class AppState: ObservableObject {
     @Published var activeProfile: FanProfile = .silent
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
-    let calibrationState = CalibrationState()
-
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
@@ -32,22 +30,12 @@ final class AppState: ObservableObject {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
 
         // Clean state: reset fans to auto on every launch.
-        // Prevents stale manual settings from a previous crash.
         try? executor.execute(.resetAuto)
         TFLogger.shared.info("App launched — fans reset to auto")
 
-        // Clean expired session logs and old calibration CSVs
+        // Clean expired logs
         ThermalLogger.cleanExpired()
-        cleanOldCalibrationCSVs()
 
-        calibrationState.onComplete = { [weak self] in
-            self?.activeProfile = .smart
-            self?.monitor?.switchProfile(.smart)
-        }
-        calibrationState.onStop = { [weak self] in
-            self?.activeProfile = .silent
-            self?.monitor?.switchProfile(.silent)
-        }
         startMonitoring()
         startHeartbeat()
     }
@@ -96,20 +84,9 @@ final class AppState: ObservableObject {
     // MARK: - Actions
 
     func setSmart() {
-        if !CalibrationData.exists && !calibrationState.isComplete {
-            calibrationState.showPrompt = true
-            TFLogger.shared.profile("Smart requested — no calibration data, showing prompt")
-        } else {
-            activeProfile = .smart
-            monitor?.switchProfile(.smart)
-            TFLogger.shared.profile("Smart activated" + (CalibrationData.exists ? " (calibrated)" : " (default curve)"))
-        }
-    }
-
-    func activateSmartAfterSkip() {
         activeProfile = .smart
         monitor?.switchProfile(.smart)
-        TFLogger.shared.profile("Smart activated with default curve (calibration skipped)")
+        TFLogger.shared.profile("Smart activated")
     }
 
     func resetAuto() {
@@ -142,20 +119,6 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Launch at Login
-
-    /// Delete calibration CSV files older than 7 days
-    private func cleanOldCalibrationCSVs() {
-        let dir = CalibrationData.filePath.deletingLastPathComponent()
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey]) else { return }
-        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-
-        for file in files where file.lastPathComponent.hasPrefix("calibration_") && file.pathExtension == "csv" {
-            if let attrs = try? file.resourceValues(forKeys: [.creationDateKey]),
-               let created = attrs.creationDate, created < cutoff {
-                try? FileManager.default.removeItem(at: file)
-            }
-        }
-    }
 
     private func updateLoginItem() {
         do {

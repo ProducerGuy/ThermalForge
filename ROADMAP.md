@@ -13,22 +13,6 @@ Proactive thermal curve that monitors temperature velocity and ramps fans before
 - Ramp governors matching Apple hardware: ~400 RPM/sec up, ~200 RPM/sec down
 - 5°C hysteresis (stop at 55°C, start at 60°C)
 
-### Calibration (Built)
-
-Fan-first stabilization sweep. Sets fan speed, applies calibrated stress, waits for thermal equilibrium, records the stabilization temperature.
-
-- Adaptive intensity finder: discovers the ~1°C/sec stress level for this machine
-- 5 fan levels swept high to low: 100% → 80% → 60% → 45% → minimum
-- At each level: wait for temperature to stabilize (stdev < 0.5°C AND slope < 0.05°C/sec)
-- Raw data transformed to monotonically increasing control curve via `fan_control(T) = (1.0 + minPct) - F_equil(T)`
-- Smart reads the curve via `fanPercentForTemp()` with interpolation
-- Protection: 84°C ceiling (skip lower levels), 90°C safety (max fans), 95°C backstop (always active)
-- Three modes: Quick (up to 17 min), Standard (up to 25 min), Optimized (up to 35 min)
-- CPU+GPU combined, CPU only, or GPU only stress types
-- Downgrade prevention: Quick can't overwrite Standard or Optimized
-- In-app UI: mode picker, progress bar, live temp, stop button
-- CLI: `sudo thermalforge calibrate --mode quick --stress combined`
-- CSV log of every sample for research use
 
 ### Thermal Logging (Built)
 
@@ -137,6 +121,18 @@ Smart uses the same three-zone model but with:
 ---
 
 ## Planned Features
+
+### Calibration (Research Tool)
+
+Machine-specific thermal calibration for the Smart profile. Currently available as a CLI-only research command (`sudo thermalforge calibrate`). The stress infrastructure (Metal compute + CPU stress with adaptive intensity) is built and functional — it can spike CPU and GPU load to measure thermal response.
+
+The calibration methodology needs further research to produce data that meaningfully improves Smart's default curve. The fan control industry does not typically pre-calibrate — they use proportional curves with runtime adaptation, which is what Smart already does.
+
+Future direction: runtime learning during normal use, where Smart observes the relationship between fan speed and temperature response during real workloads and refines its curve over time.
+
+### Runtime Learning
+
+During normal use, Smart observes how the machine responds to fan speed changes. Over time, it learns machine-specific thermal characteristics without any stress test. This produces better data than synthetic calibration because it reflects real workloads.
 
 ### Enhanced Logging
 

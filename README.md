@@ -131,94 +131,16 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 **Rate-of-change awareness:** Smart doesn't just look at where temperature is — it looks at how fast it's moving. If temp is rising at 1°C/sec, Smart boosts fan speed proportionally to get ahead of the climb. If temp is stable or falling, Smart holds steady or eases off gradually.
 
-**With calibration:** Smart reads a temperature-to-fan-speed lookup table specific to your machine (produced by `thermalforge calibrate`). At 72°C, Smart knows your machine needs exactly 58% fan speed — not a guess, a measurement. It interpolates between calibrated points for any temperature.
-
-**Without calibration:** Smart uses a conservative default S-curve. Works on any machine, just less precise.
-
 **Ramp governors:** Fan speed changes are rate-limited to match Apple's hardware behavior. Ramp up at ~400 RPM/sec, ramp down at ~200 RPM/sec. This prevents acoustic shock, reduces mechanical stress, and extends fan bearing lifespan by up to 50% compared to abrupt speed changes (source: [NMB fan engineering](https://nmbtc.com/white-papers/dc-brushless-cooling-fan-behavior/), [Analog Devices ADM1031 datasheet](https://www.onsemi.com/download/data-sheet/pdf/adm1031-d.pdf)).
 
 **Hysteresis:** Fans turn on at 53°C (after 8 seconds sustained) and turn off at 50°C — a 3°C gap. All other profiles use 55°C start with a 5°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
 
 **0 to minimum RPM is binary:** Apple Silicon MacBook fans cannot spin below their minimum RPM (2317 on M5 Max, 1200 on M1 Max). When Smart decides fans should run, they jump directly to minimum — this is a hardware limitation of brushless DC motors that require a startup burst to overcome static friction. Above minimum, all speed changes are smooth and governed.
 
-### Calibration
-
-For best results, calibrate Smart to your specific machine:
-
-```bash
-sudo thermalforge calibrate                    # Standard (up to 25 min)
-sudo thermalforge calibrate --mode quick       # Quick (up to 17 min)
-sudo thermalforge calibrate --mode optimized   # Optimized (up to 35 min)
-```
-
-Calibration answers one question per fan speed: **what temperature does this machine stabilize at with fans at X%?**
-
-It works in three phases:
-
-1. **Discover intensity** — finds the stress level that heats your machine at ~1°C/sec (matching real workloads, not synthetic maximum). Uses Metal compute + CPU stress.
-2. **Fan-level stabilization sweep** — sets fans to 100%, applies calibrated stress, and waits for temperature to stabilize. Then reduces fans to 80% and waits again. Repeats at 60%, 45%, and minimum. At each level, the equilibrium temperature is recorded.
-3. **Build control curve** — transforms the raw data (higher fan = lower equilibrium temp) into a control curve (higher temp = more fan needed) that Smart reads at runtime.
-
-The result is a temperature-to-fan-speed lookup table specific to your machine:
-
-```
-60°C → 39% fans
-65°C → 53% fans
-70°C → 65% fans
-75°C → 78% fans
-80°C → 90% fans
-85°C → 100% fans
-```
-
-Smart reads this table and interpolates for any temperature. At 72°C on your machine, Smart knows it needs ~70% fan speed — not a guess, a measurement.
-
-Temperature is protected by three layers: an 84°C ceiling (skips lower fan levels), a 90°C safety stop (maxes fans immediately), and a 95°C backstop (always active regardless of what's running).
-
-### Calibration modes
-
-Modes control how long the machine waits for thermal equilibrium at each fan level:
-
-| Mode | Time | Stabilization window | Max wait per level |
-|---|---|---|---|
-| **Quick** | up to 17 min | 60 seconds (30 readings) | 2.5 minutes |
-| **Standard** | up to 25 min | 90 seconds (45 readings) | 4 minutes |
-| **Optimized** | up to 35 min | 120 seconds (60 readings) | 6 minutes |
-
-Longer stabilization windows produce more accurate equilibrium measurements. Standard is recommended for most users. Timing is based on measured thermal time constants of 90-120 seconds for Apple Silicon laptop heatsink assemblies (Notebookcheck M1-M4 MacBook Pro stress tests, [Max Tech](https://www.youtube.com/@MaxTech) sustained performance testing).
-
-**Smart works without calibration** — it uses a conservative default curve. Calibration makes it precise for your hardware.
-
-### Stress types
-
-By default, calibration stresses CPU and GPU simultaneously. For researchers who want to isolate thermal contributions:
-
-```bash
-sudo thermalforge calibrate --stress combined    # CPU + GPU (default)
-sudo thermalforge calibrate --stress cpu         # CPU only
-sudo thermalforge calibrate --stress gpu         # GPU only (Metal compute)
-```
-
 ### FAQ
 
-**Do I need to re-calibrate every time I use Smart?**
-No. Calibration runs once and saves the results. Switch between profiles freely — Smart always has your data.
-
-**Can I re-calibrate?**
-Yes, at the same level or higher. Calibration data can't be downgraded — if you ran Standard, Quick won't overwrite it. Run Standard or Optimized to update. This prevents accidentally replacing good data with less accurate data.
-
-**Can I upgrade my calibration?**
-Yes. If you initially ran Quick, running Standard or Optimized will replace it with better data.
-
-**What if I stop calibration early?**
-Press the Stop button in the app or Ctrl-C in the terminal. Stress threads are killed immediately, fans reset to Apple defaults. No calibration data is saved. Smart continues to work with the default curve.
-
 **What if ThermalForge closes during normal use?**
-The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app resets fans to auto, then Smart picks up your calibration data when you activate it.
-
-**What does calibration save?**
-Two files in `~/Library/Application Support/ThermalForge/`:
-- `calibration.json` — machine-specific thermal data that Smart reads
-- `calibration_<timestamp>.csv` — every sensor reading taken during calibration (for research use)
+The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app resets fans to auto.
 
 ### Resets and troubleshooting
 
@@ -226,13 +148,7 @@ Two files in `~/Library/Application Support/ThermalForge/`:
 ```bash
 thermalforge auto
 ```
-Kills the app and resets fans to Apple defaults. Calibration data is preserved.
-
-**Clear calibration and start over:**
-```bash
-thermalforge calibrate --reset
-```
-Deletes calibration data. Smart falls back to the default curve. No sudo needed.
+Kills the app and resets fans to Apple defaults.
 
 **Emergency reset (if nothing else works):**
 ```bash
@@ -244,13 +160,13 @@ Force-kills the app and resets fans directly via the daemon.
 ```bash
 sudo thermalforge uninstall
 ```
-Removes the daemon, binary, app, calibration data, and all logs. Clean slate.
+Removes the daemon, binary, app, and all logs. Clean slate.
 
 If installed via Homebrew, run `brew uninstall thermalforge` first.
 
 ### Disclaimer
 
-Calibration gradually increases CPU and GPU load while cycling fan speeds, capping temperature at 85°C. This is well within normal operating parameters for your Mac, but ThermalForge is provided as-is with no warranty. Use at your own risk.
+ThermalForge is provided as-is with no warranty. Use at your own risk.
 
 ## CLI
 
@@ -261,8 +177,6 @@ thermalforge auto          # Reset to Apple defaults
 thermalforge set 4000      # Set specific RPM
 thermalforge discover      # Dump all SMC keys (for new hardware)
 thermalforge watch          # Monitor mode with auto-boost profiles
-thermalforge calibrate     # Calibrate Smart profile for this machine (sudo)
-thermalforge calibrate --reset   # Clear calibration data
 thermalforge log           # Record thermal data to CSV (1Hz, auto-delete 24h)
 thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep forever
 ```
@@ -349,8 +263,6 @@ ThermalForge has three types of stored data, all automatically managed:
 **App log** (daily files in `~/Library/Logs/ThermalForge/`) — one file per day (`thermalforge-2026-04-05.log`). Records all app events: profile changes, fan commands, temperature spikes, safety overrides, sustained trigger events. Auto-deletes files older than 7 days on app launch. Each daily file is small and easy to open or share.
 
 **Research session logs** (`thermalforge log` exports in `~/Library/Application Support/ThermalForge/logs/`) — CSV/JSON research data. Auto-delete after 24 hours by default. Use `--no-expire` to keep permanently.
-
-**Calibration CSVs** (`~/Library/Application Support/ThermalForge/`) — raw data from calibration runs. Auto-deletes files older than 7 days on app launch. Calibration results (`calibration.json`) persist until manually reset.
 
 Nothing accumulates indefinitely. All cleanup runs automatically on app launch.
 
