@@ -44,7 +44,7 @@ public struct FanProfile: Codable, Identifiable, Equatable {
         /// If true, fans are always at maxRPMPercent regardless of temperature.
         public let alwaysOn: Bool
 
-        public init(stopTemp: Float = 50, startTemp: Float = 60, ceilingTemp: Float = 70,
+        public init(stopTemp: Float = 50, startTemp: Float = 55, ceilingTemp: Float = 70,
                     maxRPMPercent: Float = 0.6, handsOff: Bool = false, alwaysOn: Bool = false) {
             self.stopTemp = stopTemp
             self.startTemp = startTemp
@@ -209,16 +209,3 @@ extension FanProfile {
     public static let hysteresisDegrees: Float = 5.0
 }
 
-// MARK: - Curve Initializer Convenience
-
-extension FanProfile.Curve {
-    /// Convenience for always-on profiles (Max)
-    public init(alwaysOn: Bool, maxRPMPercent: Float) {
-        self.stopTemp = 0
-        self.startTemp = 0
-        self.ceilingTemp = 0
-        self.maxRPMPercent = maxRPMPercent
-        self.handsOff = false
-        self.alwaysOn = alwaysOn
-    }
-}

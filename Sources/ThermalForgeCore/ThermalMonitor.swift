@@ -94,11 +94,7 @@ public final class ThermalMonitor {
     public func start(interval: TimeInterval = 2.0) {
         stop()
 
-        // If profile is Max, apply immediately
-        if activeProfile.id == "max" {
-            applyCommand(.setMax)
-            state = .active(profileName: "Max")
-        }
+        // All profiles use proportional curves now — tick() handles engagement
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: interval)
@@ -134,11 +130,7 @@ public final class ThermalMonitor {
                 }
             }
 
-            if profile.curve.alwaysOn {
-                state = .active(profileName: profile.name)
-            } else {
-                state = .idle
-            }
+            state = .idle
         }
     }
 

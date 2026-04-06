@@ -124,17 +124,14 @@ final class AppState: ObservableObject {
         monitor?.switchProfile(profile)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
-        // Only Max applies fans immediately — all other profiles
-        // are handled by tick() curve evaluation each cycle
+        // All profiles use proportional curves — tick() handles fan engagement.
+        // Reset to auto on profile change so tick() starts from a clean state.
         do {
-            if profile.curve.alwaysOn {
-                try executor.execute(.setMax)
-            } else if profile.curve.handsOff || profile.id == "smart" {
-                // Silent and Smart: tick() handles it, reset to auto first
+            if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" {
                 try executor.execute(.resetAuto)
             }
-            // Balanced/Performance: tick() will ramp proportionally
-            // based on current temperature — no immediate fan command
+            // Balanced/Performance/Max: tick() will ramp proportionally
+            // based on current temperature after sustained trigger is met
         } catch {
             TFLogger.shared.error("Profile \(profile.name) failed: \(error)")
         }

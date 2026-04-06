@@ -127,7 +127,7 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 ### How Smart works
 
-**The curve:** Smart maps temperature to fan speed across a 60–85°C range. Below 60°C, fans stay off. Above 85°C, fans go to max. Between those points, fan speed scales proportionally using an S-curve (gentle at low temps, steeper approaching the ceiling).
+**The curve:** Smart maps temperature to fan speed across a 53–85°C range. Below 50°C, fans turn off. Between 50–53°C, fans maintain current state (hysteresis). Above 85°C, fans go to max. Between those points, fan speed scales proportionally using an S-curve (gentle at low temps, steeper approaching the ceiling).
 
 **Rate-of-change awareness:** Smart doesn't just look at where temperature is — it looks at how fast it's moving. If temp is rising at 1°C/sec, Smart boosts fan speed proportionally to get ahead of the climb. If temp is stable or falling, Smart holds steady or eases off gradually.
 
@@ -137,7 +137,7 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 **Ramp governors:** Fan speed changes are rate-limited to match Apple's hardware behavior. Ramp up at ~400 RPM/sec, ramp down at ~200 RPM/sec. This prevents acoustic shock, reduces mechanical stress, and extends fan bearing lifespan by up to 50% compared to abrupt speed changes (source: [NMB fan engineering](https://nmbtc.com/white-papers/dc-brushless-cooling-fan-behavior/), [Analog Devices ADM1031 datasheet](https://www.onsemi.com/download/data-sheet/pdf/adm1031-d.pdf)).
 
-**Hysteresis:** Fans turn on at 60°C and turn off at 55°C — a 5°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
+**Hysteresis:** Fans turn on at 53°C (after 8 seconds sustained) and turn off at 50°C — a 3°C gap. All other profiles use 55°C start with a 5°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
 
 **0 to minimum RPM is binary:** Apple Silicon MacBook fans cannot spin below their minimum RPM (2317 on M5 Max, 1200 on M1 Max). When Smart decides fans should run, they jump directly to minimum — this is a hardware limitation of brushless DC motors that require a startup burst to overcome static friction. Above minimum, all speed changes are smooth and governed.
 
