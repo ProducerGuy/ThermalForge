@@ -344,13 +344,15 @@ Each session produces a self-contained folder:
 
 ### Storage
 
-ThermalForge has two separate log systems:
+ThermalForge has three types of stored data, all automatically managed:
 
-**Session logs** (`thermalforge log` exports) — the CSV/JSON research data. Auto-delete after 24 hours by default. Use `--no-expire` to keep data permanently. Stored in `~/Library/Application Support/ThermalForge/logs/`.
+**App log** (daily files in `~/Library/Logs/ThermalForge/`) — one file per day (`thermalforge-2026-04-05.log`). Records all app events: profile changes, fan commands, temperature spikes, safety overrides, sustained trigger events. Auto-deletes files older than 7 days on app launch. Each daily file is small and easy to open or share.
 
-**Error log** (`thermalforge.log`) — app events, profile changes, fan commands, temperature anomalies, safety overrides. 1GB cap — when the file reaches 1GB it starts fresh. Stored in `~/Library/Logs/ThermalForge/`.
+**Research session logs** (`thermalforge log` exports in `~/Library/Application Support/ThermalForge/logs/`) — CSV/JSON research data. Auto-delete after 24 hours by default. Use `--no-expire` to keep permanently.
 
-Researchers who need long-term data collection should use `thermalforge log --no-expire` for their sessions. The error log is diagnostic, not research data — it captures what happened and why, not continuous sensor readings.
+**Calibration CSVs** (`~/Library/Application Support/ThermalForge/`) — raw data from calibration runs. Auto-deletes files older than 7 days on app launch. Calibration results (`calibration.json`) persist until manually reset.
+
+Nothing accumulates indefinitely. All cleanup runs automatically on app launch.
 
 ## Coming Soon
 

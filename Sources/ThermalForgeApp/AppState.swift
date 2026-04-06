@@ -36,6 +36,10 @@ final class AppState: ObservableObject {
         try? executor.execute(.resetAuto)
         TFLogger.shared.info("App launched — fans reset to auto")
 
+        // Clean expired session logs and old calibration CSVs
+        ThermalLogger.cleanExpired()
+        cleanOldCalibrationCSVs()
+
         calibrationState.onComplete = { [weak self] in
             self?.activeProfile = .smart
             self?.monitor?.switchProfile(.smart)
@@ -138,6 +142,20 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Launch at Login
+
+    /// Delete calibration CSV files older than 7 days
+    private func cleanOldCalibrationCSVs() {
+        let dir = CalibrationData.filePath.deletingLastPathComponent()
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey]) else { return }
+        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+
+        for file in files where file.lastPathComponent.hasPrefix("calibration_") && file.pathExtension == "csv" {
+            if let attrs = try? file.resourceValues(forKeys: [.creationDateKey]),
+               let created = attrs.creationDate, created < cutoff {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
 
     private func updateLoginItem() {
         do {
