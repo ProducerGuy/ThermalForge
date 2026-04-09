@@ -4,14 +4,14 @@
 
 ### Smart Profile (Built)
 
-Proactive thermal curve that monitors temperature velocity and ramps fans before throttling occurs. Targets 85°C ceiling. Works with or without calibration — default conservative S-curve without data, machine-specific curve with calibration.
+Proactive thermal curve that monitors temperature velocity and ramps fans before throttling occurs. Targets 85°C ceiling. Works on every machine without calibration.
 
-- Graduated continuous curve from 60°C (floor) to 85°C (ceiling)
+- Proportional S-curve from 53°C (start) to 85°C (ceiling)
+- All profiles share 50°C off threshold, matching Apple's observed behavior
+- 6-second sustained trigger filters transient spikes
 - Rate-of-change awareness: ramps harder when temp is rising, eases off slowly when falling
-- With calibration: uses temp→fan lookup table from `fanPercentForTemp()` with interpolation
-- Without calibration: conservative S-curve fallback
-- Ramp governors matching Apple hardware: ~400 RPM/sec up, ~200 RPM/sec down
-- 5°C hysteresis (stop at 55°C, start at 60°C)
+- Per-profile ramp governors for acoustic comfort (MAX31760, Microchip AN771)
+- 3°C hysteresis (stop at 50°C, start at 53°C)
 
 
 ### Thermal Logging (Built)
@@ -27,29 +27,20 @@ Research-grade data export: `thermalforge log`
 ### Safety Systems (Built)
 
 - 95°C safety override: forces max fans regardless of profile
-- Sustained trigger: fans only engage after 8 seconds above threshold (4 consecutive readings) — filters transient spikes
+- Per-profile sustained triggers (4-8 seconds) — filters transient spikes
 - Heartbeat watchdog: daemon resets fans if app dies (15s timeout)
 - Clean state on app launch: fans reset to auto before any profile activates
 - Clean shutdown: fans reset on normal app quit
 - SMC lock: serializes all fan control operations across daemon threads
 - Duplicate instance prevention
-- Calibration data validation: rejects physically impossible data
 - Temperature anomaly detection: instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with 30-second rolling process buffer
-- Error logging to ~/Library/Logs/ThermalForge/thermalforge.log (1GB cap)
-
-### In-App Calibration UI (Built)
-
-- Mode picker (Quick/Standard/Optimized) in menu bar dropdown
-- Smart button prompts calibration if no data exists, with Skip option
-- Progress bar, current phase, live temperature during calibration
-- Stop button: kills stress, resets fans, resets profile to Silent
-- Calibration complete auto-activates Smart
+- Error logging to ~/Library/Logs/ThermalForge/ (daily rotation, 7-day retention)
 
 ---
 
-## Profile + Smart + Calibration Redesign (Complete)
+## Profile Redesign v2 (Complete)
 
-The entire profile system, Smart curve, and calibration need to be redesigned as one cohesive system. Current profiles are binary switches that immediately set fans to a fixed percentage. They should be proportional curves that respect Apple's fan hardware behavior.
+Complete profile system redesign with per-profile curve shapes, ramp rates, sustained triggers, and a dual-cadence 100ms thermal tick. Each profile now has a distinct personality tuned to its purpose. Driven by thermal log analysis showing the previous uniform design failed catastrophically — the sustained trigger prevented Max from engaging fans while temps rocketed from 56°C to 98°C in 6 seconds.
 
 ### Research basis
 
@@ -60,63 +51,86 @@ Apple's fan hardware behavior (sources: macos-smc-fan reverse engineering, Tunab
 - **Start/stop cycles are the #1 fan bearing wear factor** — fluid dynamic bearings suffer contact wear during startup (boundary lubrication before hydrodynamic film builds). Minimize on/off cycling.
 - **Once spinning, keep spinning** — Apple holds fans at minimum RPM with hysteresis rather than cycling between 0 and spinning. At least 5°C hysteresis between start and stop thresholds.
 - **Smoother transitions extend lifespan up to 50%** — per fan engineering literature. Abrupt speed jumps while running cause acoustic and mechanical transients.
+- **Ramp-up rate while spinning is NOT a wear factor** — not documented by any fan motor source. Ramp governors are for acoustic comfort only (MAX31760, EMC2301, Microchip AN771).
+
+### Dual-cadence architecture
+
+Thermal polling now runs at 100ms (matching Apple's thermalmonitord) for smooth fan transitions. Heavy operations run at a slower 2-second cadence to avoid overhead:
+
+| Cadence | Interval | Operations |
+|---|---|---|
+| **Thermal tick** | 100ms | Read temps, calculate curve, apply ramp governor, write fan speed |
+| **Monitor tick** | 2 seconds (every 20th tick) | Process capture (sysctl), anomaly detection, temp history for Smart |
+| **UI update** | 500ms (every 5th tick) | Push status to SwiftUI menu bar |
 
 ### Profile curve design
 
-Each profile has three zones:
+Each profile has three zones and a per-profile curve shape:
 
-**Zone 1: Off** — below the stop threshold, fans stay at 0 RPM (Apple auto).
+**Zone 1: Off** — below the stop threshold (50°C), fans stay at 0 RPM (Apple auto).
 **Zone 2: Minimum hold** — between stop threshold and start threshold (hysteresis band), fans stay at minimum RPM if already running, stay off if already off.
-**Zone 3: Proportional curve** — above the start threshold, fan speed scales proportionally from minimum RPM to the profile's max RPM cap, increasing with temperature.
+**Zone 3: Proportional curve** — above the start threshold, fan speed scales from minimum RPM to the profile's max using the profile's curve shape.
 
-Ramp governors (matching Apple's behavior):
-- Ramp up: max ~400 RPM/sec (~5% of max per 2-second tick)
-- Ramp down: max ~200 RPM/sec (~2.5% of max per 2-second tick, already implemented)
+**Curve shapes:**
+- **Ease-in** (pos²): quiet at low temps, ramps harder as heat builds — used by Balanced
+- **Linear** (pos): direct proportional response — used by Performance
+- **S-curve** (pos²(3-2pos)): smooth at both ends — used by Smart
+- **Instant engage**: binary on/off, no proportional curve — used by Max
 
 ### Profile specifications
 
-| Profile | Fans off below | Start ramp at | Max fan speed | Target ceiling | Stop threshold |
-|---|---|---|---|---|---|
-| **Silent** | 73°C | 78°C | Apple default (reset to auto) | 78°C | 73°C |
-| **Balanced** | 50°C | 60°C | 60% of max RPM | 70°C | 50°C |
-| **Performance** | 45°C | 50°C | 85% of max RPM | 65°C | 45°C |
-| **Max** | Never | Always on | 100% | N/A | N/A |
-| **Smart** | 60°C | 60°C | 100% (adapts) | 85°C | 60°C |
+| Profile | Fans off | Start | Ceiling | Max fan | Curve | Trigger | Ramp up | Ramp down |
+|---|---|---|---|---|---|---|---|---|
+| **Silent** | N/A | N/A | N/A | Apple | N/A | N/A | N/A | N/A |
+| **Balanced** | 50°C | 55°C | 70°C | 60% | Ease-in | 8s | ~400 RPM/s | ~200 RPM/s |
+| **Performance** | 50°C | 55°C | 65°C | 85% | Linear | 4s | ~800 RPM/s | ~300 RPM/s |
+| **Max** | 50°C | 65°C | — | 100% | Instant | 5s | Instant | ~200 RPM/s |
+| **Smart** | 50°C | 53°C | 85°C | 100% | S-curve | 6s | ~400 RPM/s | ~200 RPM/s |
 
-**Balanced example curve (60-70°C, 0-60% of max RPM):**
-- 60°C: fans jump to minimum RPM (2317)
-- 63°C: fans at ~30% of max RPM (~2348 RPM, just above min)
-- 65°C: fans at ~40% of max RPM (~3130 RPM)
-- 67°C: fans at ~50% of max RPM (~3913 RPM)
+**Balanced example curve (55-70°C, ease-in, 0-60% of max RPM):**
+- 55°C (after 8s sustained): fans jump to minimum RPM (2317)
+- 59°C: position 0.27, ease-in 0.07 → fans at ~4% of max RPM
+- 62.5°C: position 0.50, ease-in 0.25 → fans at 15% of max RPM (~1172 RPM above min)
+- 67°C: position 0.80, ease-in 0.64 → fans at 38% of max RPM
 - 70°C: fans at 60% of max RPM (~4696 RPM) — cap reached
 - Below 50°C and stable: fans off
 
-The curve between start and ceiling is proportional, not stepped. Fan speed = minRPM + (maxRPMCap - minRPM) × ((temp - startTemp) / (ceilingTemp - startTemp)).
+The ease-in curve keeps Balanced quiet at low temperatures — at the midpoint, fans are at only 15% instead of the 30% a linear curve would give.
 
-**Silent** is special: it doesn't control fans directly. It stays in Apple auto mode and only intervenes if temp hits 78°C, at which point it resets to auto (letting Apple's own thermal management handle it). Below 73°C it returns to hands-off. This is for users who want ThermalForge monitoring without fan control.
+**Max behavior:**
+- Below 50°C: fans off
+- 50-65°C: hysteresis — fans maintain current state
+- 5 seconds sustained above 65°C: **instant jump to 100%** — no ramp governor, no proportional curve
+- Temperature drops below 65°C: ramp-down governor at ~200 RPM/s lets temps stabilize
+- Below 50°C and rate-of-change ≤ 0: fans off
 
-### Smart curve redesign
+**Silent (Apple Default)** is purely hands-off: ThermalForge monitors temperatures but Apple controls the fans entirely.
 
-Smart uses the same three-zone model but with:
-- Rate-of-change awareness: if temp is rising, boost fan speed proportionally to the rate
-- Calibration data: the adaptive intensity finder discovers the machine's thermal response, and calibration maps how each fan speed handles proportional load
-- Without calibration: conservative S-curve (already built, stays as fallback)
+### Smart curve
 
-- Temperature anomaly logging with process capture (already built: >10°C in 30s)
+Smart uses the same three-zone model with an S-curve shape and:
+- Rate-of-change awareness: if temp is rising, boost fan speed proportionally to the rate and proximity to 85°C ceiling
+- Conservative S-curve as default (no calibration required)
+- 6-second sustained trigger — proactive but filtered
+- Future: calibration data and runtime learning can refine the curve (see Planned Features)
+- Temperature anomaly logging with process capture (>10°C in 30s)
 
-### Build order
+### What was built
 
-1. Redesign FanProfile model — add curve parameters (startTemp, ceilingTemp, stopTemp, maxRPMPercent)
-2. Add ramp-up governor to ThermalMonitor (~400 RPM/sec)
-3. Implement proportional curve in ThermalMonitor.tick() for Balanced/Performance
-4. Implement Silent as hands-off with 78°C intervention
-5. Redesign Smart to use same curve model with rate-of-change and calibration
-6. Update calibration to work with new curve parameters
-7. Add fan speed change logging
-8. Update all documentation (README, ROADMAP, in-app text)
-9. Audit and debug
-10. Test on M5 Max
-11. Test on Mac Studio and M1 Max
+1. Added CurveShape enum (linear, easeIn, easeOut, sCurve) and per-profile curve shape application in targetPercent()
+2. Added per-profile ramp rates (rampUpPerSec, rampDownPerSec) to Curve struct
+3. Added per-profile sustained trigger duration (sustainedTriggerSec) to Curve struct
+4. Added instantEngage flag for Max — skips ramp-up governor entirely
+5. Switched thermal tick from 2000ms to 100ms for smooth fan transitions
+6. Split tick() into dual-cadence: 100ms thermal + 2s monitor (process capture, anomaly detection)
+7. UI updates gated to 500ms cadence to avoid excessive redraws
+8. Redesigned Max as "attack dog": instant 100% at 65°C, gentle ramp-down governor
+9. Redesigned Balanced with ease-in curve for quiet low-temp operation
+10. Redesigned Performance with linear curve and 2× ramp-up speed
+11. Updated Smart sustained trigger from 8s to 6s
+12. Updated all tests for new profile parameters, curve shapes, and per-profile behavior
+13. Updated MenuBarView labels: Max shows "65°C instant", others show start→ceiling range
+14. Updated all documentation
 
 ---
 

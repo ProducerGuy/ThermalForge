@@ -73,14 +73,23 @@ struct MenuBarView: View {
                         Text(profile.name)
                         Spacer()
                         if !profile.curve.handsOff {
-                            let offC = profile.curve.stopTemp
-                            let ceilC = profile.curve.ceilingTemp
-                            let offDisp = appState.useFahrenheit ? offC * 9 / 5 + 32 : offC
-                            let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
                             let unit = appState.useFahrenheit ? "F" : "C"
-                            Text("\(Int(offDisp))→\(Int(ceilDisp))°\(unit)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            if profile.curve.instantEngage {
+                                // Max: show instant trigger temp
+                                let startC = profile.curve.startTemp
+                                let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
+                                Text("\(Int(startDisp))°\(unit) instant")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                let startC = profile.curve.startTemp
+                                let ceilC = profile.curve.ceilingTemp
+                                let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
+                                let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
+                                Text("\(Int(startDisp))→\(Int(ceilDisp))°\(unit)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .tag(profile.id)

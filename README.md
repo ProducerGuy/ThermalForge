@@ -18,10 +18,10 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 | Feature | ThermalForge | Macs Fan Control | TG Pro |
 |---|---|---|---|
 | Smart adaptive fan curve | **Yes** | No | No |
-| Machine-specific calibration | **Yes** | No | No |
+| Machine-specific calibration | **Coming soon** | No | No |
 | Multi-sensor safety | **Yes — all sensors** | [One sensor per fan](https://github.com/crystalidea/macs-fan-control/issues/266) | Manual rules only |
 | Proactive cooling (ramps before throttle) | **Yes** | No | No |
-| Fan curve type | Graduated continuous | Linear between 2 points | Manual step-function |
+| Fan curve type | Per-profile shapes (ease-in, linear, S-curve, instant) | Linear between 2 points | Manual step-function |
 | Real-time temp monitoring | Yes | Yes | Yes |
 | Menu bar app | Yes | Yes | Yes |
 | CLI access | **Yes** | No | No |
@@ -56,25 +56,25 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 
 ## Profiles
 
-Every profile uses a proportional curve — fans ramp gradually with temperature, not as binary switches. All profiles share a unified 50°C off threshold (matching Apple's observed behavior). Fans only engage after temperature stays above the start threshold for 8 consecutive seconds — transient 2-second spikes are ignored because they resolve on their own and reacting to them would cause the start/stop cycling that is the #1 cause of fan bearing wear (source: [Analog Devices fan control](https://www.analog.com/en/analog-dialogue/articles/how-to-control-fan-speed.html)).
+Every profile uses a proportional curve with a per-profile curve shape — fans ramp gradually with temperature, not as binary switches. All profiles share a unified 50°C off threshold (matching Apple's observed behavior). Each profile has its own sustained trigger duration — fans only engage after temperature stays above the start threshold for a profile-specific number of seconds, filtering transient spikes that resolve on their own. Reacting to transient spikes would cause the start/stop cycling that is the #1 cause of fan bearing wear (source: [Analog Devices fan control](https://www.analog.com/en/analog-dialogue/articles/how-to-control-fan-speed.html)).
 
-Ramp rates match Apple's hardware behavior (~400 RPM/sec up, ~200 RPM/sec down) for acoustic comfort (source: [MAX31760 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/max31760.pdf), [Microchip AN771](https://ww1.microchip.com/downloads/en/appnotes/00771a.pdf)).
+Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for smooth fan transitions. Each profile has its own ramp rates and curve shape tuned to its purpose. Ramp governor design sourced from [MAX31760 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/max31760.pdf) and [Microchip AN771](https://ww1.microchip.com/downloads/en/appnotes/00771a.pdf).
 
-| Profile | Fans off | Fans start | Ceiling | Max fan | Behavior |
-|---|---|---|---|---|---|
-| **Silent (Apple Default)** | N/A | N/A | N/A | Apple | Monitoring only. Apple controls fans. |
-| **Balanced** | 50°C | 55°C | 70°C | 60% | Gentle ramp for everyday use. |
-| **Performance** | 50°C | 55°C | 65°C | 85% | Steeper curve, lower ceiling. |
-| **Max** | 50°C | 55°C | 65°C | 100% | Full cooling with ramp governor. |
-| **Smart** | 50°C | 53°C | 85°C | 100% | Proactive curve with rate-of-change awareness. Starts 2°C earlier. |
+| Profile | Fans off | Fans start | Ceiling | Max fan | Curve | Sustained trigger | Behavior |
+|---|---|---|---|---|---|---|---|
+| **Silent (Apple Default)** | N/A | N/A | N/A | Apple | N/A | N/A | Monitoring only. Apple controls fans. |
+| **Balanced** | 50°C | 55°C | 70°C | 60% | Ease-in (pos²) | 8 seconds | Quiet at low temps, ramps harder as heat builds. |
+| **Performance** | 50°C | 55°C | 65°C | 85% | Linear | 4 seconds | Direct proportional response, 2× ramp-up speed. |
+| **Max** | 50°C | 65°C | — | 100% | Instant | 5 seconds | Attack dog: instant 100% when triggered, S-curve ramp-down. |
+| **Smart** | 50°C | 53°C | 85°C | 100% | S-curve | 6 seconds | Proactive with rate-of-change awareness. Starts 2°C earlier. |
 
 **How profiles work:**
 - **Below 50°C:** All fans off. Machine is at idle.
-- **50–55°C (hysteresis zone):** Fans maintain current state. Already running → stay at minimum. Already off → stay off.
-- **Above 55°C for 8+ seconds:** Fans engage at minimum RPM and begin proportional ramp toward ceiling.
-- **Between start and ceiling:** Fan speed scales proportionally. At 62.5°C on Balanced (midpoint of 55–70°C), fans run at 30% of max RPM.
+- **50°C–start (hysteresis zone):** Fans maintain current state. Already running → stay at minimum. Already off → stay off.
+- **Above start for N seconds:** Fans engage. Balanced and Performance ramp proportionally using their curve shape. Max jumps instantly to 100%.
+- **Between start and ceiling:** Fan speed scales based on the profile's curve shape. Balanced (ease-in) is quiet at low temps — at 62.5°C (midpoint of 55–70°C), fans run at only 15% of max RPM instead of 30% linear. Performance (linear) is proportional. Max has no proportional zone — it's binary.
 - **At ceiling and above:** Fan speed at the profile's maximum (60%/85%/100%).
-- **Ramp down:** When temperature drops, fans reduce speed at ~200 RPM/sec — slower than ramp-up for smoother acoustics.
+- **Ramp down:** Each profile has its own ramp-down rate. Max uses a gentle governor to let temps stabilize before backing off.
 
 ## Install
 
@@ -127,13 +127,13 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 ### How Smart works
 
-**The curve:** Smart maps temperature to fan speed across a 53–85°C range. Below 50°C, fans turn off. Between 50–53°C, fans maintain current state (hysteresis). Above 85°C, fans go to max. Between those points, fan speed scales proportionally using an S-curve (gentle at low temps, steeper approaching the ceiling).
+**The curve:** Smart maps temperature to fan speed across a 53–85°C range using an S-curve (gentle at both ends, steeper in the middle). Below 50°C, fans turn off. Between 50–53°C, fans maintain current state (hysteresis). Above 85°C, fans go to max.
 
 **Rate-of-change awareness:** Smart doesn't just look at where temperature is — it looks at how fast it's moving. If temp is rising at 1°C/sec, Smart boosts fan speed proportionally to get ahead of the climb. If temp is stable or falling, Smart holds steady or eases off gradually.
 
-**Ramp governors:** Fan speed changes are rate-limited to match Apple's hardware behavior. Ramp up at ~400 RPM/sec, ramp down at ~200 RPM/sec. This prevents acoustic shock, reduces mechanical stress, and extends fan bearing lifespan by up to 50% compared to abrupt speed changes (source: [NMB fan engineering](https://nmbtc.com/white-papers/dc-brushless-cooling-fan-behavior/), [Analog Devices ADM1031 datasheet](https://www.onsemi.com/download/data-sheet/pdf/adm1031-d.pdf)).
+**Ramp governors:** Fan speed changes are rate-limited for acoustic comfort. Each profile has its own ramp rates — Smart uses ~400 RPM/sec up, ~200 RPM/sec down. This prevents acoustic shock, reduces mechanical stress, and extends fan bearing lifespan by up to 50% compared to abrupt speed changes (source: [NMB fan engineering](https://nmbtc.com/white-papers/dc-brushless-cooling-fan-behavior/), [Analog Devices ADM1031 datasheet](https://www.onsemi.com/download/data-sheet/pdf/adm1031-d.pdf)).
 
-**Hysteresis:** Fans turn on at 53°C (after 8 seconds sustained) and turn off at 50°C — a 3°C gap. All other profiles use 55°C start with a 5°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
+**Hysteresis:** Fans turn on at 53°C (after 6 seconds sustained) and turn off at 50°C — a 3°C gap. Balanced and Performance use 55°C start with a 5°C gap. Max uses 65°C start with a 15°C gap. This prevents rapid on/off cycling, which is the #1 cause of fan bearing wear in fluid dynamic bearing fans (source: [Nidec FDB technology](https://www.nidec.com/en/technology/capability/fdb/), [AnandTech fan lifespan discussion](https://forums.anandtech.com/threads/fan-stop-start-effect-on-lifespan.2284098/)).
 
 **0 to minimum RPM is binary:** Apple Silicon MacBook fans cannot spin below their minimum RPM (2317 on M5 Max, 1200 on M1 Max). When Smart decides fans should run, they jump directly to minimum — this is a hardware limitation of brushless DC motors that require a startup burst to overcome static friction. Above minimum, all speed changes are smooth and governed.
 
