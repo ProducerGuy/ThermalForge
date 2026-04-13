@@ -209,7 +209,7 @@ public final class FanControl {
             let maxRPM = info.maxRPM > 0 ? info.maxRPM : 7826
 
             let targetKey = SMCFanKey.key(SMCFanKey.target, fan: i)
-            guard smc.writeKey(targetKey, bytes: floatToSMCBytes(maxRPM)) else {
+            guard writeFanFloat(targetKey, value: maxRPM) else {
                 throw ThermalForgeError.writeFailed(targetKey)
             }
             log("Set fan \(i) to max (\(Int(maxRPM)) RPM)")
@@ -239,7 +239,7 @@ public final class FanControl {
         }
 
         let targetKey = SMCFanKey.key(SMCFanKey.target, fan: index)
-        guard smc.writeKey(targetKey, bytes: floatToSMCBytes(rpm)) else {
+        guard writeFanFloat(targetKey, value: rpm) else {
             throw ThermalForgeError.writeFailed(targetKey)
         }
         log("Set fan \(index) to \(Int(rpm)) RPM")
@@ -266,7 +266,7 @@ public final class FanControl {
 
         for i in 0..<count {
             let targetKey = SMCFanKey.key(SMCFanKey.target, fan: i)
-            guard smc.writeKey(targetKey, bytes: floatToSMCBytes(rpm)) else {
+            guard writeFanFloat(targetKey, value: rpm) else {
                 throw ThermalForgeError.writeFailed(targetKey)
             }
             log("Set fan \(i) to \(Int(rpm)) RPM")
@@ -284,7 +284,7 @@ public final class FanControl {
             _ = smc.writeKey(modeKey, bytes: [0])
 
             let targetKey = SMCFanKey.key(SMCFanKey.target, fan: i)
-            _ = smc.writeKey(targetKey, bytes: floatToSMCBytes(0))
+            _ = writeFanFloat(targetKey, value: 0)
         }
 
         // Reset Ftst if it exists — thermalmonitord reclaims control
@@ -313,57 +313,64 @@ public final class FanControl {
             ))
         }
 
-        // Probe temperature keys across all known Apple Silicon generations.
-        // Keys that don't exist on a given machine are skipped automatically.
-        // Labels use the raw SMC key name — no assumptions about what a key
-        // means on hardware we haven't verified.
+        // Probe temperature keys across all known Apple Silicon AND Intel generations.
+        // Keys that don't exist on a given machine fail fast and are skipped.
+        // Format is auto-detected per key via getKeyInfo() — no hardcoded assumptions.
         var temps: [String: Float] = [:]
 
-        // All known CPU/GPU/memory/misc thermal keys (flt type, 4 bytes)
-        let fltKeys: [String] = [
-            // CPU — aggregate (M5 Max verified)
+        let thermalKeys: [String] = [
+            // CPU — Apple Silicon aggregate
             "TCDX", "TCHP", "TCMb",
-            // CPU — per-core (Tp prefix, present across M1-M5 with varying mappings)
+            // CPU — Apple Silicon per-core (Tp prefix)
             "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
             "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
             "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
-            // GPU (flt type — M1 through M4)
+            // CPU — Intel
+            "TC0P", "TC0H", "TC0D", "TC0E", "TC0F", "TCXC",
+            "TC1C", "TC2C", "TC3C", "TC4C", "TC5C", "TC6C", "TC7C", "TC8C",
+            // GPU — Apple Silicon (flt)
             "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
-            // Memory
-            "Tm02", "Tm06", "Tm08", "Tm09",
-            "TRDX", "TMVR",
+            // GPU — Apple Silicon M5 (ioft)
+            "TG0B", "TG0H", "TG0V",
+            // GPU — Intel (discrete)
+            "TG0P", "TG0D", "TG0T", "TCGC",
+            // Memory — Apple Silicon
+            "Tm02", "Tm06", "Tm08", "Tm09", "TRDX", "TMVR",
+            // Memory — Intel
+            "Tm0P", "TM0P", "TM0S",
             // Power delivery
             "TPDX",
             // SSD
-            "TH0x", "TH0A", "TH0B",
+            "TH0x", "TH0A", "TH0B", "TH0P",
             // Ambient
-            "TAOL", "TA0P",
-            // Proximity
-            "TS0P",
+            "TAOL", "TA0P", "TA0S",
+            // Proximity / misc
+            "TS0P", "Ts0P", "TI0P",
             // Battery
             "TB0T",
+            // Intel power supply (iMac, Mac Pro)
+            "Tp0P",
         ]
 
-        for key in fltKeys {
+        for key in thermalKeys {
             let result = smc.readKey(key)
-            if result.success && result.size == 4 {
-                let temp = smcBytesToFloat(result.bytes, size: result.size)
-                if temp > 0 && temp < 150 {
-                    temps[key] = (temp * 10).rounded() / 10
-                }
+            guard result.success else { continue }
+
+            guard let info = smc.getKeyInfo(key) else { continue }
+            let temp: Float
+            switch info.type {
+            case "flt ":
+                temp = smcBytesToFloat(result.bytes, size: result.size)
+            case "sp78":
+                temp = sp78BytesToFloat(result.bytes, size: result.size)
+            case "ioft":
+                temp = ioftBytesToFloat(result.bytes)
+            default:
+                continue
             }
-        }
 
-        // ioft type (16.16 fixed-point, 8 bytes) — GPU temps on M5 Max
-        let ioftKeys = ["TG0B", "TG0H", "TG0V"]
-
-        for key in ioftKeys {
-            let result = smc.readKey(key)
-            if result.success && result.size == 8 {
-                let temp = ioftBytesToFloat(result.bytes)
-                if temp > 0 && temp < 150 {
-                    temps[key] = (temp * 10).rounded() / 10
-                }
+            if temp > 0 && temp < 150 {
+                temps[key] = (temp * 10).rounded() / 10
             }
         }
 
@@ -401,9 +408,10 @@ public final class FanControl {
 
     /// Returns detected hardware capabilities
     public var hardwareInfo: String {
+        let arch = MachineArchitecture.current == .applesilicon ? "Apple Silicon" : "Intel"
         let ftst = hasFtst ? "yes (M1-M4 path)" : "no (M5+ direct mode)"
         let modeKey = modeKeyTemplate == SMCFanKey.modeLower ? "F%dmd (lowercase)" : "F%dMd (uppercase)"
-        return "Ftst unlock: \(ftst), Mode key: \(modeKey)"
+        return "Architecture: \(arch), Ftst unlock: \(ftst), Mode key: \(modeKey)"
     }
 
     // MARK: - Private Helpers
@@ -412,7 +420,32 @@ public final class FanControl {
         let key = SMCFanKey.key(template, fan: fan)
         let result = smc.readKey(key)
         guard result.success else { return 0 }
+
+        // Dispatch based on key's actual SMC data type
+        if let info = smc.getKeyInfo(key) {
+            switch info.type {
+            case "fpe2":
+                return fpe2BytesToFloat(result.bytes, size: result.size)
+            case "sp78":
+                return sp78BytesToFloat(result.bytes, size: result.size)
+            default:
+                return smcBytesToFloat(result.bytes, size: result.size)
+            }
+        }
         return smcBytesToFloat(result.bytes, size: result.size)
+    }
+
+    /// Write a Float value to a fan key using the correct encoding for this hardware.
+    private func writeFanFloat(_ key: String, value: Float) -> Bool {
+        if let info = smc.getKeyInfo(key) {
+            switch info.type {
+            case "fpe2":
+                return smc.writeKey(key, bytes: floatToFpe2Bytes(value))
+            default:
+                return smc.writeKey(key, bytes: floatToSMCBytes(value))
+            }
+        }
+        return smc.writeKey(key, bytes: floatToSMCBytes(value))
     }
 
     private func log(_ message: String) {

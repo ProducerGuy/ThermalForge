@@ -65,3 +65,47 @@ public func ioftBytesToFloat(_ bytes: [UInt8]) -> Float {
     let fraction = Float(raw & 0xFFFF) / 65536.0
     return integer + fraction
 }
+
+/// Convert fpe2 bytes (14.2 big-endian fixed-point) to Float.
+/// Intel Macs use fpe2 for fan RPM keys (F%dAc, F%dTg, F%dMn, F%dMx).
+/// Encoding: big-endian UInt16, divide by 4.0 (2 fractional bits).
+public func fpe2BytesToFloat(_ bytes: [UInt8], size: UInt32) -> Float {
+    guard size == 2, bytes.count >= 2 else { return 0 }
+    let raw = (UInt16(bytes[0]) << 8) | UInt16(bytes[1])
+    return Float(raw) / 4.0
+}
+
+/// Convert Float to fpe2 bytes (14.2 big-endian fixed-point).
+/// Used when writing fan RPM targets on Intel Macs.
+public func floatToFpe2Bytes(_ value: Float) -> [UInt8] {
+    let clamped = min(max(value * 4.0, 0), 65535)
+    let raw = UInt16(clamped)
+    return [UInt8(raw >> 8), UInt8(raw & 0xFF)]
+}
+
+/// Convert sp78 bytes (signed 7.8 big-endian fixed-point) to Float.
+/// Intel Macs use sp78 for temperature keys.
+/// Encoding: signed Int16 big-endian, divide by 256.0 (8 fractional bits).
+public func sp78BytesToFloat(_ bytes: [UInt8], size: UInt32) -> Float {
+    guard size == 2, bytes.count >= 2 else { return 0 }
+    let raw = Int16(bitPattern: UInt16(bytes[0]) << 8 | UInt16(bytes[1]))
+    return Float(raw) / 256.0
+}
+
+// MARK: - Architecture Detection
+
+/// Detect CPU architecture at runtime.
+/// Used for logging/diagnostics — NOT for data format dispatch.
+/// Data format dispatch uses getKeyInfo() type strings instead (more robust).
+public enum MachineArchitecture {
+    case applesilicon
+    case intel
+
+    public static var current: MachineArchitecture {
+        var size = 0
+        sysctlbyname("hw.optional.arm64", nil, &size, nil, 0)
+        var arm64: Int32 = 0
+        sysctlbyname("hw.optional.arm64", &arm64, &size, nil, 0)
+        return arm64 == 1 ? .applesilicon : .intel
+    }
+}
