@@ -326,8 +326,9 @@ public final class FanControl {
             "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
             "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
             // CPU — Intel
-            "TC0P", "TC0H", "TC0D", "TC0E", "TC0F", "TCXC",
-            "TC1C", "TC2C", "TC3C", "TC4C", "TC5C", "TC6C", "TC7C", "TC8C",
+            "TC0P", "TC0H", "TC0D", "TC0E", "TC0F", "TC0c", "TCXC", "TCXc",
+            "TC1C", "TC1c", "TC2C", "TC2c", "TC3c", "TC4c", "TC5c", "TC6c", "TC7c", "TC8c", "TC9c",
+            "TCS0", "TCS1", "TCS2", "TCS3",
             // GPU — Apple Silicon (flt)
             "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
             // GPU — Apple Silicon M5 (ioft)
@@ -343,7 +344,7 @@ public final class FanControl {
             // SSD
             "TH0x", "TH0A", "TH0B", "TH0P",
             // Ambient
-            "TAOL", "TA0P", "TA0S",
+            "TAOL", "TA0P", "TA0S", "TA0V", "TA0p",
             // Proximity / misc
             "TS0P", "Ts0P", "TI0P",
             // Battery
