@@ -13,7 +13,7 @@ let package = Package(
             name: "ThermalForgeCore",
             path: "Sources/ThermalForgeCore",
             linkerSettings: [
-                .linkedFramework("Metal"),
+                .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "Metal"]),
             ]
         ),
         .executableTarget(

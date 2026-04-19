@@ -6,7 +6,9 @@
 //
 
 import Foundation
+#if canImport(Metal)
 import Metal
+#endif
 
 // MARK: - Data Model
 
@@ -635,6 +637,12 @@ public final class CalibrationRunner {
     }
 
     private func startGPUStress(intensity: Float = 1.0) {
+        #if canImport(Metal)
+        guard MachineArchitecture.current == .applesilicon else {
+            log("GPU stress requires Apple Silicon — running CPU-only stress on Intel")
+            return
+        }
+
         guard let device = MTLCreateSystemDefaultDevice() else {
             log("Warning: Metal device not available, running CPU-only stress")
             return
@@ -694,8 +702,12 @@ public final class CalibrationRunner {
         thread.qualityOfService = .userInteractive
         thread.start()
         stressThreads.append(thread)
+        #else
+        log("Metal not available on this platform — running CPU-only stress")
+        #endif
     }
 
+    #if canImport(Metal)
     private var gpuDevice: MTLDevice?
     private var gpuPipeline: MTLComputePipelineState?
     private var gpuQueue: MTLCommandQueue?
@@ -724,17 +736,20 @@ public final class CalibrationRunner {
             commandBuffer.waitUntilCompleted()
         }
     }
+    #endif
 
     private func stopStress() {
         stressRunning = false
         // Wait for threads to notice the flag and exit
         Thread.sleep(forTimeInterval: 2)
         stressThreads.removeAll()
+        #if canImport(Metal)
         // Release Metal resources — stops GPU dispatches
         gpuBuffer = nil
         gpuPipeline = nil
         gpuQueue = nil
         gpuDevice = nil
+        #endif
     }
 
     // MARK: - Helpers
