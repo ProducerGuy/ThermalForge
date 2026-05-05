@@ -75,7 +75,6 @@ struct MenuBarView: View {
                         if !profile.curve.handsOff {
                             let unit = appState.useFahrenheit ? "F" : "C"
                             if profile.curve.instantEngage {
-                                // Max: show instant trigger temp
                                 let startC = profile.curve.startTemp
                                 let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
                                 Text("\(Int(startDisp))°\(unit) instant")
@@ -98,6 +97,40 @@ struct MenuBarView: View {
             .pickerStyle(.inline)
             .labelsHidden()
             .padding(.horizontal, 12)
+
+            Divider().padding(.vertical, 4)
+
+            SectionHeader(title: "RULES")
+            Toggle("Enable Rule Engine", isOn: $appState.rulesEnabled)
+                .padding(.horizontal, 12)
+
+            if appState.rules.isEmpty {
+                Text("No rules configured")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 2)
+            } else {
+                ForEach(appState.rules.sorted(by: { $0.priority > $1.priority })) { rule in
+                    HStack {
+                        Toggle(rule.name, isOn: ruleBinding(rule.id))
+                        Button(action: { appState.removeRule(rule.id) }) {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 1)
+                }
+            }
+
+            Button(action: { appState.addQuickRule() }) {
+                Label("Add IF/THEN Rule", systemImage: "plus.circle")
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.top, 2)
 
             Divider().padding(.vertical, 4)
 
@@ -135,7 +168,7 @@ struct MenuBarView: View {
             .padding(.top, 4)
             .padding(.bottom, 10)
         }
-        .frame(width: 260)
+        .frame(width: 320)
     }
 
     // MARK: - Helpers
@@ -162,6 +195,17 @@ struct MenuBarView: View {
         guard let temps = appState.latestStatus?.temperatures else { return nil }
         let values = temps.filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }.values
         return values.max()
+    }
+
+    private func ruleBinding(_ ruleID: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                appState.rules.first(where: { $0.id == ruleID })?.enabled ?? false
+            },
+            set: { enabled in
+                appState.toggleRule(ruleID, enabled: enabled)
+            }
+        )
     }
 }
 

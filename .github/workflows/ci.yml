@@ -17,3 +17,12 @@ jobs:
 
       - name: Test
         run: swift test
+
+  package-smoke:
+    runs-on: macos-15
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package smoke
+        run: ./Scripts/ci-smoke.sh

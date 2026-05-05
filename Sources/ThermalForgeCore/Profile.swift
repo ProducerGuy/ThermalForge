@@ -223,7 +223,7 @@ extension FanProfile {
                      sustainedTriggerSec: 6)
     )
 
-    public static let builtIn: [FanProfile] = [silent, balanced, performance, max]
+    public static let builtIn: [FanProfile] = [silent, balanced, performance, max, smart]
 }
 
 // MARK: - Persistence

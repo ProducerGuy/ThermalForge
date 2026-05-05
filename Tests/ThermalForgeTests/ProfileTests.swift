@@ -57,14 +57,15 @@ struct ProfileTests {
         #expect(FanProfile.smart.curve.sustainedTriggerSec == 6)
     }
 
-    @Test("Four built-in profiles exist")
+    @Test("Five built-in profiles exist")
     func builtInCount() {
-        #expect(FanProfile.builtIn.count == 4)
+        #expect(FanProfile.builtIn.count == 5)
         let ids = FanProfile.builtIn.map(\.id)
         #expect(ids.contains("silent"))
         #expect(ids.contains("balanced"))
         #expect(ids.contains("performance"))
         #expect(ids.contains("max"))
+        #expect(ids.contains("smart"))
     }
 
     @Test("Profile round-trips through JSON")
@@ -74,7 +75,6 @@ struct ProfileTests {
             let decoded = try JSONDecoder().decode(FanProfile.self, from: data)
             #expect(decoded == profile, "Round-trip failed for \(profile.name)")
         }
-        // Also test Smart (not in builtIn but important)
         let smartData = try JSONEncoder().encode(FanProfile.smart)
         let smartDecoded = try JSONDecoder().decode(FanProfile.self, from: smartData)
         #expect(smartDecoded == FanProfile.smart)

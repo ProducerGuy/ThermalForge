@@ -41,11 +41,11 @@ public struct FanInfo {
     public let mode: String
 }
 
-public struct ThermalStatus: Encodable {
+public struct ThermalStatus: Codable, Equatable {
     public let fans: [FanStatus]
     public let temperatures: [String: Float]
 
-    public struct FanStatus: Encodable {
+    public struct FanStatus: Codable, Equatable {
         public let index: Int
         public let actualRPM: Int
         public let targetRPM: Int

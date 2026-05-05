@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-release-artifacts:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: swift build -c release
+
+      - name: Build app bundle
+        run: ./Scripts/build-app-bundle.sh ./ThermalForge.app
+
+      - name: Archive artifacts
+        run: |
+          mkdir -p dist
+          tar -czf dist/thermalforge-cli-macos-arm64.tar.gz -C .build/release thermalforge
+          ditto -c -k --sequesterRsrc --keepParent ThermalForge.app dist/ThermalForge.app.zip
+          shasum -a 256 dist/* > dist/checksums.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: thermalforge-release-artifacts
+          path: dist/*

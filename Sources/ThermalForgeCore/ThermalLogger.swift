@@ -89,7 +89,7 @@ public final class ThermalLogger {
         self.metadata = LogSessionMetadata(
             machine: machine,
             osVersion: osVersion,
-            thermalForgeVersion: "0.1.0",
+            thermalForgeVersion: ThermalForgeVersion.current,
             fanCount: fanCount,
             maxRPM: Int(fan0?.maxRPM ?? 0),
             minRPM: Int(fan0?.minRPM ?? 0),

@@ -7,6 +7,7 @@
 set -e
 
 cd "$(dirname "$0")"
+source ./Scripts/version.sh
 
 echo "Building ThermalForge..."
 swift build -c release --quiet
@@ -29,44 +30,8 @@ fi
 sudo xattr -cr .build/release/thermalforge
 sudo .build/release/thermalforge install
 
-# Create .app bundle in /Applications so it shows in Spotlight/Finder
-APP_DIR="/Applications/ThermalForge.app/Contents"
-sudo mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-sudo cp .build/release/ThermalForgeApp "$APP_DIR/MacOS/ThermalForgeApp"
-sudo cp ThermalForge.icns "$APP_DIR/Resources/AppIcon.icns"
-sudo xattr -cr /Applications/ThermalForge.app
-
-sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>ThermalForge</string>
-    <key>CFBundleDisplayName</key>
-    <string>ThermalForge</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.thermalforge.app</string>
-    <key>CFBundleVersion</key>
-    <string>0.1.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>ThermalForgeApp</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
+# Create signed app bundle in /Applications so it shows in Spotlight/Finder
+sudo ./Scripts/build-app-bundle.sh /Applications/ThermalForge.app
 
 # Update Spotlight index
 sudo mdimport /Applications/ThermalForge.app 2>/dev/null || true

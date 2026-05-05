@@ -16,6 +16,7 @@ public final class TFLogger {
     private let lock = NSLock()
     private let isoFormatter = ISO8601DateFormatter()
     private let dateFormatter: DateFormatter
+    private let eventEncoder = JSONEncoder()
 
     /// How many days of logs to keep. Default 7.
     public var retentionDays: Int = 7
@@ -26,12 +27,19 @@ public final class TFLogger {
         return logDir.appendingPathComponent("thermalforge-\(dateStr).log")
     }
 
+    /// Current day's machine-readable event log.
+    private var eventLogFile: URL {
+        let dateStr = dateFormatter.string(from: Date())
+        return logDir.appendingPathComponent("thermalforge-events-\(dateStr).jsonl")
+    }
+
     private init() {
         logDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/ThermalForge")
 
         dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
+        eventEncoder.outputFormatting = [.sortedKeys]
 
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
 
@@ -67,6 +75,26 @@ public final class TFLogger {
 
     public func info(_ message: String) {
         write("INFO", message)
+    }
+
+    public func event(_ event: ThermalEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let data = try? eventEncoder.encode(event),
+              let line = String(data: data, encoding: .utf8)
+        else { return }
+
+        let entry = line + "\n"
+        if let handle = try? FileHandle(forWritingTo: eventLogFile) {
+            handle.seekToEndOfFile()
+            if let payload = entry.data(using: .utf8) {
+                handle.write(payload)
+            }
+            handle.closeFile()
+        } else {
+            try? entry.write(to: eventLogFile, atomically: true, encoding: .utf8)
+        }
     }
 
     // MARK: - Writing

@@ -16,6 +16,10 @@ final class PrivilegedExecutor: @unchecked Sendable {
         try client.execute(command)
     }
 
+    func heartbeat() throws {
+        try client.heartbeat()
+    }
+
     var isDaemonRunning: Bool {
         ThermalForgeDaemon.isRunning
     }

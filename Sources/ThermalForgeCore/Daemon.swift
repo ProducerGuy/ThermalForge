@@ -18,7 +18,7 @@ public enum ThermalForgeDaemon {
     public static let installPath = "/usr/local/bin/thermalforge"
     public static let label = "com.thermalforge.daemon"
 
-    /// Check if the daemon socket exists and accepts connections
+    /// Check if the daemon socket exists and accepts connections.
     public static var isRunning: Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
@@ -42,7 +42,8 @@ public enum ThermalForgeDaemon {
 public enum DaemonError: Error, CustomStringConvertible {
     case notRunning
     case connectionFailed
-    case commandFailed(String)
+    case protocolError(String)
+    case commandFailed(code: String, message: String)
 
     public var description: String {
         switch self {
@@ -50,8 +51,10 @@ public enum DaemonError: Error, CustomStringConvertible {
             return "ThermalForge daemon is not running. Run: sudo thermalforge install"
         case .connectionFailed:
             return "Failed to connect to daemon socket"
-        case .commandFailed(let msg):
-            return "Daemon error: \(msg)"
+        case .protocolError(let msg):
+            return "Daemon protocol error: \(msg)"
+        case .commandFailed(let code, let message):
+            return "Daemon error [\(code)]: \(message)"
         }
     }
 }
@@ -59,8 +62,25 @@ public enum DaemonError: Error, CustomStringConvertible {
 public final class DaemonClient {
     public init() {}
 
-    /// Send a command to the daemon and return the response
+    /// Backward-compatible string command transport.
     public func send(_ command: String) throws -> String {
+        let request = try legacyCommandToRequest(command)
+        let response = try send(request)
+        if response.ok {
+            if let status = response.status {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.keyEncodingStrategy = .convertToSnakeCase
+                let data = try encoder.encode(status)
+                return String(data: data, encoding: .utf8) ?? "{}"
+            }
+            return response.message ?? "ok"
+        }
+        let err = response.error ?? DaemonErrorPayload(code: "daemon_error", message: response.message ?? "unknown")
+        throw DaemonError.commandFailed(code: err.code, message: err.message)
+    }
+
+    public func send(_ request: DaemonRequest) throws -> DaemonResponse {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
@@ -76,38 +96,81 @@ public final class DaemonClient {
         }
         guard connectResult == 0 else { throw DaemonError.notRunning }
 
-        // Send command
-        let cmdData = Array((command + "\n").utf8)
-        _ = cmdData.withUnsafeBufferPointer { buf in
+        let payload = try DaemonCodec.encodeRequest(request)
+        let bytes = [UInt8](payload + [0x0A])
+        _ = bytes.withUnsafeBufferPointer { buf in
             write(fd, buf.baseAddress!, buf.count)
         }
 
-        // Read response — 8KB handles status JSON on sensor-rich machines
-        var buffer = [UInt8](repeating: 0, count: 8192)
+        var buffer = [UInt8](repeating: 0, count: 65536)
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { throw DaemonError.connectionFailed }
 
-        let response = String(bytes: buffer[0..<n], encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if response.hasPrefix("error:") {
-            throw DaemonError.commandFailed(
-                String(response.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            )
+        let responseData = Data(buffer[0..<n])
+        if let typedResponse = try? DaemonCodec.decodeResponse(responseData) {
+            return typedResponse
         }
 
-        return response
+        // Fallback for old daemon responses.
+        let fallback = String(decoding: responseData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if fallback.hasPrefix("error:") {
+            throw DaemonError.commandFailed(code: "legacy_error", message: String(fallback.dropFirst(6)).trimmingCharacters(in: .whitespaces))
+        }
+        return DaemonResponse(requestID: request.requestID, ok: true, message: fallback)
     }
 
-    /// Send a FanCommand to the daemon
     public func execute(_ command: FanCommand) throws {
-        let cmdString: String
+        let req: DaemonRequest
         switch command {
-        case .setMax: cmdString = "max"
-        case .setRPM(let rpm): cmdString = "set \(Int(rpm))"
-        case .resetAuto: cmdString = "auto"
+        case .setMax:
+            req = DaemonRequest(command: "max")
+        case .setRPM(let rpm):
+            req = DaemonRequest(command: "set", rpm: Int(rpm))
+        case .resetAuto:
+            req = DaemonRequest(command: "auto")
         }
-        _ = try send(cmdString)
+        let response = try send(req)
+        if !response.ok {
+            let err = response.error ?? DaemonErrorPayload(code: "daemon_error", message: response.message ?? "unknown")
+            throw DaemonError.commandFailed(code: err.code, message: err.message)
+        }
+    }
+
+    public func heartbeat() throws {
+        let response = try send(DaemonRequest(command: "heartbeat"))
+        if !response.ok {
+            let err = response.error ?? DaemonErrorPayload(code: "daemon_error", message: response.message ?? "unknown")
+            throw DaemonError.commandFailed(code: err.code, message: err.message)
+        }
+    }
+
+    public func fetchRules() throws -> [ThermalRule] {
+        let response = try send(DaemonRequest(command: "rules.list"))
+        if !response.ok {
+            let err = response.error ?? DaemonErrorPayload(code: "daemon_error", message: response.message ?? "unknown")
+            throw DaemonError.commandFailed(code: err.code, message: err.message)
+        }
+        return response.rules ?? []
+    }
+
+    private func legacyCommandToRequest(_ command: String) throws -> DaemonRequest {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: " ")
+        guard let first = parts.first.map(String.init) else {
+            throw DaemonError.protocolError("empty command")
+        }
+
+        switch first {
+        case "max", "auto", "status", "heartbeat":
+            return DaemonRequest(command: first)
+        case "set":
+            guard parts.count >= 2, let rpm = Int(parts[1]) else {
+                throw DaemonError.protocolError("usage: set <rpm>")
+            }
+            return DaemonRequest(command: "set", rpm: rpm)
+        default:
+            return DaemonRequest(command: first)
+        }
     }
 }
 
@@ -116,11 +179,12 @@ public final class DaemonClient {
 public final class DaemonServer {
     private let socketFD: Int32
     private let fanControl: FanControl
-    /// Serializes all SMC access — prevents data race between client handler and watchdog
+
+    /// Serializes all SMC access — prevents data race between client handler and watchdog.
     private let smcLock = NSLock()
-    /// Last fan command — re-applied after sleep/wake
-    private var lastCommand: String?
-    /// Heartbeat: last time the app checked in
+    /// Last fan command — re-applied after sleep/wake.
+    private var lastCommand: FanCommand?
+    /// Heartbeat: last time the app checked in.
     private var lastHeartbeat: Date?
     private let heartbeatLock = NSLock()
     private let authorizedUID: uid_t?
@@ -135,7 +199,6 @@ public final class DaemonServer {
         }
         self.socketFD = fd
 
-        // Remove stale socket
         unlink(ThermalForgeDaemon.socketPath)
 
         var addr = sockaddr_un()
@@ -152,12 +215,10 @@ public final class DaemonServer {
             throw ThermalForgeError.writeFailed("bind() failed: \(errno)")
         }
 
-        // Restrict socket access to root + active console user.
         if let uid = authorizedUID {
             _ = chown(ThermalForgeDaemon.socketPath, uid, 0)
             chmod(ThermalForgeDaemon.socketPath, 0o600)
         } else {
-            // Fallback: root-only if no console user is available.
             chmod(ThermalForgeDaemon.socketPath, 0o600)
         }
 
@@ -167,19 +228,13 @@ public final class DaemonServer {
         }
     }
 
-    /// Run the server loop (blocks forever)
+    /// Run the server loop (blocks forever).
     public func run() {
         NSLog("ThermalForge daemon: listening on %@", ThermalForgeDaemon.socketPath)
 
-        // Watch for sleep/wake to re-apply fan settings
         registerWakeNotification()
-
-        // Heartbeat watchdog: if app set fans to manual but hasn't checked in
-        // for 15 seconds, reset to auto. Prevents fans stuck after app crash.
         startHeartbeatWatchdog()
 
-        // Accept connections on a background thread
-        // (RunLoop.main needed for NSWorkspace notifications)
         DispatchQueue.global(qos: .utility).async { [self] in
             while true {
                 let clientFD = accept(socketFD, nil, nil)
@@ -189,7 +244,6 @@ public final class DaemonServer {
             }
         }
 
-        // Main thread runs the RunLoop for wake notifications
         RunLoop.main.run()
     }
 
@@ -205,8 +259,6 @@ public final class DaemonServer {
                 let hasManualControl = lastCommand != nil
                 heartbeatLock.unlock()
 
-                // Only reset if: app has connected before (lastBeat != nil),
-                // fans are in manual mode, and heartbeat is stale
                 guard let beat = lastBeat, hasManualControl else { continue }
 
                 if Date().timeIntervalSince(beat) > 15 {
@@ -222,7 +274,6 @@ public final class DaemonServer {
                     }
                     smcLock.unlock()
 
-                    // Only clear state if reset actually worked — otherwise retry next cycle
                     if resetSucceeded {
                         heartbeatLock.lock()
                         lastCommand = nil
@@ -236,7 +287,6 @@ public final class DaemonServer {
 
     // MARK: - Sleep/Wake
 
-    /// IOKit root port for power notifications
     private var rootPort: io_connect_t = 0
     private var notifyPort: IONotificationPortRef?
     private var notifier: io_object_t = 0
@@ -248,7 +298,6 @@ public final class DaemonServer {
                 guard let refcon = refcon else { return }
                 let server = Unmanaged<DaemonServer>.fromOpaque(refcon).takeUnretainedValue()
 
-                // IOKit message constants (macros unavailable in Swift)
                 let kSystemHasPoweredOn: UInt32 = 0xe0000300
                 let kSystemWillSleep: UInt32 = 0xe0000280
                 let kCanSystemSleep: UInt32 = 0xe0000270
@@ -280,23 +329,19 @@ public final class DaemonServer {
             return
         }
 
-        NSLog("ThermalForge daemon: woke — re-applying: %@", command)
+        NSLog("ThermalForge daemon: woke — re-applying previous fan command")
 
-        // Delay slightly — SMC needs a moment after wake
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [self] in
             smcLock.lock()
             defer { smcLock.unlock() }
-            let parts = command.split(separator: " ")
             do {
-                switch parts.first.map(String.init) {
-                case "max":
+                switch command {
+                case .setMax:
                     try fanControl.setMax()
-                case "set":
-                    if let rpm = parts.dropFirst().first.flatMap({ Float($0) }) {
-                        try fanControl.setAllFans(rpm: rpm)
-                    }
-                default:
-                    break
+                case .setRPM(let rpm):
+                    try fanControl.setAllFans(rpm: rpm)
+                case .resetAuto:
+                    try fanControl.resetAuto()
                 }
                 NSLog("ThermalForge daemon: re-applied after wake")
             } catch {
@@ -307,73 +352,178 @@ public final class DaemonServer {
 
     private func handleClient(_ fd: Int32) {
         guard isAuthorizedClient(fd) else {
-            NSLog("ThermalForge daemon: rejected unauthorized client")
-            let responseBytes = Array("error: unauthorized client\n".utf8)
-            _ = responseBytes.withUnsafeBufferPointer { buf in
-                write(fd, buf.baseAddress!, buf.count)
-            }
+            TFLogger.shared.event(ThermalEvent(type: .daemonCommandRejected, details: "unauthorized client"))
+            writeResponse(fd, fallbackText: "error: unauthorized client")
             return
         }
 
-        var buffer = [UInt8](repeating: 0, count: 256)
+        var buffer = [UInt8](repeating: 0, count: 65536)
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { return }
 
-        let command = String(bytes: buffer[0..<n], encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bytes = Data(buffer[0..<n])
+        let request = decodeRequest(bytes)
 
-        NSLog("ThermalForge daemon: received: %@", command)
-
-        let response: String
         smcLock.lock()
-        defer { smcLock.unlock() }
-        do {
-            let parts = command.split(separator: " ")
-            switch parts.first.map(String.init) {
-            case "max":
+        let response = handleRequest(request)
+        smcLock.unlock()
+
+        writeResponse(fd, typed: response, fallbackText: response.ok ? "ok" : "error: \(response.error?.message ?? "unknown")")
+    }
+
+    private func decodeRequest(_ data: Data) -> DaemonRequest {
+        if let req = try? DaemonCodec.decodeRequest(data) {
+            return req
+        }
+
+        let plain = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = plain.split(separator: " ")
+        guard let first = parts.first.map(String.init) else {
+            return DaemonRequest(command: "invalid")
+        }
+
+        if first == "set", parts.count >= 2, let rpm = Int(parts[1]) {
+            return DaemonRequest(command: "set", rpm: rpm)
+        }
+        return DaemonRequest(command: first)
+    }
+
+    private func handleRequest(_ request: DaemonRequest) -> DaemonResponse {
+        switch request.command {
+        case "max":
+            return withErrorBoundary(requestID: request.requestID) {
                 try fanControl.setMax()
                 heartbeatLock.lock()
-                lastCommand = "max"
+                lastCommand = .setMax
                 lastHeartbeat = Date()
                 heartbeatLock.unlock()
-                response = "ok"
-            case "auto":
+                return DaemonResponse(requestID: request.requestID, ok: true, message: "ok")
+            }
+
+        case "auto":
+            return withErrorBoundary(requestID: request.requestID) {
                 try fanControl.resetAuto()
                 heartbeatLock.lock()
                 lastCommand = nil
                 lastHeartbeat = nil
                 heartbeatLock.unlock()
-                response = "ok"
-            case "set":
-                guard parts.count >= 2, let rpm = Float(parts[1]) else {
-                    response = "error: usage: set <rpm>"
-                    break
-                }
-                try fanControl.setAllFans(rpm: rpm)
-                heartbeatLock.lock()
-                lastCommand = command
-                lastHeartbeat = Date()
-                heartbeatLock.unlock()
-                response = "ok"
-            case "status":
-                let status = try fanControl.status()
-                let encoder = JSONEncoder()
-                encoder.keyEncodingStrategy = .convertToSnakeCase
-                let data = try encoder.encode(status)
-                response = String(data: data, encoding: .utf8) ?? "error: encode failed"
-            case "heartbeat":
-                heartbeatLock.lock()
-                lastHeartbeat = Date()
-                heartbeatLock.unlock()
-                response = "ok"
-            default:
-                response = "error: unknown command '\(command)'"
+                return DaemonResponse(requestID: request.requestID, ok: true, message: "ok")
             }
+
+        case "set":
+            guard let rpm = request.rpm else {
+                return DaemonResponse(
+                    requestID: request.requestID,
+                    ok: false,
+                    error: DaemonErrorPayload(code: "validation_error", message: "usage: set <rpm>")
+                )
+            }
+            return withErrorBoundary(requestID: request.requestID) {
+                try fanControl.setAllFans(rpm: Float(rpm))
+                heartbeatLock.lock()
+                lastCommand = .setRPM(Float(rpm))
+                lastHeartbeat = Date()
+                heartbeatLock.unlock()
+                return DaemonResponse(requestID: request.requestID, ok: true, message: "ok")
+            }
+
+        case "status":
+            return withErrorBoundary(requestID: request.requestID) {
+                let status = try fanControl.status()
+                return DaemonResponse(requestID: request.requestID, ok: true, status: status)
+            }
+
+        case "heartbeat":
+            heartbeatLock.lock()
+            lastHeartbeat = Date()
+            heartbeatLock.unlock()
+            return DaemonResponse(requestID: request.requestID, ok: true, message: "ok")
+
+        case "rules.list":
+            return DaemonResponse(requestID: request.requestID, ok: true, rules: RulePersistence.load())
+
+        case "rules.put":
+            guard let rule = request.rule else {
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "validation_error", message: "missing rule payload"))
+            }
+            var rules = RulePersistence.load()
+            if let idx = rules.firstIndex(where: { $0.id == rule.id }) {
+                rules[idx] = rule
+            } else {
+                rules.append(rule)
+            }
+            do {
+                try RulePersistence.save(rules)
+                return DaemonResponse(requestID: request.requestID, ok: true, rules: rules)
+            } catch {
+                TFLogger.shared.event(ThermalEvent(type: .daemonCommandFailed, details: "rules.put failed: \(error)"))
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "persist_failed", message: "\(error)"))
+            }
+
+        case "rules.remove":
+            guard let ruleID = request.ruleID else {
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "validation_error", message: "missing ruleID"))
+            }
+            var rules = RulePersistence.load()
+            rules.removeAll(where: { $0.id == ruleID })
+            do {
+                try RulePersistence.save(rules)
+                return DaemonResponse(requestID: request.requestID, ok: true, rules: rules)
+            } catch {
+                TFLogger.shared.event(ThermalEvent(type: .daemonCommandFailed, details: "rules.remove failed: \(error)"))
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "persist_failed", message: "\(error)"))
+            }
+
+        case "rules.enable", "rules.disable":
+            guard let ruleID = request.ruleID else {
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "validation_error", message: "missing ruleID"))
+            }
+            let desired = request.command == "rules.enable"
+            var rules = RulePersistence.load()
+            if let idx = rules.firstIndex(where: { $0.id == ruleID }) {
+                rules[idx].enabled = desired
+            }
+            do {
+                try RulePersistence.save(rules)
+                return DaemonResponse(requestID: request.requestID, ok: true, rules: rules)
+            } catch {
+                TFLogger.shared.event(ThermalEvent(type: .daemonCommandFailed, details: "\(request.command) failed: \(error)"))
+                return DaemonResponse(requestID: request.requestID, ok: false, error: DaemonErrorPayload(code: "persist_failed", message: "\(error)"))
+            }
+
+        default:
+            TFLogger.shared.event(ThermalEvent(type: .daemonCommandRejected, details: "unknown command: \(request.command)"))
+            return DaemonResponse(
+                requestID: request.requestID,
+                ok: false,
+                error: DaemonErrorPayload(code: "unknown_command", message: "unknown command '\(request.command)'")
+            )
+        }
+    }
+
+    private func withErrorBoundary(requestID: String, _ body: () throws -> DaemonResponse) -> DaemonResponse {
+        do {
+            return try body()
         } catch {
-            response = "error: \(error)"
+            TFLogger.shared.event(ThermalEvent(type: .daemonCommandFailed, details: "request failed: \(error)"))
+            return DaemonResponse(
+                requestID: requestID,
+                ok: false,
+                error: DaemonErrorPayload(code: "command_failed", message: "\(error)")
+            )
+        }
+    }
+
+    private func writeResponse(_ fd: Int32, typed: DaemonResponse? = nil, fallbackText: String) {
+        if let typed, let data = try? DaemonCodec.encodeResponse(typed) {
+            let bytes = [UInt8](data)
+            _ = bytes.withUnsafeBufferPointer { buf in
+                write(fd, buf.baseAddress!, buf.count)
+            }
+            return
         }
 
-        let responseBytes = Array((response + "\n").utf8)
+        let responseBytes = Array((fallbackText + "\n").utf8)
         _ = responseBytes.withUnsafeBufferPointer { buf in
             write(fd, buf.baseAddress!, buf.count)
         }
@@ -406,7 +556,7 @@ private func currentConsoleUID() -> uid_t? {
     return st.st_uid
 }
 
-/// Copy a path string into sockaddr_un.sun_path
+/// Copy a path string into sockaddr_un.sun_path.
 private func setPath(_ addr: inout sockaddr_un, _ path: String) {
     withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
         ptr.withMemoryRebound(to: CChar.self, capacity: 104) { dest in
