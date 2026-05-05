@@ -521,15 +521,14 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        // Stop old daemon if one is running
-        if ThermalForgeDaemon.isRunning {
-            let unload = Process()
-            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-            try unload.run()
-            unload.waitUntilExit()
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+        // Always try to stop old daemon first.
+        // Do not gate on socket health checks because socket paths can change between versions.
+        let unload = Process()
+        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+        try? unload.run()
+        unload.waitUntilExit()
+        Thread.sleep(forTimeInterval: 0.5)
 
         // Start new daemon
         let load = Process()

@@ -13,7 +13,7 @@ import IOKit.pwr_mgt
 // MARK: - Constants
 
 public enum ThermalForgeDaemon {
-    public static let socketPath = "/tmp/thermalforge.sock"
+    public static let socketPath = "/var/run/thermalforge.sock"
     public static let plistPath = "/Library/LaunchDaemons/com.thermalforge.daemon.plist"
     public static let installPath = "/usr/local/bin/thermalforge"
     public static let label = "com.thermalforge.daemon"
@@ -123,9 +123,11 @@ public final class DaemonServer {
     /// Heartbeat: last time the app checked in
     private var lastHeartbeat: Date?
     private let heartbeatLock = NSLock()
+    private let authorizedUID: uid_t?
 
     public init(fanControl: FanControl) throws {
         self.fanControl = fanControl
+        self.authorizedUID = currentConsoleUID()
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -150,8 +152,14 @@ public final class DaemonServer {
             throw ThermalForgeError.writeFailed("bind() failed: \(errno)")
         }
 
-        // Allow all local users to connect
-        chmod(ThermalForgeDaemon.socketPath, 0o777)
+        // Restrict socket access to root + active console user.
+        if let uid = authorizedUID {
+            _ = chown(ThermalForgeDaemon.socketPath, uid, 0)
+            chmod(ThermalForgeDaemon.socketPath, 0o600)
+        } else {
+            // Fallback: root-only if no console user is available.
+            chmod(ThermalForgeDaemon.socketPath, 0o600)
+        }
 
         guard listen(fd, 5) == 0 else {
             close(fd)
@@ -298,6 +306,15 @@ public final class DaemonServer {
     }
 
     private func handleClient(_ fd: Int32) {
+        guard isAuthorizedClient(fd) else {
+            NSLog("ThermalForge daemon: rejected unauthorized client")
+            let responseBytes = Array("error: unauthorized client\n".utf8)
+            _ = responseBytes.withUnsafeBufferPointer { buf in
+                write(fd, buf.baseAddress!, buf.count)
+            }
+            return
+        }
+
         var buffer = [UInt8](repeating: 0, count: 256)
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { return }
@@ -362,6 +379,18 @@ public final class DaemonServer {
         }
     }
 
+    private func isAuthorizedClient(_ fd: Int32) -> Bool {
+        var peerUID: uid_t = 0
+        var peerGID: gid_t = 0
+        guard getpeereid(fd, &peerUID, &peerGID) == 0 else {
+            return false
+        }
+
+        if peerUID == 0 { return true }
+        guard let authorizedUID else { return false }
+        return peerUID == authorizedUID
+    }
+
     deinit {
         close(socketFD)
         unlink(ThermalForgeDaemon.socketPath)
@@ -369,6 +398,13 @@ public final class DaemonServer {
 }
 
 // MARK: - Helpers
+
+private func currentConsoleUID() -> uid_t? {
+    var st = stat()
+    guard stat("/dev/console", &st) == 0 else { return nil }
+    guard st.st_uid != 0 else { return nil }
+    return st.st_uid
+}
 
 /// Copy a path string into sockaddr_un.sun_path
 private func setPath(_ addr: inout sockaddr_un, _ path: String) {
