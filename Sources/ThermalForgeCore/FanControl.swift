@@ -98,10 +98,22 @@ public final class FanControl {
 
     public func fanCount() throws -> Int {
         let result = smc.readKey(SMCFanKey.count)
-        guard result.success, !result.bytes.isEmpty else {
+        if result.success, !result.bytes.isEmpty {
+            return Int(result.bytes[0])
+        }
+
+        // FNum is absent on some Apple Silicon SKUs (e.g. M5 Max Mac17,6).
+        // Fall back to probing F<i>Ac until a key is missing.
+        var count = 0
+        for i in 0..<10 {
+            let key = SMCFanKey.key(SMCFanKey.actual, fan: i)
+            guard smc.readKey(key).success else { break }
+            count += 1
+        }
+        guard count > 0 else {
             throw ThermalForgeError.readFailed(SMCFanKey.count)
         }
-        return Int(result.bytes[0])
+        return count
     }
 
     // MARK: - Read Fan Info
