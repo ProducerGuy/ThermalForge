@@ -172,12 +172,17 @@ public final class DaemonServer {
 
         // Accept connections on a background thread
         // (RunLoop.main needed for NSWorkspace notifications)
+        // autoreleasepool per iteration: NSLog/os_log routes through XPC and
+        // autoreleases NSURL/CFString/_FileCache. Without draining, those
+        // accumulate forever on this infinite-loop GCD task.
         DispatchQueue.global(qos: .utility).async { [self] in
             while true {
-                let clientFD = accept(socketFD, nil, nil)
-                guard clientFD >= 0 else { continue }
-                handleClient(clientFD)
-                close(clientFD)
+                autoreleasepool {
+                    let clientFD = accept(socketFD, nil, nil)
+                    guard clientFD >= 0 else { return }
+                    handleClient(clientFD)
+                    close(clientFD)
+                }
             }
         }
 
@@ -190,36 +195,35 @@ public final class DaemonServer {
     private func startHeartbeatWatchdog() {
         DispatchQueue.global(qos: .utility).async { [self] in
             while true {
-                Thread.sleep(forTimeInterval: 5)
+                autoreleasepool {
+                    Thread.sleep(forTimeInterval: 5)
 
-                heartbeatLock.lock()
-                let lastBeat = lastHeartbeat
-                let hasManualControl = lastCommand != nil
-                heartbeatLock.unlock()
+                    heartbeatLock.lock()
+                    let lastBeat = lastHeartbeat
+                    let hasManualControl = lastCommand != nil
+                    heartbeatLock.unlock()
 
-                // Only reset if: app has connected before (lastBeat != nil),
-                // fans are in manual mode, and heartbeat is stale
-                guard let beat = lastBeat, hasManualControl else { continue }
+                    guard let beat = lastBeat, hasManualControl else { return }
 
-                if Date().timeIntervalSince(beat) > 15 {
-                    NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
-                    smcLock.lock()
-                    let resetSucceeded: Bool
-                    do {
-                        try fanControl.resetAuto()
-                        resetSucceeded = true
-                    } catch {
-                        NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
-                        resetSucceeded = false
-                    }
-                    smcLock.unlock()
+                    if Date().timeIntervalSince(beat) > 15 {
+                        NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                        smcLock.lock()
+                        let resetSucceeded: Bool
+                        do {
+                            try fanControl.resetAuto()
+                            resetSucceeded = true
+                        } catch {
+                            NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
+                            resetSucceeded = false
+                        }
+                        smcLock.unlock()
 
-                    // Only clear state if reset actually worked — otherwise retry next cycle
-                    if resetSucceeded {
-                        heartbeatLock.lock()
-                        lastCommand = nil
-                        lastHeartbeat = nil
-                        heartbeatLock.unlock()
+                        if resetSucceeded {
+                            heartbeatLock.lock()
+                            lastCommand = nil
+                            lastHeartbeat = nil
+                            heartbeatLock.unlock()
+                        }
                     }
                 }
             }

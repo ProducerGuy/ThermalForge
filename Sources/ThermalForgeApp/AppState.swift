@@ -5,26 +5,28 @@
 //  Observable bridge between ThermalMonitor and SwiftUI.
 //
 
+import Observation
 import ServiceManagement
 import SwiftUI
 @preconcurrency import ThermalForgeCore
 
 @MainActor
-final class AppState: ObservableObject {
-    @Published var latestStatus: ThermalStatus?
-    @Published var activeProfile: FanProfile = .silent
-    @Published var monitorState: MonitorState = .idle
-    @Published var maxTemp: Float?
-    @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
+@Observable
+final class AppState {
+    var latestStatus: ThermalStatus?
+    var activeProfile: FanProfile = .silent
+    var monitorState: MonitorState = .idle
+    var maxTemp: Float?
+    var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
-    @Published var launchAtLogin: Bool = false {
+    var launchAtLogin: Bool = false {
         didSet { updateLoginItem() }
     }
 
-    private var monitor: ThermalMonitor?
-    private let executor = PrivilegedExecutor()
-    private var heartbeatTimer: Timer?
+    @ObservationIgnored private var monitor: ThermalMonitor?
+    @ObservationIgnored private let executor = PrivilegedExecutor()
+    @ObservationIgnored private var heartbeatTimer: Timer?
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
@@ -61,15 +63,25 @@ final class AppState: ObservableObject {
         let monitor = ThermalMonitor(fanControl: fc, profile: activeProfile)
         monitor.onUpdate = { [weak self] status, profile, state in
             Task { @MainActor [weak self] in
-                self?.latestStatus = status
-                self?.activeProfile = profile
-                self?.monitorState = state
-                // Max of only the displayed sensors
-                // Peak across all CPU and GPU sensors for menu bar display
+                guard let self else { return }
+                // latestStatus drives only the dropdown; under @Observable it
+                // invalidates no view while the menu is closed.
+                self.latestStatus = status
+                // Assign on change only — @Observable notifies even on an equal
+                // write, so guarding avoids needless view invalidation.
+                if self.activeProfile != profile { self.activeProfile = profile }
+                if self.monitorState != state { self.monitorState = state }
+
+                // Peak across displayed CPU/GPU sensors for the menu-bar label.
                 let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
-                self?.maxTemp = status.temperatures
+                let newMax = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
+                // The label shows an integer degree — only republish when that
+                // integer changes, so a steady temperature stops redraws at idle.
+                if newMax.map({ Int($0) }) != self.maxTemp.map({ Int($0) }) {
+                    self.maxTemp = newMax
+                }
             }
         }
         monitor.onFanCommand = { [weak self] command in

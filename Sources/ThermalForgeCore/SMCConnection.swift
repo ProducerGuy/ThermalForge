@@ -77,6 +77,15 @@ public final class SMCConnection {
 
     private let connection: io_connect_t
 
+    /// Per-key data size from readKeyInfo. The size is firmware-static per key,
+    /// so caching it lets readKey() skip the readKeyInfo IOKit round trip on
+    /// every repeat read — halving kernel calls on the hot status() path.
+    /// Only successful (size > 0) reads are cached; absence is never cached, so
+    /// a transiently-failed real sensor can never be permanently latched as
+    /// missing. SMC access is externally serialized (daemon smcLock / app
+    /// monitor queue), so a plain dictionary is safe here.
+    private var keyInfoCache: [UInt32: UInt32] = [:]
+
     public init?() {
         var iterator: io_iterator_t = 0
         defer { IOObjectRelease(iterator) }
@@ -111,15 +120,23 @@ public final class SMCConnection {
         var input = SMCParamStruct()
         var output = SMCParamStruct()
 
-        // Get key info (data size)
-        input.key = fourCharCode(key)
-        input.data8 = SMCCommand.readKeyInfo.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
-            return (false, [], 0)
-        }
+        let code = fourCharCode(key)
+        input.key = code
 
-        let dataSize = output.keyInfo.dataSize
-        guard dataSize > 0 else { return (false, [], 0) }
+        // Resolve data size: cache hit skips the readKeyInfo round trip entirely.
+        let dataSize: UInt32
+        if let cached = keyInfoCache[code] {
+            dataSize = cached
+        } else {
+            input.data8 = SMCCommand.readKeyInfo.rawValue
+            guard callSMC(&input, &output) == kIOReturnSuccess else {
+                return (false, [], 0)
+            }
+            let size = output.keyInfo.dataSize
+            guard size > 0 else { return (false, [], 0) }
+            keyInfoCache[code] = size
+            dataSize = size
+        }
 
         // Read value
         input.keyInfo.dataSize = dataSize

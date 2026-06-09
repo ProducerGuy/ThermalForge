@@ -42,15 +42,17 @@ public final class ThermalMonitor {
     // MARK: - Tick Timing
 
     /// Thermal tick interval in seconds. Fan control runs at this rate.
-    private let tickInterval: Float
+    /// Single source of truth — set from start(interval:); cadence and ramp
+    /// math derive from it, so the tick rate can change without desync.
+    private var tickInterval: Float
 
-    /// Monitor cadence: process capture + anomaly detection every N thermal ticks.
-    /// At 100ms thermal tick, 20 × 0.1s = 2 seconds.
-    private static let monitorCadence = 20
+    /// Monitor cadence in ticks: process capture + anomaly detection every ~2s
+    /// of wall-clock, regardless of tick rate.
+    private var monitorCadence: Int { max(1, Int((2.0 / tickInterval).rounded())) }
 
-    /// UI update cadence: onUpdate fires every N thermal ticks.
-    /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
-    private static let uiUpdateCadence = 5
+    /// UI update cadence in ticks: onUpdate fires every ~1s of wall-clock,
+    /// regardless of tick rate. A menu-bar readout needs no sub-second refresh.
+    private var uiUpdateCadence: Int { max(1, Int((1.0 / tickInterval).rounded())) }
 
     private var tickCounter = 0
 
@@ -98,16 +100,21 @@ public final class ThermalMonitor {
     public init(fanControl: FanControl, profile: FanProfile = .silent) {
         self.fanControl = fanControl
         self.activeProfile = profile
-        self.tickInterval = 0.1
+        self.tickInterval = 0.25
     }
 
     // MARK: - Lifecycle
 
-    public func start(interval: TimeInterval = 0.1) {
+    public func start(interval: TimeInterval = 0.25) {
         stop()
+        tickInterval = Float(interval)
 
+        // Fan control needs ~4 Hz, not 10 Hz — thermal mass moves over seconds.
+        // 250ms cuts the per-tick SMC/IOKit load ~60% vs the old 100ms tick.
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: interval)
+        // Leeway lets the scheduler coalesce this wakeup with others (lower idle
+        // wake cost). Kept well below the period so control timing is unaffected.
+        timer.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(Int(interval * 1000 / 5)))
         timer.setEventHandler { [weak self] in
             self?.tick()
         }
@@ -159,7 +166,7 @@ public final class ThermalMonitor {
         let maxTemp = max(cpuTemp, gpuTemp)
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
-        if tickCounter % Self.monitorCadence == 0 {
+        if tickCounter % monitorCadence == 0 {
             monitorTick(status: status, maxTemp: maxTemp)
         }
 
@@ -172,7 +179,7 @@ public final class ThermalMonitor {
                 lastAppliedRPMPercent = 1.0
                 TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
-            if tickCounter % Self.uiUpdateCadence == 0 {
+            if tickCounter % uiUpdateCadence == 0 {
                 onUpdate?(status, activeProfile, state)
             }
             tickCounter += 1
@@ -203,7 +210,7 @@ public final class ThermalMonitor {
         }
 
         // UI update at slower cadence (every 500ms)
-        if tickCounter % Self.uiUpdateCadence == 0 {
+        if tickCounter % uiUpdateCadence == 0 {
             onUpdate?(status, activeProfile, state)
         }
 
@@ -286,7 +293,7 @@ public final class ThermalMonitor {
 
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
         // Sample temperature history at monitor cadence (2s) for stable rate-of-change
-        if tickCounter % Self.monitorCadence == 0 {
+        if tickCounter % monitorCadence == 0 {
             tempHistory.append(peakTemp)
             if tempHistory.count > 4 { tempHistory.removeFirst() }
         }
@@ -391,7 +398,7 @@ public final class ThermalMonitor {
         let oldest = tempHistory.first!
         let newest = tempHistory.last!
         // tempHistory sampled at monitor cadence (2s intervals)
-        let seconds = Float(tempHistory.count - 1) * Float(Self.monitorCadence) * tickInterval
+        let seconds = Float(tempHistory.count - 1) * Float(monitorCadence) * tickInterval
         return (newest - oldest) / seconds
     }
 

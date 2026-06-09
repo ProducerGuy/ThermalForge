@@ -208,8 +208,8 @@ struct Watch: ParsableCommand {
     @Option(name: .shortAndLong, help: "Profile: silent, balanced, performance, max")
     var profile: String = "balanced"
 
-    @Option(name: .shortAndLong, help: "Poll interval in seconds (default 0.1 = 100ms)")
-    var interval: Double = 0.1
+    @Option(name: .shortAndLong, help: "Poll interval in seconds (default 0.25 = 250ms)")
+    var interval: Double = 0.25
 
     @Flag(name: .long, help: "Output JSON on each update")
     var json: Bool = false
