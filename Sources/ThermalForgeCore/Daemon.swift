@@ -13,7 +13,7 @@ import IOKit.pwr_mgt
 // MARK: - Constants
 
 public enum ThermalForgeDaemon {
-    public static let socketPath = "/tmp/thermalforge.sock"
+    public static let socketPath = "/var/run/thermalforge.sock"
     public static let plistPath = "/Library/LaunchDaemons/com.thermalforge.daemon.plist"
     public static let installPath = "/usr/local/bin/thermalforge"
     public static let label = "com.thermalforge.daemon"
@@ -150,8 +150,10 @@ public final class DaemonServer {
             throw ThermalForgeError.writeFailed("bind() failed: \(errno)")
         }
 
-        // Allow all local users to connect
-        chmod(ThermalForgeDaemon.socketPath, 0o777)
+        // Socket lives in root-owned /var/run (no /tmp squatting). It stays
+        // connectable, but every accepted connection is authenticated by peer
+        // UID below — only root and the console (GUI login) user are honored.
+        chmod(ThermalForgeDaemon.socketPath, 0o666)
 
         guard listen(fd, 5) == 0 else {
             close(fd)
@@ -176,7 +178,11 @@ public final class DaemonServer {
             while true {
                 let clientFD = accept(socketFD, nil, nil)
                 guard clientFD >= 0 else { continue }
-                handleClient(clientFD)
+                if Self.isAuthorizedPeer(clientFD) {
+                    handleClient(clientFD)
+                } else {
+                    NSLog("ThermalForge daemon: rejected unauthorized peer (uid not root/console)")
+                }
                 close(clientFD)
             }
         }
@@ -360,6 +366,31 @@ public final class DaemonServer {
         _ = responseBytes.withUnsafeBufferPointer { buf in
             write(fd, buf.baseAddress!, buf.count)
         }
+    }
+
+    // MARK: - Peer Authentication
+
+    /// Only root (the sudo CLI) and the current console (GUI login) user may
+    /// command the daemon. Verified via LOCAL_PEERCRED on the connected socket,
+    /// so it can't be bypassed by socket file permissions or path squatting.
+    static func isAuthorizedPeer(_ fd: Int32) -> Bool {
+        var cred = xucred()
+        var len = socklen_t(MemoryLayout<xucred>.stride)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &len) == 0,
+              cred.cr_version == UInt32(XUCRED_VERSION) else { return false }
+
+        let uid = cred.cr_uid
+        if uid == 0 { return true }                                    // root: privileged CLI
+        if let console = consoleUID(), uid == console { return true }   // active GUI user
+        return false
+    }
+
+    /// The console (logged-in GUI) user owns /dev/console on macOS. Re-read per
+    /// connection so fast-user-switching is handled correctly.
+    private static func consoleUID() -> uid_t? {
+        var st = stat()
+        guard stat("/dev/console", &st) == 0 else { return nil }
+        return st.st_uid
     }
 
     deinit {
