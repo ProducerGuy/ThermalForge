@@ -42,15 +42,17 @@ public final class ThermalMonitor {
     // MARK: - Tick Timing
 
     /// Thermal tick interval in seconds. Fan control runs at this rate.
-    private let tickInterval: Float
+    /// 250ms keeps the app's idle CPU low while staying responsive — fans ramp
+    /// over seconds, so sub-250ms polling buys nothing but CPU burn.
+    private var tickInterval: Float
 
     /// Monitor cadence: process capture + anomaly detection every N thermal ticks.
-    /// At 100ms thermal tick, 20 × 0.1s = 2 seconds.
-    private static let monitorCadence = 20
+    /// At 250ms thermal tick, 8 × 0.25s = 2 seconds.
+    private static let monitorCadence = 8
 
     /// UI update cadence: onUpdate fires every N thermal ticks.
-    /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
-    private static let uiUpdateCadence = 5
+    /// At 250ms thermal tick, 2 × 0.25s = 500ms — smooth UI without excessive redraws.
+    private static let uiUpdateCadence = 2
 
     private var tickCounter = 0
 
@@ -98,13 +100,16 @@ public final class ThermalMonitor {
     public init(fanControl: FanControl, profile: FanProfile = .silent) {
         self.fanControl = fanControl
         self.activeProfile = profile
-        self.tickInterval = 0.1
+        self.tickInterval = 0.25
     }
 
     // MARK: - Lifecycle
 
-    public func start(interval: TimeInterval = 0.1) {
+    public func start(interval: TimeInterval = 0.25) {
         stop()
+
+        // Keep the ramp/sustained math in sync with the actual timer rate.
+        tickInterval = Float(interval)
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: interval)
