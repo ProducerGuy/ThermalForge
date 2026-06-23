@@ -32,12 +32,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ThermalForgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var appState = AppState()
+    @State private var appState = AppState()
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
-                .environmentObject(appState)
+                .environment(appState)
         } label: {
             MenuBarLabel(state: appState.monitorState, maxTemp: appState.maxTemp, fahrenheit: appState.useFahrenheit)
         }

@@ -69,6 +69,18 @@ struct SMCParamStruct {
     )
 }
 
+// MARK: - SMC Reading
+
+/// The subset of SMC operations FanControl depends on. Abstracted so tests can
+/// inject a fake key table instead of touching real hardware.
+public protocol SMCReading: AnyObject {
+    func readKey(_ key: String) -> (success: Bool, bytes: [UInt8], size: UInt32)
+    func writeKey(_ key: String, bytes: [UInt8]) -> Bool
+    func getKeyInfo(_ key: String) -> (size: UInt32, type: String)?
+    func getKeyCount() -> UInt32
+    func getKeyAtIndex(_ index: UInt32) -> String?
+}
+
 // MARK: - SMC Connection
 
 /// Direct IOKit interface to the System Management Controller.
@@ -76,6 +88,22 @@ struct SMCParamStruct {
 public final class SMCConnection {
 
     private let connection: io_connect_t
+
+    /// A key's data size is fixed by firmware, so cache it to skip the
+    /// `readKeyInfo` IOKit round trip on repeat reads/writes. Only present keys
+    /// are cached; absence is never cached, so a transiently-failed read of a
+    /// real sensor is always retried (the 95°C override must keep seeing it).
+    private let cacheLock = NSLock()
+    private var sizeCache: [UInt32: UInt32] = [:]
+
+    private func cachedSize(_ code: UInt32) -> UInt32? {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return sizeCache[code]
+    }
+
+    private func setCachedSize(_ code: UInt32, _ size: UInt32) {
+        cacheLock.lock(); sizeCache[code] = size; cacheLock.unlock()
+    }
 
     public init?() {
         var iterator: io_iterator_t = 0
@@ -110,16 +138,23 @@ public final class SMCConnection {
     public func readKey(_ key: String) -> (success: Bool, bytes: [UInt8], size: UInt32) {
         var input = SMCParamStruct()
         var output = SMCParamStruct()
+        let code = fourCharCode(key)
+        input.key = code
 
-        // Get key info (data size)
-        input.key = fourCharCode(key)
-        input.data8 = SMCCommand.readKeyInfo.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
-            return (false, [], 0)
+        // Resolve data size — from cache if known, else one readKeyInfo call.
+        let dataSize: UInt32
+        if let cached = cachedSize(code) {
+            dataSize = cached
+        } else {
+            input.data8 = SMCCommand.readKeyInfo.rawValue
+            guard callSMC(&input, &output) == kIOReturnSuccess else {
+                return (false, [], 0)
+            }
+            let size = output.keyInfo.dataSize
+            guard size > 0 else { return (false, [], 0) }
+            setCachedSize(code, size)
+            dataSize = size
         }
-
-        let dataSize = output.keyInfo.dataSize
-        guard dataSize > 0 else { return (false, [], 0) }
 
         // Read value
         input.keyInfo.dataSize = dataSize
@@ -136,17 +171,25 @@ public final class SMCConnection {
     public func writeKey(_ key: String, bytes: [UInt8]) -> Bool {
         var input = SMCParamStruct()
         var output = SMCParamStruct()
+        let code = fourCharCode(key)
+        input.key = code
 
-        // Get key info first
-        input.key = fourCharCode(key)
-        input.data8 = SMCCommand.readKeyInfo.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
-            return false
+        // Resolve data size — from cache if known, else one readKeyInfo call.
+        let dataSize: UInt32
+        if let cached = cachedSize(code) {
+            dataSize = cached
+        } else {
+            input.data8 = SMCCommand.readKeyInfo.rawValue
+            guard callSMC(&input, &output) == kIOReturnSuccess else {
+                return false
+            }
+            dataSize = output.keyInfo.dataSize
+            if dataSize > 0 { setCachedSize(code, dataSize) }
         }
 
         // Write value
         input.data8 = SMCCommand.writeBytes.rawValue
-        input.keyInfo.dataSize = output.keyInfo.dataSize
+        input.keyInfo.dataSize = dataSize
         input.bytes = arrayToTuple(bytes)
 
         guard callSMC(&input, &output) == kIOReturnSuccess else {
@@ -242,6 +285,9 @@ public final class SMCConnection {
         )
     }
 }
+
+// SMCConnection's public methods already match SMCReading.
+extension SMCConnection: SMCReading {}
 
 // Type alias for the 32-byte tuple used in SMCParamStruct
 extension SMCParamStruct {
