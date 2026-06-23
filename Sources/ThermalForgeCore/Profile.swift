@@ -273,3 +273,42 @@ extension FanProfile {
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
 }
+
+// MARK: - Extra Cool
+
+extension FanProfile {
+    /// Returns a colder-but-louder variant of this profile.
+    ///
+    /// Fans engage sooner (lower start/stop), reach full speed at a lower
+    /// temperature (lower ceiling), are allowed a higher ceiling RPM, react
+    /// faster (shorter sustained trigger), and ramp up quicker. Hysteresis gap
+    /// and curve shape are preserved. `Silent` is hands-off (Apple controls the
+    /// fans) so it is returned unchanged.
+    public func extraCool() -> FanProfile {
+        guard !curve.handsOff else { return self }
+
+        // Note: `Swift.max`/`Swift.min` are qualified because `FanProfile.max`
+        // (the Max profile) shadows the free `max` function inside this type.
+        let c = curve
+        let coolStart = Swift.max(c.startTemp - 8, 40)
+        let coolStop  = Swift.max(c.stopTemp  - 8, 35)
+        // Ceiling eased to -7 (was -10) so it reaches full speed a touch later —
+        // colder than stock, but not slamming to max over a brief blip.
+        let coolCeil  = Swift.max(c.ceilingTemp - 7, coolStart + 5)
+        let louder    = Swift.min(c.maxRPMPercent + 0.20, 1.0)
+        let quicker   = Swift.max(c.sustainedTriggerSec * 0.5, 1)
+        let fasterUp  = Swift.min(c.rampUpPerSec * 1.5, 1.0)
+        // Ramp down twice as fast too, so fans calm quickly once temps drop
+        // instead of lingering loud after a spike.
+        let fasterDown = Swift.min(c.rampDownPerSec * 2.0, 1.0)
+
+        let cooled = Curve(
+            stopTemp: coolStop, startTemp: coolStart, ceilingTemp: coolCeil,
+            maxRPMPercent: louder, handsOff: c.handsOff, alwaysOn: c.alwaysOn,
+            curveShape: c.curveShape, rampUpPerSec: fasterUp,
+            rampDownPerSec: fasterDown, sustainedTriggerSec: quicker,
+            instantEngage: c.instantEngage
+        )
+        return FanProfile(id: id, name: name, curve: cooled)
+    }
+}

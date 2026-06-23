@@ -121,6 +121,8 @@ struct MenuBarView: View {
             Divider().padding(.vertical, 4)
 
             // Footer
+            Toggle("Extra Cool", isOn: $appState.extraCool)
+                .padding(.horizontal, 12)
             Toggle("°F / °C", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)
