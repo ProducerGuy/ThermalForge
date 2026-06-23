@@ -117,6 +117,95 @@ struct ProfileTests {
         #expect(FanProfile.hysteresisDegrees == 5.0)
     }
 
+    // MARK: - Extra Cool
+
+    @Test("Extra Cool shifts Balanced colder and louder, preserving identity")
+    func extraCoolBalanced() {
+        let cooled = FanProfile.balanced.extraCool()
+
+        // Identity preserved so the UI picker selection still matches
+        #expect(cooled.id == "balanced")
+        #expect(cooled.name == "Balanced")
+
+        // Colder: start/stop/ceiling each shift down
+        #expect(cooled.curve.startTemp == 47)    // 55 - 8
+        #expect(cooled.curve.stopTemp == 42)     // 50 - 8 (5°C hysteresis kept)
+        #expect(cooled.curve.ceilingTemp == 63)  // 70 - 7
+
+        // Louder + more responsive
+        #expect(abs(cooled.curve.maxRPMPercent - 0.80) < 0.0001) // 0.60 + 0.20
+        #expect(cooled.curve.sustainedTriggerSec == 4)           // 8 * 0.5
+        #expect(abs(cooled.curve.rampUpPerSec - 0.075) < 0.0001) // 0.05 * 1.5
+        #expect(abs(cooled.curve.rampDownPerSec - 0.05) < 0.0001) // 0.025 * 2 (calms faster)
+
+        // Shape unchanged
+        #expect(cooled.curve.curveShape == .easeIn)
+        // Hysteresis gap preserved
+        #expect(cooled.curve.startTemp - cooled.curve.stopTemp == 5)
+    }
+
+    @Test("Extra Cool caps max RPM at 100% and leaves Silent untouched")
+    func extraCoolCapsAndSilent() {
+        // Max is already 100% — Extra Cool must not exceed 1.0
+        #expect(FanProfile.max.extraCool().curve.maxRPMPercent == 1.0)
+
+        // Smart shifts its ceiling down so it reaches full speed sooner
+        #expect(FanProfile.smart.extraCool().curve.ceilingTemp == 78) // 85 - 7
+        #expect(FanProfile.smart.extraCool().curve.startTemp == 45)    // 53 - 8
+
+        // Silent is hands-off — Extra Cool is a no-op
+        #expect(FanProfile.silent.extraCool() == FanProfile.silent)
+    }
+
+    @Test("Extra Cool transforms Performance: colder, louder, faster")
+    func extraCoolPerformance() {
+        let p = FanProfile.performance.extraCool()
+        #expect(p.id == "performance")
+        #expect(p.curve.startTemp == 47)                     // 55 - 8
+        #expect(p.curve.stopTemp == 42)                      // 50 - 8
+        #expect(p.curve.ceilingTemp == 58)                   // 65 - 7
+        #expect(p.curve.maxRPMPercent == 1.0)                // 0.85 + 0.20 -> clamped to 1.0
+        #expect(p.curve.sustainedTriggerSec == 2)            // 4 * 0.5
+        #expect(abs(p.curve.rampUpPerSec - 0.15) < 0.0001)   // 0.10 * 1.5
+        #expect(abs(p.curve.rampDownPerSec - 0.08) < 0.0001) // 0.04 * 2
+        #expect(p.curve.curveShape == .linear)
+    }
+
+    @Test("Extra Cool keeps Max instant-engage valid and engages 8°C sooner")
+    func extraCoolMax() {
+        let m = FanProfile.max.extraCool()
+        #expect(m.curve.instantEngage == true)
+        #expect(m.curve.startTemp == 57)                     // 65 - 8
+        #expect(m.curve.stopTemp == 42)                      // 50 - 8
+        // Ceiling is floored to start + 5 so the proportional zone never inverts
+        #expect(m.curve.ceilingTemp >= m.curve.startTemp + 5)
+        #expect(m.curve.maxRPMPercent == 1.0)
+        #expect(m.curve.sustainedTriggerSec == 2.5)          // 5 * 0.5
+        // Instant engage: jumps straight to max at the new (lower) start temp,
+        // and stays off just below it (hysteresis band).
+        #expect(m.curve.targetPercent(at: 57, fansCurrentlyRunning: false) == 1.0)
+        #expect(m.curve.targetPercent(at: 56, fansCurrentlyRunning: false) == nil)
+    }
+
+    @Test("Extra Cool preserves id and name for every profile")
+    func extraCoolPreservesIdentity() {
+        for p in [FanProfile.silent, .balanced, .performance, .max, .smart] {
+            let c = p.extraCool()
+            #expect(c.id == p.id, "id changed for \(p.name)")
+            #expect(c.name == p.name, "name changed for \(p.name)")
+        }
+    }
+
+    @Test("Smart curve matches the thresholds tickSmart reads (toggle-off equivalence)")
+    func smartCurveMatchesMonitorThresholds() {
+        // tickSmart now reads floor/ceiling/stop from the active profile's curve
+        // instead of hardcoded constants. These must equal the prior constants
+        // so Smart behaves identically when Extra Cool is OFF.
+        #expect(FanProfile.smart.curve.stopTemp == 50)
+        #expect(FanProfile.smart.curve.startTemp == 53)
+        #expect(FanProfile.smart.curve.ceilingTemp == 85)
+    }
+
     // MARK: - Curve Shape Behavior
 
     @Test("Balanced ease-in curve: quiet at low temps, ramps harder at high")

@@ -69,21 +69,24 @@ struct MenuBarView: View {
                 }
             )) {
                 ForEach(FanProfile.builtIn) { profile in
+                    // When Extra Cool is on, show the effective (transformed)
+                    // thresholds so the row matches what the fans will do.
+                    let shown = appState.extraCool ? profile.extraCool() : profile
                     HStack {
                         Text(profile.name)
                         Spacer()
-                        if !profile.curve.handsOff {
+                        if !shown.curve.handsOff {
                             let unit = appState.useFahrenheit ? "F" : "C"
-                            if profile.curve.instantEngage {
+                            if shown.curve.instantEngage {
                                 // Max: show instant trigger temp
-                                let startC = profile.curve.startTemp
+                                let startC = shown.curve.startTemp
                                 let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
                                 Text("\(Int(startDisp))°\(unit) instant")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
-                                let startC = profile.curve.startTemp
-                                let ceilC = profile.curve.ceilingTemp
+                                let startC = shown.curve.startTemp
+                                let ceilC = shown.curve.ceilingTemp
                                 let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
                                 let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
                                 Text("\(Int(startDisp))→\(Int(ceilDisp))°\(unit)")
@@ -121,6 +124,8 @@ struct MenuBarView: View {
             Divider().padding(.vertical, 4)
 
             // Footer
+            Toggle("Extra Cool", isOn: $appState.extraCool)
+                .padding(.horizontal, 12)
             Toggle("°F / °C", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)

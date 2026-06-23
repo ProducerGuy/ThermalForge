@@ -214,18 +214,27 @@ struct Watch: ParsableCommand {
     @Flag(name: .long, help: "Output JSON on each update")
     var json: Bool = false
 
+    @Flag(name: .long, help: "Extra Cool: shift the curve colder and raise max fan (louder)")
+    var extraCool: Bool = false
+
     func run() throws {
         let profiles = FanProfile.builtIn
-        guard let selectedProfile = profiles.first(where: { $0.id == profile }) else {
+        guard let base = profiles.first(where: { $0.id == profile }) else {
             throw ValidationError(
                 "Unknown profile '\(profile)'. Options: \(profiles.map(\.id).joined(separator: ", "))"
             )
         }
+        let selectedProfile = extraCool ? base.extraCool() : base
 
         let fc = try FanControl()
         let monitor = ThermalMonitor(fanControl: fc, profile: selectedProfile)
 
-        print("ThermalForge watch — profile: \(selectedProfile.name)")
+        let label = extraCool ? "\(selectedProfile.name) (Extra Cool)" : selectedProfile.name
+        print("ThermalForge watch — profile: \(label)")
+        if !selectedProfile.curve.handsOff {
+            let cu = selectedProfile.curve
+            print("Curve: start \(Int(cu.startTemp))°C → ceiling \(Int(cu.ceilingTemp))°C, max \(Int(cu.maxRPMPercent * 100))%")
+        }
         print("Hardware: \(fc.hardwareInfo)")
         print("Polling every \(interval)s. Ctrl-C to stop.\n")
 
