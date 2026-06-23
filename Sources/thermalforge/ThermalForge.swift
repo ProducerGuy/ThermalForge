@@ -229,7 +229,12 @@ struct Watch: ParsableCommand {
         let fc = try FanControl()
         let monitor = ThermalMonitor(fanControl: fc, profile: selectedProfile)
 
-        print("ThermalForge watch — profile: \(selectedProfile.name)")
+        let label = extraCool ? "\(selectedProfile.name) (Extra Cool)" : selectedProfile.name
+        print("ThermalForge watch — profile: \(label)")
+        if !selectedProfile.curve.handsOff {
+            let cu = selectedProfile.curve
+            print("Curve: start \(Int(cu.startTemp))°C → ceiling \(Int(cu.ceilingTemp))°C, max \(Int(cu.maxRPMPercent * 100))%")
+        }
         print("Hardware: \(fc.hardwareInfo)")
         print("Polling every \(interval)s. Ctrl-C to stop.\n")
 

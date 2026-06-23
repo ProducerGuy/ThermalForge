@@ -277,30 +277,45 @@ extension FanProfile {
 // MARK: - Extra Cool
 
 extension FanProfile {
+    /// Tunable policy for the Extra Cool transform — centralized so the
+    /// colder/louder trade-off is reviewable in one place (and matches the
+    /// unit-test expectations).
+    private enum ExtraCoolPolicy {
+        static let startDrop: Float = 8       // engage this many °C sooner
+        static let stopDrop: Float = 8        // turn off this many °C sooner (keeps the hysteresis gap)
+        static let ceilingDrop: Float = 7     // reach full speed this many °C sooner
+        static let rpmBoost: Float = 0.20     // raise the RPM ceiling (clamped to 1.0)
+        static let triggerScale: Float = 0.5  // react in half the sustained-trigger time
+        static let rampUpScale: Float = 1.5   // ramp up faster
+        static let rampDownScale: Float = 2.0 // ramp down faster, so fans calm quickly after a spike
+        static let minStart: Float = 40       // floor for the start temp
+        static let minStop: Float = 35        // floor for the stop temp
+        static let minCeilingGap: Float = 5   // ceiling stays at least this far above start
+    }
+
     /// Returns a colder-but-louder variant of this profile.
     ///
     /// Fans engage sooner (lower start/stop), reach full speed at a lower
     /// temperature (lower ceiling), are allowed a higher ceiling RPM, react
-    /// faster (shorter sustained trigger), and ramp up quicker. Hysteresis gap
-    /// and curve shape are preserved. `Silent` is hands-off (Apple controls the
-    /// fans) so it is returned unchanged.
+    /// faster (shorter sustained trigger), and ramp up faster while ramping
+    /// down faster so they calm quickly. Hysteresis gap and curve shape are
+    /// preserved. `Silent` is hands-off (Apple controls the fans) so it is
+    /// returned unchanged.
     public func extraCool() -> FanProfile {
         guard !curve.handsOff else { return self }
 
-        // Note: `Swift.max`/`Swift.min` are qualified because `FanProfile.max`
+        // `Swift.max`/`Swift.min` are qualified because `FanProfile.max`
         // (the Max profile) shadows the free `max` function inside this type.
+        typealias P = ExtraCoolPolicy
         let c = curve
-        let coolStart = Swift.max(c.startTemp - 8, 40)
-        let coolStop  = Swift.max(c.stopTemp  - 8, 35)
-        // Ceiling eased to -7 (was -10) so it reaches full speed a touch later —
-        // colder than stock, but not slamming to max over a brief blip.
-        let coolCeil  = Swift.max(c.ceilingTemp - 7, coolStart + 5)
-        let louder    = Swift.min(c.maxRPMPercent + 0.20, 1.0)
-        let quicker   = Swift.max(c.sustainedTriggerSec * 0.5, 1)
-        let fasterUp  = Swift.min(c.rampUpPerSec * 1.5, 1.0)
-        // Ramp down twice as fast too, so fans calm quickly once temps drop
-        // instead of lingering loud after a spike.
-        let fasterDown = Swift.min(c.rampDownPerSec * 2.0, 1.0)
+        let coolStart = Swift.max(c.startTemp - P.startDrop, P.minStart)
+        let coolStop  = Swift.max(c.stopTemp - P.stopDrop, P.minStop)
+        // Keep the ceiling above the start temp so the proportional zone stays valid.
+        let coolCeil  = Swift.max(c.ceilingTemp - P.ceilingDrop, coolStart + P.minCeilingGap)
+        let louder    = Swift.min(c.maxRPMPercent + P.rpmBoost, 1.0)
+        let quicker   = Swift.max(c.sustainedTriggerSec * P.triggerScale, 1)
+        let fasterUp  = Swift.min(c.rampUpPerSec * P.rampUpScale, 1.0)
+        let fasterDown = Swift.min(c.rampDownPerSec * P.rampDownScale, 1.0)
 
         let cooled = Curve(
             stopTemp: coolStop, startTemp: coolStart, ceilingTemp: coolCeil,

@@ -18,7 +18,11 @@ final class AppState: ObservableObject {
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
-    /// Extra Cool: shift every active profile colder-but-louder. Persisted.
+    /// Extra Cool: a sticky modifier that shifts the active profile colder and
+    /// louder. The toggle is persisted; the *selected profile* deliberately is
+    /// not — the app always starts in Silent (hands-off) on launch for safety,
+    /// so a restored `true` here simply takes effect the moment a profile is
+    /// chosen.
     @Published var extraCool: Bool = UserDefaults.standard.bool(forKey: "extraCool") {
         didSet {
             UserDefaults.standard.set(extraCool, forKey: "extraCool")
@@ -124,14 +128,14 @@ final class AppState: ObservableObject {
         let cool = (extraCool && !base.curve.handsOff) ? " (Extra Cool)" : ""
         TFLogger.shared.profile("Selected: \(base.name)\(cool)")
 
-        // All profiles use proportional curves — tick() handles fan engagement.
-        // Reset to auto on profile change so tick() starts from a clean state.
+        // Reset the hardware to auto on every (re)apply. switchProfile() above
+        // resets the monitor's fan state to "off", so without this the daemon
+        // could keep the fans at a stale manual RPM while the monitor believes
+        // they are off — e.g. when toggling Extra Cool shifts the start
+        // threshold past the current temperature. tick() re-engages within one
+        // cycle, so the only cost is a brief return to Apple's curve.
         do {
-            if base.curve.handsOff || base.id == "smart" || base.id == "silent" {
-                try executor.execute(.resetAuto)
-            }
-            // Balanced/Performance/Max: tick() will ramp proportionally
-            // based on current temperature after sustained trigger is met
+            try executor.execute(.resetAuto)
         } catch {
             TFLogger.shared.error("Profile \(base.name) failed: \(error)")
         }
