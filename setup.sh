@@ -26,7 +26,7 @@ if [ ! -f ThermalForge.icns ]; then
 fi
 
 # Install CLI and daemon (handles stopping old daemon if present)
-sudo xattr -cr .build/release/thermalforge
+sudo xattr -c .build/release/thermalforge
 sudo .build/release/thermalforge install
 
 # Create .app bundle in /Applications so it shows in Spotlight/Finder
@@ -34,7 +34,7 @@ APP_DIR="/Applications/ThermalForge.app/Contents"
 sudo mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
 sudo cp .build/release/ThermalForgeApp "$APP_DIR/MacOS/ThermalForgeApp"
 sudo cp ThermalForge.icns "$APP_DIR/Resources/AppIcon.icns"
-sudo xattr -cr /Applications/ThermalForge.app
+sudo find /Applications/ThermalForge.app -exec xattr -c {} + 2>/dev/null || true
 
 sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
