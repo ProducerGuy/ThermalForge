@@ -1045,6 +1045,8 @@ struct SimpleMenuBarView: View {
             // Footer
             Toggle("Fahrenheit", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
+            Toggle("Cycle Menu Bar", isOn: $appState.menuBarCyclingEnabled)
+                .padding(.horizontal, 12)
             Toggle("Simple View", isOn: $simpleView)
                 .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)
