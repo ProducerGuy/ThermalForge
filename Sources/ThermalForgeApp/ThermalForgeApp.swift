@@ -2,18 +2,13 @@
 //  ThermalForgeApp.swift
 //  ThermalForge
 //
-//  Menu bar app for fan control on Apple Silicon MacBooks.
-//
 
 import SwiftUI
 import ThermalForgeCore
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
-
-        // Prevent duplicate instances
         let bundleID = Bundle.main.bundleIdentifier ?? "com.thermalforge.app"
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         if running.count > 1 {
@@ -23,7 +18,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Reset fans on quit so daemon doesn't hold stale manual settings
         let client = DaemonClient()
         try? client.execute(.resetAuto)
     }
@@ -39,7 +33,14 @@ struct ThermalForgeApp: App {
             MenuBarView()
                 .environmentObject(appState)
         } label: {
-            MenuBarLabel(state: appState.monitorState, maxTemp: appState.maxTemp, fahrenheit: appState.useFahrenheit)
+            MenuBarLabel(
+                state: appState.monitorState,
+                thermalPressure: appState.thermalPressure,
+                maxTemp: appState.maxTemp,
+                fahrenheit: appState.useFahrenheit,
+                cyclingEnabled: appState.menuBarCyclingEnabled,
+                cycleLabel: appState.menuBarLabel
+            )
         }
         .menuBarExtraStyle(.window)
     }
@@ -49,25 +50,49 @@ struct ThermalForgeApp: App {
 
 struct MenuBarLabel: View {
     let state: MonitorState
+    let thermalPressure: ThermalPressure
     let maxTemp: Float?
     var fahrenheit: Bool = false
+    var cyclingEnabled: Bool = false
+    var cycleLabel: String = ""
 
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: iconName)
-            if let tempC = maxTemp {
+                .foregroundStyle(iconColor)
+            if cyclingEnabled && !cycleLabel.isEmpty {
+                Text(cycleLabel)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(iconColor)
+            } else if let tempC = maxTemp {
                 let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
                 Text("\(Int(display))°")
                     .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(iconColor)
             }
         }
     }
 
     private var iconName: String {
         switch state {
-        case .safetyOverride: return "exclamationmark.triangle.fill"
-        case .active: return "fan.fill"
-        case .idle: return "fan"
+        case .safetyOverride:         return "exclamationmark.triangle.fill"
+        case .coolDown:               return "thermometer.medium"
+        case .active:                 return "fan.fill"
+        case .idle:                   return "fan"
+        }
+    }
+
+    private var iconColor: Color {
+        switch state {
+        case .safetyOverride: return .red
+        case .coolDown:       return .orange
+        case .active, .idle:
+            switch thermalPressure {
+            case .critical: return .red
+            case .serious:  return .orange
+            case .fair:     return .yellow
+            case .nominal:  return .primary
+            }
         }
     }
 }

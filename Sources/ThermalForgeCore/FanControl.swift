@@ -5,6 +5,7 @@
 //  Core fan control operations: unlock, set speed, reset, status, discover.
 //
 
+import Darwin
 import Foundation
 
 // MARK: - Types
@@ -41,9 +42,77 @@ public struct FanInfo {
     public let mode: String
 }
 
+/// Apple thermal pressure levels exposed via ProcessInfo.thermalState.
+/// Maps directly to ProcessInfo.ThermalState enum.
+public enum ThermalPressure: String, Codable, Equatable {
+    case nominal  = "nominal"
+    case fair     = "fair"
+    case serious  = "serious"
+    case critical = "critical"
+}
+
+/// System memory pressure levels from host_statistics64.
+public enum MemoryPressure: String, Codable, Equatable {
+    case normal   = "normal"
+    case warning  = "warning"
+    case critical = "critical"
+    case unknown  = "unknown"
+}
+
+public struct PowerDraw: Encodable {
+    /// System total package power (watts). SMC key PSTR.
+    public let packageWatts: Float?
+    /// CPU power draw (watts). SMC key PCPT.
+    public let cpuWatts: Float?
+    /// GPU power draw (watts). SMC key PCPG.
+    public let gpuWatts: Float?
+
+    public init(packageWatts: Float?, cpuWatts: Float?, gpuWatts: Float?) {
+        self.packageWatts = packageWatts
+        self.cpuWatts = cpuWatts
+        self.gpuWatts = gpuWatts
+    }
+}
+
 public struct ThermalStatus: Encodable {
     public let fans: [FanStatus]
     public let temperatures: [String: Float]
+    /// Package + CPU + GPU power draw in watts (nil if SMC keys unavailable)
+    public let power: PowerDraw
+    /// Apple thermal pressure state
+    public let thermalPressure: ThermalPressure
+    /// System memory pressure
+    public let memoryPressure: MemoryPressure
+    /// Memory used and total in GB
+    public let memoryUsedGB: Double
+    public let memoryTotalGB: Double
+    /// Ambient temperature (nil if not available) — used for Delta-T calculations
+    public let ambientTemp: Float?
+    /// GPU utilization % (nil if IOReport unavailable)
+    public let gpuPercent: Double?
+    /// Neural Engine utilization % (nil if IOReport unavailable)
+    public let anePercent: Double?
+
+    public init(fans: [FanStatus], temperatures: [String: Float],
+                power: PowerDraw = PowerDraw(packageWatts: nil, cpuWatts: nil, gpuWatts: nil),
+                thermalPressure: ThermalPressure = .nominal,
+                memoryPressure: MemoryPressure = .normal,
+                memoryUsedGB: Double = 0,
+                memoryTotalGB: Double = 0,
+                ambientTemp: Float? = nil,
+                gpuPercent: Double? = nil,
+                anePercent: Double? = nil) {
+        self.fans = fans
+        self.temperatures = temperatures
+        self.power = power
+        self.thermalPressure = thermalPressure
+        self.memoryPressure = memoryPressure
+        self.memoryUsedGB = memoryUsedGB
+        self.memoryTotalGB = memoryTotalGB
+        self.ambientTemp = ambientTemp
+        self.gpuPercent = gpuPercent
+        self.anePercent = anePercent
+    }
 
     public struct FanStatus: Encodable {
         public let index: Int
@@ -367,7 +436,96 @@ public final class FanControl {
             }
         }
 
-        return ThermalStatus(fans: fans, temperatures: temps)
+        // MARK: Power Draw (flt type, 4 bytes)
+        // PSTR = system package power, PCPT = CPU power, PCPG = GPU power
+        // Keys may be absent on older hardware — nil if not present.
+        let packageWatts = readPowerKey("PSTR")
+        let cpuWatts     = readPowerKey("PCPT")
+        let gpuWatts     = readPowerKey("PCPG")
+        let power = PowerDraw(packageWatts: packageWatts, cpuWatts: cpuWatts, gpuWatts: gpuWatts)
+
+        // MARK: Thermal Pressure
+        let thermalPressure = Self.currentThermalPressure()
+
+        // MARK: Memory Pressure + Usage
+        let (memoryPressure, memUsedGB, memTotalGB) = Self.currentMemoryStats()
+
+        // MARK: Ambient Temperature
+        let ambientTemp = temps["TAOL"] ?? temps["TA0P"]
+
+        // MARK: GPU + ANE utilization via IOReport
+        let usage = UsageMonitor.shared.sample()
+
+        return ThermalStatus(
+            fans: fans,
+            temperatures: temps,
+            power: power,
+            thermalPressure: thermalPressure,
+            memoryPressure: memoryPressure,
+            memoryUsedGB: memUsedGB,
+            memoryTotalGB: memTotalGB,
+            ambientTemp: ambientTemp,
+            gpuPercent: usage?.gpuPercent,
+            anePercent: usage?.anePercent
+        )
+    }
+
+    // MARK: - Power Key Reader
+
+    /// Read a 4-byte flt power key (watts). Returns nil if the key doesn't exist or reads zero.
+    private func readPowerKey(_ key: String) -> Float? {
+        let result = smc.readKey(key)
+        guard result.success && result.size == 4 else { return nil }
+        let watts = smcBytesToFloat(result.bytes, size: result.size)
+        guard watts > 0 && watts < 1000 else { return nil } // sanity range
+        return (watts * 10).rounded() / 10
+    }
+
+    // MARK: - System State
+
+    /// Apple thermal pressure from ProcessInfo.ThermalState.
+    private static func currentThermalPressure() -> ThermalPressure {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:  return .nominal
+        case .fair:     return .fair
+        case .serious:  return .serious
+        case .critical: return .critical
+        @unknown default: return .nominal
+        }
+    }
+
+    /// System memory pressure + used/total GB via host_statistics64.
+    /// Returns (pressure, usedGB, totalGB).
+    private static func currentMemoryStats() -> (MemoryPressure, Double, Double) {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return (.unknown, 0, 0) }
+
+        let pageSize = Double(vm_kernel_page_size)
+        let totalGB  = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+
+        // Used = wired + active + compressor (compressed pages count as used memory)
+        let usedPages = stats.wire_count + stats.active_count + stats.compressor_page_count
+        let usedGB = Double(usedPages) * pageSize / 1_073_741_824
+
+        let total = stats.wire_count + stats.active_count + stats.inactive_count
+                  + stats.free_count + stats.compressor_page_count
+        let pressure: MemoryPressure
+        if total > 0 {
+            let compressedRatio = Float(stats.compressor_page_count) / Float(total)
+            if compressedRatio > 0.90 { pressure = .critical }
+            else if compressedRatio > 0.70 { pressure = .warning }
+            else { pressure = .normal }
+        } else {
+            pressure = .normal
+        }
+
+        return (pressure, min(usedGB, totalGB), totalGB)
     }
 
     // MARK: - Discover
