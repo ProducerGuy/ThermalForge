@@ -22,12 +22,18 @@ let package = Package(
                 "ThermalForgeCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "Sources/thermalforge"
+            path: "Sources/thermalforge",
+            linkerSettings: [
+                .linkedFramework("Metal"),
+            ]
         ),
         .executableTarget(
             name: "ThermalForgeApp",
             dependencies: ["ThermalForgeCore"],
-            path: "Sources/ThermalForgeApp"
+            path: "Sources/ThermalForgeApp",
+            linkerSettings: [
+                .linkedFramework("UserNotifications"),
+            ]
         ),
         .testTarget(
             name: "ThermalForgeTests",

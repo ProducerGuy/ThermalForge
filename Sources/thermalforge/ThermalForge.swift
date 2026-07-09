@@ -7,6 +7,7 @@
 
 import ArgumentParser
 import Foundation
+import Metal
 import ThermalForgeCore
 
 @main
@@ -14,7 +15,7 @@ struct ThermalForge: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "thermalforge",
         abstract: "Fan control for Apple Silicon MacBooks",
-        version: "0.1.0",
+        version: "0.2.0",
         subcommands: [
             Max.self,
             Auto.self,
@@ -24,6 +25,7 @@ struct ThermalForge: ParsableCommand {
             Watch.self,
             Calibrate.self,
             Log.self,
+            Experiment.self,
             Install.self,
             Uninstall.self,
             Daemon.self,
@@ -261,6 +263,7 @@ struct Watch: ParsableCommand {
                 case .idle: stateLabel = "idle"
                 case .active(let name): stateLabel = name
                 case .safetyOverride: stateLabel = "SAFETY"
+                case .coolDown: stateLabel = "cool-down"
                 }
                 let timestamp = ISO8601DateFormatter().string(from: Date())
                 print("[\(timestamp)] CPU: \(String(format: "%.0f", cpuTemp))°C  GPU: \(String(format: "%.0f", gpuTemp))°C  Fan: \(fan0) RPM  [\(stateLabel)]")
@@ -613,5 +616,426 @@ struct Daemon: ParsableCommand {
         let fc = try FanControl()
         let server = try DaemonServer(fanControl: fc)
         server.run()
+    }
+}
+
+// MARK: - Experiment
+
+/// Controlled thermal experiment: run a workload at a fixed fan speed,
+/// record temps + power every second, and write a CSV + summary.
+///
+/// Usage:
+///   sudo thermalforge experiment --workload cpu --fan 75 --duration 5m --label "my-run"
+///   sudo thermalforge experiment --workload gpu --fan smart --duration 10m
+///   thermalforge experiment compare run-a run-b
+struct Experiment: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "experiment",
+        abstract: "Controlled thermal experiment with CSV output and comparison",
+        subcommands: [Run.self, Compare.self, List.self]
+    )
+
+    // MARK: Run
+
+    struct Run: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "run",
+            abstract: "Run a controlled thermal experiment"
+        )
+
+        @Option(name: .shortAndLong, help: "Workload: cpu | gpu | combined | idle")
+        var workload: String = "cpu"
+
+        @Option(name: .shortAndLong, help: "Fan: auto | max | 0-100 (percent of max RPM)")
+        var fan: String = "auto"
+
+        @Option(name: .shortAndLong, help: "Duration: 30s | 5m | 1h")
+        var duration: String = "5m"
+
+        @Option(name: .shortAndLong, help: "Human-readable label for this run")
+        var label: String = ""
+
+        @Flag(help: "Print each sample to stdout as it is recorded")
+        var verbose: Bool = false
+
+        mutating func run() throws {
+            let fc = try FanControl()
+            let runner = ExperimentRunner(fanControl: fc)
+
+            let durationSecs = parseDuration(duration)
+            guard durationSecs > 0 else {
+                print("Invalid duration '\(duration)'. Use: 30s, 5m, 1h")
+                throw ExitCode.failure
+            }
+
+            let runLabel = label.isEmpty ? "\(workload)-\(fan)-\(duration)" : label
+            let isVerbose = verbose
+
+            runner.onProgress = { msg in
+                if isVerbose { print(msg) }
+            }
+
+            print("Experiment: \(runLabel)")
+            print("  Workload : \(workload)")
+            print("  Fan      : \(fan)")
+            print("  Duration : \(durationSecs)s")
+            print("Starting in 3 seconds...")
+            Thread.sleep(forTimeInterval: 3)
+
+            let result = try runner.run(
+                workload: workload,
+                fanSetting: fan,
+                durationSecs: durationSecs,
+                label: runLabel
+            )
+
+            print("\nExperiment complete.")
+            print("  Output   : \(result.csvPath)")
+            print("  Samples  : \(result.sampleCount)")
+            print("  CPU peak : \(String(format: "%.1f", result.cpuPeak))°C")
+            print("  CPU mean : \(String(format: "%.1f", result.cpuMean))°C")
+            if result.throttleTimeSecs > 0 {
+                print("  Throttled: \(result.throttleTimeSecs)s")
+            }
+            print("  Run ID   : \(result.id)")
+        }
+
+        private func parseDuration(_ s: String) -> Int {
+            if s.hasSuffix("h"), let n = Int(s.dropLast()) { return n * 3600 }
+            if s.hasSuffix("m"), let n = Int(s.dropLast()) { return n * 60 }
+            if s.hasSuffix("s"), let n = Int(s.dropLast()) { return n }
+            return Int(s) ?? 0
+        }
+    }
+
+    // MARK: Compare
+
+    struct Compare: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "compare",
+            abstract: "Compare two experiment runs side by side"
+        )
+
+        @Argument(help: "First run ID or label")
+        var runA: String
+
+        @Argument(help: "Second run ID or label")
+        var runB: String
+
+        mutating func run() throws {
+            let store = ExperimentStore()
+            guard let a = store.load(idOrLabel: runA) else {
+                print("Run '\(runA)' not found. Use 'thermalforge experiment list'.")
+                throw ExitCode.failure
+            }
+            guard let b = store.load(idOrLabel: runB) else {
+                print("Run '\(runB)' not found. Use 'thermalforge experiment list'.")
+                throw ExitCode.failure
+            }
+
+            let width = 16
+            func row(_ name: String, _ va: String, _ vb: String) {
+                print("\(name.padding(toLength: 20, withPad: " ", startingAt: 0))"
+                    + "\(va.padding(toLength: width, withPad: " ", startingAt: 0))"
+                    + "\(vb)")
+            }
+
+            print("\nExperiment Comparison")
+            print(String(repeating: "-", count: 56))
+            row("",              a.label.prefix(14).description, b.label.prefix(14).description)
+            print(String(repeating: "-", count: 56))
+            row("Workload",      a.workload,         b.workload)
+            row("Fan setting",   a.fanSetting,       b.fanSetting)
+            row("Duration",      "\(a.durationSecs)s", "\(b.durationSecs)s")
+            row("Samples",       "\(a.sampleCount)", "\(b.sampleCount)")
+            row("CPU peak",      "\(String(format: "%.1f", a.cpuPeak))°C", "\(String(format: "%.1f", b.cpuPeak))°C")
+            row("CPU mean",      "\(String(format: "%.1f", a.cpuMean))°C", "\(String(format: "%.1f", b.cpuMean))°C")
+            row("CPU P95",       "\(String(format: "%.1f", a.cpuP95))°C",  "\(String(format: "%.1f", b.cpuP95))°C")
+            row("Fan peak",      "\(a.fanPeakRPM) RPM", "\(b.fanPeakRPM) RPM")
+            row("Throttle time", "\(a.throttleTimeSecs)s", "\(b.throttleTimeSecs)s")
+            row("Pkg power avg", a.pkgPowerMean.map { String(format: "%.1f W", $0) } ?? "n/a",
+                                 b.pkgPowerMean.map { String(format: "%.1f W", $0) } ?? "n/a")
+            print(String(repeating: "-", count: 56))
+
+            // Winner
+            if a.cpuMean < b.cpuMean - 0.5 {
+                print("Lower avg CPU temp: \(a.label) by \(String(format: "%.1f", b.cpuMean - a.cpuMean))°C")
+            } else if b.cpuMean < a.cpuMean - 0.5 {
+                print("Lower avg CPU temp: \(b.label) by \(String(format: "%.1f", a.cpuMean - b.cpuMean))°C")
+            } else {
+                print("CPU temperatures within 0.5°C — no significant difference.")
+            }
+            print("")
+        }
+    }
+
+    // MARK: List
+
+    struct List: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "list",
+            abstract: "List all saved experiment runs"
+        )
+
+        mutating func run() throws {
+            let runs = ExperimentStore().all()
+            if runs.isEmpty {
+                print("No experiments saved. Run: thermalforge experiment run")
+                return
+            }
+            print(String(format: "%-20s %-10s %-6s %-8s %-8s %s",
+                         "Label", "Workload", "Fan", "CPU peak", "Throttle", "Date"))
+            print(String(repeating: "-", count: 72))
+            for r in runs.sorted(by: { $0.date < $1.date }) {
+                print(String(format: "%-20s %-10s %-6s %-8s %-8s %s",
+                    r.label.prefix(19).description,
+                    r.workload.prefix(9).description,
+                    r.fanSetting.prefix(5).description,
+                    "\(String(format: "%.1f", r.cpuPeak))°C",
+                    "\(r.throttleTimeSecs)s",
+                    r.date.prefix(10).description))
+            }
+        }
+    }
+}
+
+// MARK: - ExperimentResult
+
+public struct ExperimentResult: Codable {
+    public let id: String
+    public let label: String
+    public let workload: String
+    public let fanSetting: String
+    public let durationSecs: Int
+    public let sampleCount: Int
+    public let cpuPeak: Float
+    public let cpuMean: Float
+    public let cpuP95: Float
+    public let fanPeakRPM: Int
+    public let throttleTimeSecs: Int
+    public let pkgPowerMean: Float?
+    public let csvPath: String
+    public let date: String
+}
+
+// MARK: - ExperimentStore
+
+public final class ExperimentStore {
+    private let dir: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/ThermalForge/experiments")
+
+    public func save(_ result: ExperimentResult) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        if let data = try? encoder.encode(result) {
+            try? data.write(to: dir.appendingPathComponent("\(result.id).json"))
+        }
+    }
+
+    public func all() -> [ExperimentResult] {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [] }
+        return files.filter { $0.pathExtension == "json" }
+            .compactMap { try? JSONDecoder().decode(ExperimentResult.self, from: Data(contentsOf: $0)) }
+    }
+
+    public func load(idOrLabel: String) -> ExperimentResult? {
+        all().first { $0.id == idOrLabel || $0.label == idOrLabel }
+    }
+}
+
+// MARK: - ExperimentRunner
+
+public final class ExperimentRunner {
+    private let fanControl: FanControl
+    public var onProgress: ((String) -> Void)?
+
+    public init(fanControl: FanControl) {
+        self.fanControl = fanControl
+    }
+
+    public func run(workload: String, fanSetting: String, durationSecs: Int, label: String) throws -> ExperimentResult {
+        let id = UUID().uuidString.prefix(8).lowercased().description
+        let isoFmt = ISO8601DateFormatter()
+        let date = isoFmt.string(from: Date())
+
+        // Set up CSV
+        let store = ExperimentStore()
+        let csvDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ThermalForge/experiments")
+        try FileManager.default.createDirectory(at: csvDir, withIntermediateDirectories: true)
+        let csvURL = csvDir.appendingPathComponent("\(id)_\(label).csv")
+        FileManager.default.createFile(atPath: csvURL.path, contents: nil)
+        let csvHandle = try FileHandle(forWritingTo: csvURL)
+        defer { csvHandle.closeFile() }
+
+        func csvWrite(_ line: String) {
+            csvHandle.write((line + "\n").data(using: .utf8)!)
+        }
+        csvWrite("timestamp,cpu_temp,gpu_temp,fan0_rpm,pkg_watts,thermal_state")
+
+        // Apply fan setting
+        switch fanSetting.lowercased() {
+        case "max":
+            try fanControl.setMax()
+        case "auto":
+            try fanControl.resetAuto()
+        default:
+            if let pct = Float(fanSetting), pct >= 0, pct <= 100 {
+                let fan0 = try fanControl.fanInfo(0)
+                let rpm = fan0.minRPM + (fan0.maxRPM - fan0.minRPM) * (pct / 100)
+                try fanControl.setAllFans(rpm: rpm)
+            }
+        }
+
+        // Start workload
+        let stresser = WorkloadStresser(type: workload)
+        stresser.start()
+        defer {
+            stresser.stop()
+            try? fanControl.resetAuto()
+        }
+
+        // 5s warmup
+        onProgress?("Warming up (5s)...")
+        Thread.sleep(forTimeInterval: 5)
+
+        // Sample loop
+        var cpuTemps: [Float] = []
+        var fanPeakRPM = 0
+        var throttleSecs = 0
+        var pkgWatts: [Float] = []
+
+        onProgress?("Recording for \(durationSecs)s...")
+        let deadline = Date().addingTimeInterval(TimeInterval(durationSecs))
+
+        while Date() < deadline {
+            let ts = isoFmt.string(from: Date())
+            guard let status = try? fanControl.status() else {
+                Thread.sleep(forTimeInterval: 1)
+                continue
+            }
+            let cpu = status.temperatures.filter { k, _ in k.hasPrefix("TC") || k.hasPrefix("Tp") }.values.max() ?? 0
+            let gpu = status.temperatures.filter { k, _ in k.hasPrefix("TG") || k.hasPrefix("Tg") }.values.max() ?? 0
+            let fan0rpm = status.fans.first?.actualRPM ?? 0
+            let pkgW = status.power.packageWatts ?? 0
+
+            cpuTemps.append(cpu)
+            if fan0rpm > fanPeakRPM { fanPeakRPM = fan0rpm }
+            if status.thermalPressure == .serious || status.thermalPressure == .critical { throttleSecs += 1 }
+            if pkgW > 0 { pkgWatts.append(pkgW) }
+
+            csvWrite("\(ts),\(String(format: "%.1f", cpu)),\(String(format: "%.1f", gpu)),\(fan0rpm),\(String(format: "%.1f", pkgW)),\(status.thermalPressure.rawValue)")
+
+            Thread.sleep(forTimeInterval: 1)
+        }
+
+        // Stats
+        let cpuPeak = cpuTemps.max() ?? 0
+        let cpuMean = cpuTemps.isEmpty ? 0 : cpuTemps.reduce(0, +) / Float(cpuTemps.count)
+        let sorted  = cpuTemps.sorted()
+        let p95idx  = max(0, Int(Float(sorted.count) * 0.95) - 1)
+        let cpuP95  = sorted.isEmpty ? 0 : sorted[p95idx]
+        let pkgMean: Float? = pkgWatts.isEmpty ? nil : pkgWatts.reduce(0, +) / Float(pkgWatts.count)
+
+        let result = ExperimentResult(
+            id: id,
+            label: label,
+            workload: workload,
+            fanSetting: fanSetting,
+            durationSecs: durationSecs,
+            sampleCount: cpuTemps.count,
+            cpuPeak: cpuPeak,
+            cpuMean: cpuMean,
+            cpuP95: cpuP95,
+            fanPeakRPM: fanPeakRPM,
+            throttleTimeSecs: throttleSecs,
+            pkgPowerMean: pkgMean,
+            csvPath: csvURL.path,
+            date: date
+        )
+
+        store.save(result)
+        return result
+    }
+}
+
+// MARK: - WorkloadStresser (reuses CalibrationRunner stress logic)
+
+private final class WorkloadStresser {
+    private let type: String
+    private var threads: [Thread] = []
+    private var running = false
+
+    init(type: String) { self.type = type }
+
+    func start() {
+        running = true
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let doCPU = (type == "cpu" || type == "combined")
+        let doGPU = (type == "gpu" || type == "combined")
+
+        if doCPU {
+            for _ in 0..<cores {
+                let t = Thread { [weak self] in
+                    while self?.running == true {
+                        var x: Double = 1.0
+                        for i in 1...10000 { x = sin(x) * cos(Double(i)) }
+                        _ = x
+                    }
+                }
+                t.qualityOfService = .userInteractive
+                t.start()
+                threads.append(t)
+            }
+        }
+
+        if doGPU {
+            // Use Metal if available — otherwise CPU-only
+            startGPUStress()
+        }
+    }
+
+    private func startGPUStress() {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let src = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void stress(device float *d [[buffer(0)]], uint id [[thread_position_in_grid]]) {
+            float x = d[id];
+            for (int i = 0; i < 2000; i++) { x = sin(x)*cos(x)+tan(x*0.01f); x = sqrt(abs(x)+1.0f); }
+            d[id] = x;
+        }
+        """
+        guard let lib = try? device.makeLibrary(source: src, options: nil),
+              let fn  = lib.makeFunction(name: "stress"),
+              let pip = try? device.makeComputePipelineState(function: fn),
+              let queue = device.makeCommandQueue() else { return }
+
+        let count = 1024 * 1024 * 4
+        guard let buf = device.makeBuffer(length: count * 4, options: .storageModeShared) else { return }
+
+        let t = Thread { [weak self] in
+            while self?.running == true {
+                guard let cb = queue.makeCommandBuffer(),
+                      let enc = cb.makeComputeCommandEncoder() else { continue }
+                enc.setComputePipelineState(pip)
+                enc.setBuffer(buf, offset: 0, index: 0)
+                let tgSize = MTLSize(width: pip.maxTotalThreadsPerThreadgroup, height: 1, depth: 1)
+                enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: tgSize)
+                enc.endEncoding()
+                cb.commit()
+                cb.waitUntilCompleted()
+            }
+        }
+        t.qualityOfService = .userInteractive
+        t.start()
+        threads.append(t)
+    }
+
+    func stop() {
+        running = false
+        Thread.sleep(forTimeInterval: 1)
+        threads.removeAll()
     }
 }
