@@ -99,15 +99,44 @@ public final class DaemonClient {
         return response
     }
 
-    /// Send a FanCommand to the daemon
-    public func execute(_ command: FanCommand) throws {
+    /// Send a FanCommand to the daemon.
+    ///
+    /// `supervised` controls the daemon's heartbeat watchdog:
+    /// - `true` (default): the daemon arms the watchdog, so the caller must
+    ///   keep sending `heartbeat` (the menu bar app does). If it dies, fans
+    ///   revert to auto after ~15s. Use for long-lived owners.
+    /// - `false`: an unsupervised, fire-and-forget hold that persists after the
+    ///   caller exits. Use for one-shot CLI commands (`thermalforge max`/`set`).
+    ///
+    /// `resetAuto` is never watchdog-supervised, so `supervised` is ignored for it.
+    public func execute(_ command: FanCommand, supervised: Bool = true) throws {
+        let suffix = supervised ? "" : " nohb"
         let cmdString: String
         switch command {
-        case .setMax: cmdString = "max"
-        case .setRPM(let rpm): cmdString = "set \(Int(rpm))"
+        case .setMax: cmdString = "max" + suffix
+        case .setRPM(let rpm): cmdString = "set \(Int(rpm))" + suffix
         case .resetAuto: cmdString = "auto"
         }
         _ = try send(cmdString)
+    }
+}
+
+// MARK: - Command Router
+
+/// Applies a `FanCommand` through the best available transport: the privileged
+/// daemon when it's running (no sudo needed, coordinates with the menu bar app),
+/// or a direct SMC write otherwise (requires root). This is what lets the CLI
+/// work both with and without an installed daemon.
+public enum FanCommandRouter {
+    /// - Parameter supervised: forwarded to `DaemonClient.execute` when the
+    ///   daemon path is taken; ignored for the direct-SMC fallback. Defaults to
+    ///   `false` because the callers are one-shot commands that set fans and exit.
+    public static func apply(_ command: FanCommand, supervised: Bool = false) throws {
+        if ThermalForgeDaemon.isRunning {
+            try DaemonClient().execute(command, supervised: supervised)
+        } else {
+            try FanControl().apply(command)
+        }
     }
 }
 
@@ -311,13 +340,20 @@ public final class DaemonServer {
         smcLock.lock()
         defer { smcLock.unlock() }
         do {
-            let parts = command.split(separator: " ")
-            switch parts.first.map(String.init) {
+            // A trailing "nohb" token marks an unsupervised hold: set fans but
+            // leave the watchdog disarmed (lastHeartbeat = nil, not stale), so a
+            // fire-and-forget CLI command isn't reverted to auto 15s later. The
+            // menu bar app omits "nohb" and stays supervised / crash-protected.
+            var parts = command.split(separator: " ").map(String.init)
+            let unsupervised = parts.last == "nohb"
+            if unsupervised { parts.removeLast() }
+
+            switch parts.first {
             case "max":
                 try fanControl.setMax()
                 heartbeatLock.lock()
                 lastCommand = "max"
-                lastHeartbeat = Date()
+                lastHeartbeat = unsupervised ? nil : Date()
                 heartbeatLock.unlock()
                 response = "ok"
             case "auto":
@@ -334,8 +370,8 @@ public final class DaemonServer {
                 }
                 try fanControl.setAllFans(rpm: rpm)
                 heartbeatLock.lock()
-                lastCommand = command
-                lastHeartbeat = Date()
+                lastCommand = "set \(parts[1])"
+                lastHeartbeat = unsupervised ? nil : Date()
                 heartbeatLock.unlock()
                 response = "ok"
             case "status":

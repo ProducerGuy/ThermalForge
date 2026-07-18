@@ -40,10 +40,10 @@ struct Max: ParsableCommand {
     )
 
     func run() throws {
-        let fc = try FanControl()
-        try fc.setMax()
+        try FanCommandRouter.apply(.setMax)
 
-        let status = try fc.status()
+        // Reading status needs no privilege, so report it regardless of path.
+        let status = try FanControl().status()
         for fan in status.fans {
             print("Fan \(fan.index): \(fan.actualRPM) RPM → max (\(fan.maxRPM) RPM)")
         }
@@ -80,8 +80,7 @@ struct Auto: ParsableCommand {
             kill.waitUntilExit()
         }
 
-        let fc = try FanControl()
-        try fc.resetAuto()
+        try FanCommandRouter.apply(.resetAuto)
         print("Fans reset to Apple defaults")
     }
 }
@@ -101,15 +100,16 @@ struct SetSpeed: ParsableCommand {
     var fan: Int?
 
     func run() throws {
-        let fc = try FanControl()
         let target = Float(rpm)
 
+        // Per-fan control isn't exposed over the daemon socket (it only sets
+        // all fans), so a single-fan request still needs direct SMC access.
         if let index = fan {
-            try fc.setSpeed(fan: index, rpm: target)
+            try FanControl().setSpeed(fan: index, rpm: target)
             print("Fan \(index) → \(rpm) RPM")
         } else {
-            try fc.setAllFans(rpm: target)
-            let count = try fc.fanCount()
+            try FanCommandRouter.apply(.setRPM(target))
+            let count = try FanControl().fanCount()
             for i in 0..<count {
                 print("Fan \(i) → \(rpm) RPM")
             }
@@ -242,14 +242,8 @@ struct Watch: ParsableCommand {
         print("Hardware: \(fc.hardwareInfo)")
         print("Polling every \(interval)s. Ctrl-C to stop.\n")
 
-        // CLI runs as root, so fan commands go directly through FanControl
-        monitor.onFanCommand = { command in
-            switch command {
-            case .setMax: try fc.setMax()
-            case .setRPM(let rpm): try fc.setAllFans(rpm: rpm)
-            case .resetAuto: try fc.resetAuto()
-            }
-        }
+        // CLI runs as root, so fan commands go directly through FanControl.
+        monitor.onFanCommand = { command in try fc.apply(command) }
 
         monitor.onUpdate = { [json] status, activeProfile, state in
             if json {
