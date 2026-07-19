@@ -294,6 +294,18 @@ public final class FanControl {
         log("Reset to Apple defaults")
     }
 
+    // MARK: - Command Dispatch
+
+    /// Apply a high-level `FanCommand` with direct SMC writes (requires root).
+    /// The daemon-aware equivalent is `FanCommandRouter.apply(_:supervised:)`.
+    public func apply(_ command: FanCommand) throws {
+        switch command {
+        case .setMax: try setMax()
+        case .setRPM(let rpm): try setAllFans(rpm: rpm)
+        case .resetAuto: try resetAuto()
+        }
+    }
+
     // MARK: - Status
 
     /// Read current fan speeds and temperatures
