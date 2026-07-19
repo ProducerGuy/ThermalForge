@@ -487,14 +487,41 @@ struct Install: ParsableCommand {
         let binaryPath = ProcessInfo.processInfo.arguments[0]
         let installPath = ThermalForgeDaemon.installPath
 
-        // Copy binary to /usr/local/bin
         let fm = FileManager.default
         try? fm.createDirectory(
             atPath: "/usr/local/bin",
             withIntermediateDirectories: true
         )
-        try? fm.removeItem(atPath: installPath)
-        try fm.copyItem(atPath: binaryPath, toPath: installPath)
+
+        // argv[0] may itself be the installed binary, so source and target
+        // can be the same file: only copy when they differ, and never remove
+        // the target until a complete replacement sits next to it — the
+        // existing install must survive any failure in this sequence.
+        let sourceFile = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath().path
+        let targetFile = URL(fileURLWithPath: installPath).resolvingSymlinksInPath().path
+        var stagedPath: String?
+        if sourceFile != targetFile {
+            let staging = installPath + ".new"
+            try? fm.removeItem(atPath: staging)
+            try fm.copyItem(atPath: binaryPath, toPath: staging)
+            stagedPath = staging
+        }
+
+        // Stop the old daemon before the binary is swapped, so a daemon never
+        // keeps running from a deleted inode after a partial install.
+        if ThermalForgeDaemon.isRunning {
+            let unload = Process()
+            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+            try unload.run()
+            unload.waitUntilExit()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        if let staging = stagedPath {
+            try? fm.removeItem(atPath: installPath)
+            try fm.moveItem(atPath: staging, toPath: installPath)
+        }
 
         // Write launchd plist
         let plist = """
@@ -521,15 +548,6 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        // Stop old daemon if one is running
-        if ThermalForgeDaemon.isRunning {
-            let unload = Process()
-            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-            try unload.run()
-            unload.waitUntilExit()
-            Thread.sleep(forTimeInterval: 0.5)
-        }
 
         // Start new daemon
         let load = Process()
