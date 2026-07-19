@@ -58,14 +58,27 @@ struct Auto: ParsableCommand {
         abstract: "Reset fans to Apple defaults"
     )
 
+    @Flag(
+        name: .long,
+        help: """
+            Also quit the ThermalForge menu bar app after the reset so a running \
+            profile can't re-apply and undo it. Off by default; `auto` only \
+            touches the fans.
+            """
+    )
+    var stopApp: Bool = false
+
     func run() throws {
-        // Kill the menu bar app first — if it's running with a profile active,
-        // it will override the fan reset within seconds
-        let kill = Process()
-        kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        kill.arguments = ["ThermalForgeApp"]
-        try? kill.run()
-        kill.waitUntilExit()
+        // A running app re-applies its profile after a reset, so making the
+        // reset "stick" requires quitting it. That is a heavy side effect,
+        // kept opt-in so `auto` stays a pure fan reset for any caller.
+        if stopApp {
+            let kill = Process()
+            kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            kill.arguments = ["ThermalForgeApp"]
+            try? kill.run()
+            kill.waitUntilExit()
+        }
 
         let fc = try FanControl()
         try fc.resetAuto()
