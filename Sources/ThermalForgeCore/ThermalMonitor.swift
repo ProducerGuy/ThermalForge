@@ -17,7 +17,24 @@ import Foundation
 public enum FanCommand: Equatable {
     case setMax
     case setRPM(Float)
+    case setFan(index: Int, rpm: Float)
     case resetAuto
+
+    /// A hold keeps fans at a manual setting (so an unsupervised one-shot could
+    /// be reverted by the watchdog); resetAuto hands control back and isn't held.
+    public var isHold: Bool {
+        switch self {
+        case .setMax, .setRPM, .setFan: return true
+        case .resetAuto: return false
+        }
+    }
+
+    /// Per-fan commands need the 0.1.5 `setfan` socket verb; older daemons
+    /// reject them, so the router must version-gate and fall back to direct SMC.
+    public var isPerFan: Bool {
+        if case .setFan = self { return true }
+        return false
+    }
 }
 
 // MARK: - Monitor State

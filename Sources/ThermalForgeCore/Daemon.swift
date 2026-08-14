@@ -109,12 +109,19 @@ public final class DaemonClient {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    /// Send a FanCommand to the daemon
-    public func execute(_ command: FanCommand) throws {
+    /// Send a FanCommand to the daemon.
+    /// - oneshot: append the `oneshot` token so the daemon applies the command
+    ///   but does NOT arm its heartbeat watchdog — for fire-and-forget CLI holds
+    ///   that must persist without a supervising process. The menu bar app leaves
+    ///   this false so it stays supervised/crash-protected. No effect on
+    ///   resetAuto (nothing to hold).
+    public func execute(_ command: FanCommand, oneshot: Bool = false) throws {
+        let token = (oneshot && command.isHold) ? " oneshot" : ""
         let cmdString: String
         switch command {
-        case .setMax: cmdString = "max"
-        case .setRPM(let rpm): cmdString = "set \(Int(rpm))"
+        case .setMax: cmdString = "max" + token
+        case .setRPM(let rpm): cmdString = "set \(Int(rpm))" + token
+        case .setFan(let index, let rpm): cmdString = "setfan \(index) \(Int(rpm))" + token
         case .resetAuto: cmdString = "auto"
         }
         _ = try send(cmdString)
@@ -297,6 +304,11 @@ public final class DaemonServer {
                     if let rpm = parts.dropFirst().first.flatMap({ Float($0) }) {
                         try fanControl.setAllFans(rpm: rpm)
                     }
+                case "setfan":
+                    let args = Array(parts.dropFirst())
+                    if args.count >= 2, let index = Int(args[0]), let rpm = Float(args[1]) {
+                        try fanControl.setSpeed(fan: index, rpm: rpm)
+                    }
                 default:
                     break
                 }
@@ -322,12 +334,17 @@ public final class DaemonServer {
         defer { smcLock.unlock() }
         do {
             let parts = command.split(separator: " ")
+            // `oneshot` token (0.1.5+): apply the command but leave the watchdog
+            // disarmed, so a fire-and-forget CLI hold persists instead of being
+            // reverted after 15s. Old daemons never see this branch — they just
+            // ignore the trailing token.
+            let oneshot = parts.contains("oneshot")
             switch parts.first.map(String.init) {
             case "max":
                 try fanControl.setMax()
                 heartbeatLock.lock()
                 lastCommand = "max"
-                lastHeartbeat = Date()
+                lastHeartbeat = oneshot ? nil : Date()
                 heartbeatLock.unlock()
                 response = "ok"
             case "auto":
@@ -344,8 +361,19 @@ public final class DaemonServer {
                 }
                 try fanControl.setAllFans(rpm: rpm)
                 heartbeatLock.lock()
-                lastCommand = command
-                lastHeartbeat = Date()
+                lastCommand = "set \(Int(rpm))"
+                lastHeartbeat = oneshot ? nil : Date()
+                heartbeatLock.unlock()
+                response = "ok"
+            case "setfan":
+                guard parts.count >= 3, let index = Int(parts[1]), let rpm = Float(parts[2]) else {
+                    response = "error: usage: setfan <index> <rpm>"
+                    break
+                }
+                try fanControl.setSpeed(fan: index, rpm: rpm)
+                heartbeatLock.lock()
+                lastCommand = "setfan \(index) \(Int(rpm))"
+                lastHeartbeat = oneshot ? nil : Date()
                 heartbeatLock.unlock()
                 response = "ok"
             case "status":

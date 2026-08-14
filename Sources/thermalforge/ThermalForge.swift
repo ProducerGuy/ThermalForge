@@ -60,6 +60,46 @@ func warnIfDaemonVersionMismatch() {
     FileHandle.standardError.write(Data(message.utf8))
 }
 
+/// Emit the single stderr warning (never silent, never doubled) for a routed
+/// fan command: the specific consequence when the daemon is too old to do what
+/// was asked, or a plain version-mismatch nudge when it routed fine but is a
+/// different build. The router already did the one version query this needs.
+func reportRoute(_ route: FanRoute) {
+    let message: String
+    switch route {
+    case .direct:
+        return
+    case .daemon(let version):
+        // Routed and honored. Warn only if the daemon is a different build than
+        // this CLI — the command worked, but the menu bar app may differ.
+        let daemonVersion = version ?? "an older build"
+        guard daemonVersion != ThermalForgeVersion.current else { return }
+        message = """
+            ⚠️  Version mismatch: the background daemon is running \(daemonVersion), \
+            but this CLI is \(ThermalForgeVersion.current).
+                The command was applied, but the menu bar app may not behave like \
+            the command line until you re-sync.
+                Fix it with one command:  sudo thermalforge install
+
+            """
+    case .daemonHoldWillRevert(let version):
+        message = """
+            ⚠️  The background daemon (\(version)) is too old to hold this without \
+            supervision — it will revert to auto in about 15 seconds.
+                Re-sync to make holds stick:  sudo thermalforge install
+
+            """
+    case .directOldDaemon(let version):
+        message = """
+            ⚠️  The background daemon (\(version)) is too old to route per-fan \
+            commands, so this used a direct hardware write (which needs sudo).
+                Re-sync to drop the sudo requirement:  sudo thermalforge install
+
+            """
+    }
+    FileHandle.standardError.write(Data(message.utf8))
+}
+
 // MARK: - Max
 
 struct Max: ParsableCommand {
@@ -69,13 +109,17 @@ struct Max: ParsableCommand {
     )
 
     func run() throws {
-        warnIfDaemonVersionMismatch()
-        let fc = try FanControl()
-        try fc.setMax()
+        // Route through the daemon (no sudo) when it's running; oneshot so a
+        // fire-and-forget max hold isn't reverted by the watchdog. The router
+        // handles the version query and reportRoute the single mismatch warning.
+        let route = try FanCommandRouter.apply(.setMax, oneshot: true)
+        reportRoute(route)
 
-        let status = try fc.status()
-        for fan in status.fans {
-            print("Fan \(fan.index): \(fan.actualRPM) RPM → max (\(fan.maxRPM) RPM)")
+        // Status readout is a read — works without root regardless of route.
+        if let fc = try? FanControl(), let status = try? fc.status() {
+            for fan in status.fans {
+                print("Fan \(fan.index): \(fan.actualRPM) RPM → max (\(fan.maxRPM) RPM)")
+            }
         }
     }
 }
@@ -98,8 +142,6 @@ struct Auto: ParsableCommand {
     var stopApp: Bool = false
 
     func run() throws {
-        warnIfDaemonVersionMismatch()
-
         // Only quit the menu bar app when explicitly asked. A plain fan reset must
         // not close the user's app as a side effect — callers that shell out to
         // restore fans (scripts, benchmark harnesses) would otherwise silently
@@ -113,8 +155,10 @@ struct Auto: ParsableCommand {
             kill.waitUntilExit()
         }
 
-        let fc = try FanControl()
-        try fc.resetAuto()
+        // Route through the daemon (coordinates its state, no sudo) when running;
+        // resetAuto isn't a hold, so oneshot doesn't apply.
+        let route = try FanCommandRouter.apply(.resetAuto, oneshot: false)
+        reportRoute(route)
         print(stopApp
             ? "Menu bar app stopped; fans reset to Apple defaults"
             : "Fans reset to Apple defaults")
@@ -136,18 +180,23 @@ struct SetSpeed: ParsableCommand {
     var fan: Int?
 
     func run() throws {
-        warnIfDaemonVersionMismatch()
-        let fc = try FanControl()
         let target = Float(rpm)
 
         if let index = fan {
-            try fc.setSpeed(fan: index, rpm: target)
+            // Per-fan now routes through the daemon too (0.1.5 `setfan`); older
+            // daemons fall back to direct SMC, which reportRoute flags.
+            let route = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
+            reportRoute(route)
             print("Fan \(index) → \(rpm) RPM")
         } else {
-            try fc.setAllFans(rpm: target)
-            let count = try fc.fanCount()
-            for i in 0..<count {
-                print("Fan \(i) → \(rpm) RPM")
+            let route = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
+            reportRoute(route)
+            if let fc = try? FanControl(), let count = try? fc.fanCount() {
+                for i in 0..<count {
+                    print("Fan \(i) → \(rpm) RPM")
+                }
+            } else {
+                print("All fans → \(rpm) RPM")
             }
         }
     }
@@ -284,6 +333,7 @@ struct Watch: ParsableCommand {
             switch command {
             case .setMax: try fc.setMax()
             case .setRPM(let rpm): try fc.setAllFans(rpm: rpm)
+            case .setFan(let index, let rpm): try fc.setSpeed(fan: index, rpm: rpm)
             case .resetAuto: try fc.resetAuto()
             }
         }
