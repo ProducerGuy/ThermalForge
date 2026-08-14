@@ -59,8 +59,26 @@ public enum DaemonError: Error, CustomStringConvertible {
 public final class DaemonClient {
     public init() {}
 
-    /// Send a command to the daemon and return the response
+    /// Send a command to the daemon and return the response, throwing
+    /// `commandFailed` on an "error:" reply. Use this when an error reply means
+    /// the command genuinely failed.
     public func send(_ command: String) throws -> String {
+        let response = try sendRaw(command)
+        if response.hasPrefix("error:") {
+            throw DaemonError.commandFailed(
+                String(response.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            )
+        }
+        return response
+    }
+
+    /// Send a command and return the raw response WITHOUT throwing on an
+    /// "error:" reply. Needed for version reconciliation: a daemon that predates
+    /// the `version` command replies with the literal string
+    /// "error: unknown command 'version'" (a normal response, not a dropped
+    /// connection), and the caller must see that string to recognize the daemon
+    /// as stale rather than mistake the error text for a version number.
+    public func sendRaw(_ command: String) throws -> String {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
@@ -87,16 +105,8 @@ public final class DaemonClient {
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { throw DaemonError.connectionFailed }
 
-        let response = String(bytes: buffer[0..<n], encoding: .utf8)?
+        return String(bytes: buffer[0..<n], encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if response.hasPrefix("error:") {
-            throw DaemonError.commandFailed(
-                String(response.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            )
-        }
-
-        return response
     }
 
     /// Send a FanCommand to the daemon
@@ -349,6 +359,10 @@ public final class DaemonServer {
                 lastHeartbeat = Date()
                 heartbeatLock.unlock()
                 response = "ok"
+            case "version":
+                // Reports the build this daemon process is running, so a CLI from
+                // a newer install can detect it's talking to a stale daemon.
+                response = ThermalForgeVersion.current
             default:
                 response = "error: unknown command '\(command)'"
             }

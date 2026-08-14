@@ -39,7 +39,12 @@ struct ThermalForgeApp: App {
             MenuBarView()
                 .environmentObject(appState)
         } label: {
-            MenuBarLabel(state: appState.monitorState, maxTemp: appState.maxTemp, fahrenheit: appState.useFahrenheit)
+            MenuBarLabel(
+                state: appState.monitorState,
+                maxTemp: appState.maxTemp,
+                fahrenheit: appState.useFahrenheit,
+                needsDaemonUpdate: appState.daemonVersionMismatch != nil
+            )
         }
         .menuBarExtraStyle(.window)
     }
@@ -51,10 +56,21 @@ struct MenuBarLabel: View {
     let state: MonitorState
     let maxTemp: Float?
     var fahrenheit: Bool = false
+    var needsDaemonUpdate: Bool = false
 
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: iconName)
+                .overlay(alignment: .topTrailing) {
+                    // Small dot when the daemon is out of sync — visible without
+                    // opening the menu, for users who never touch the CLI.
+                    if needsDaemonUpdate {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 5, height: 5)
+                            .offset(x: 3, y: -2)
+                    }
+                }
             if let tempC = maxTemp {
                 let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
                 Text("\(Int(display))°")

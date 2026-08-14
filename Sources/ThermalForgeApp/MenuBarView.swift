@@ -26,6 +26,13 @@ struct MenuBarView: View {
 
             Divider()
 
+            // Update-needed banner — shown whenever the daemon is out of sync.
+            // Persistent (no dismiss): a stale daemon should keep nagging.
+            if let daemonVersion = appState.daemonVersionMismatch {
+                DaemonUpdateBanner(daemonVersion: daemonVersion)
+                Divider()
+            }
+
             // Fan speeds
             if let status = appState.latestStatus {
                 SectionHeader(title: "FANS")
@@ -166,6 +173,41 @@ struct MenuBarView: View {
 }
 
 // MARK: - Subviews
+
+/// Non-modal in-menu banner telling the user the background daemon is out of
+/// sync and exactly how to fix it. Command is selectable so it can be copied.
+private struct DaemonUpdateBanner: View {
+    let daemonVersion: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Update needed", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+
+            Text("The background service is running \(daemonVersion), but the app is \(ThermalForgeVersion.current). Fan control may not match what you set until they're re-synced.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Run this in Terminal:")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+
+            Text("sudo thermalforge install")
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12))
+    }
+}
 
 private struct SectionHeader: View {
     let title: String

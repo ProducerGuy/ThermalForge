@@ -14,7 +14,7 @@ struct ThermalForge: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "thermalforge",
         abstract: "Fan control for Apple Silicon MacBooks",
-        version: "0.1.2",
+        version: ThermalForgeVersion.current,
         subcommands: [
             Max.self,
             Auto.self,
@@ -31,6 +31,34 @@ struct ThermalForge: ParsableCommand {
     )
 }
 
+// MARK: - Daemon version reconciliation
+
+/// Warn (on stderr, non-blocking) if a background daemon from a different build
+/// is running. The daemon is a long-lived launchd process; after `brew upgrade`
+/// it keeps running the OLD binary until `thermalforge install` re-syncs it, so
+/// the menu bar app can silently diverge from this CLI. Called by every
+/// fan-affecting command. Advisory only — it never blocks the command.
+func warnIfDaemonVersionMismatch() {
+    guard ThermalForgeDaemon.isRunning else { return }
+    guard let response = try? DaemonClient().sendRaw("version") else { return }
+
+    // A daemon that predates the `version` command answers with the literal
+    // "error: unknown command 'version'" — that's a normal reply, so detect the
+    // "error:" prefix and treat it as an older build rather than a version.
+    let daemonVersion = response.hasPrefix("error:") ? "an older build" : response
+    guard daemonVersion != ThermalForgeVersion.current else { return }
+
+    let message = """
+        ⚠️  Version mismatch: the background daemon is running \(daemonVersion), \
+        but this CLI is \(ThermalForgeVersion.current).
+            They're from different installs, so the menu bar app may not behave \
+        like the command line until you re-sync them.
+            Fix it with one command:  sudo thermalforge install
+
+        """
+    FileHandle.standardError.write(Data(message.utf8))
+}
+
 // MARK: - Max
 
 struct Max: ParsableCommand {
@@ -40,6 +68,7 @@ struct Max: ParsableCommand {
     )
 
     func run() throws {
+        warnIfDaemonVersionMismatch()
         let fc = try FanControl()
         try fc.setMax()
 
@@ -59,6 +88,7 @@ struct Auto: ParsableCommand {
     )
 
     func run() throws {
+        warnIfDaemonVersionMismatch()
         // Kill the menu bar app first — if it's running with a profile active,
         // it will override the fan reset within seconds
         let kill = Process()
@@ -88,6 +118,7 @@ struct SetSpeed: ParsableCommand {
     var fan: Int?
 
     func run() throws {
+        warnIfDaemonVersionMismatch()
         let fc = try FanControl()
         let target = Float(rpm)
 
@@ -215,6 +246,7 @@ struct Watch: ParsableCommand {
     var json: Bool = false
 
     func run() throws {
+        warnIfDaemonVersionMismatch()
         let profiles = FanProfile.builtIn
         guard let selectedProfile = profiles.first(where: { $0.id == profile }) else {
             throw ValidationError(
@@ -484,17 +516,61 @@ struct Install: ParsableCommand {
             throw ValidationError("Run with sudo: sudo thermalforge install")
         }
 
-        let binaryPath = ProcessInfo.processInfo.arguments[0]
+        // Resolve symlinks first. Launched via Homebrew (`sudo thermalforge
+        // install`), argv[0] is /opt/homebrew/bin/thermalforge — itself a symlink
+        // into the Cellar. Copying that verbatim produces a symlink whose relative
+        // target (../Cellar/...) doesn't exist under /usr/local, i.e. a dangling
+        // link launchd can't exec. Resolve it so the REAL binary gets copied.
+        let binaryPath = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .resolvingSymlinksInPath().path
         let installPath = ThermalForgeDaemon.installPath
 
-        // Copy binary to /usr/local/bin
+        // Copy the real binary to /usr/local/bin as a root-owned regular file
+        // (root:wheel 0755). launchd execs this as root, so it must live on a
+        // path that isn't user-writable — never a link back into /opt/homebrew/bin
+        // (user-writable → a root daemon exec'ing from there is privilege
+        // escalation). Always overwrite so re-running after `brew upgrade`
+        // re-syncs the installed copy.
         let fm = FileManager.default
-        try? fm.createDirectory(
-            atPath: "/usr/local/bin",
-            withIntermediateDirectories: true
-        )
-        try? fm.removeItem(atPath: installPath)
+        // On a clean Apple Silicon machine /usr/local/bin may not exist. Fail
+        // loud if it can't be created — silently ignoring it makes every step
+        // after this fail for reasons that make no sense.
+        // (createDirectory(withIntermediateDirectories: true) is a no-op if the
+        // directory already exists, so this only throws on a real failure.)
+        do {
+            try fm.createDirectory(atPath: "/usr/local/bin", withIntermediateDirectories: true)
+        } catch {
+            throw ValidationError("""
+                Couldn't create /usr/local/bin: \(error.localizedDescription)
+                The daemon binary can't be installed without it.
+                """)
+        }
+
+        // Remove any prior binary/symlink first. Only "nothing there" is
+        // acceptable — if an existing item can't be removed, fail loud with the
+        // path, or the copyItem below throws a confusing "file exists" that hides
+        // the real cause. fileExists follows symlinks and returns false for a
+        // dangling one (exactly the broken state a prior install could leave), so
+        // check for a symlink target too.
+        let somethingAtInstallPath = fm.fileExists(atPath: installPath)
+            || (try? fm.destinationOfSymbolicLink(atPath: installPath)) != nil
+        if somethingAtInstallPath {
+            do {
+                try fm.removeItem(atPath: installPath)
+            } catch {
+                throw ValidationError("""
+                    Couldn't remove the existing binary at \(installPath):
+                    \(error.localizedDescription)
+                    Remove it manually (sudo rm -f "\(installPath)") and re-run.
+                    """)
+            }
+        }
+
         try fm.copyItem(atPath: binaryPath, toPath: installPath)
+        try fm.setAttributes(
+            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
+            ofItemAtPath: installPath
+        )
 
         // Write launchd plist
         let plist = """
@@ -521,15 +597,18 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        // Stop old daemon if one is running
-        if ThermalForgeDaemon.isRunning {
-            let unload = Process()
-            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-            try unload.run()
-            unload.waitUntilExit()
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+        // Tear down any existing job before bootstrapping — don't gate this on
+        // isRunning. A job can be loaded but failing (e.g. retry-looping on a
+        // dead exec left by a previous broken install): isRunning would be false,
+        // yet bootstrapping the same label would collide with the loaded job.
+        // bootout clears it whether it's healthy, crashing, or looping; ignore
+        // errors because "wasn't loaded" is a perfectly fine outcome here.
+        let unload = Process()
+        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
+        try? unload.run()
+        unload.waitUntilExit()
+        Thread.sleep(forTimeInterval: 0.5)
 
         // Start new daemon
         let load = Process()
@@ -541,7 +620,16 @@ struct Install: ParsableCommand {
         // Verify
         Thread.sleep(forTimeInterval: 1.0)
         guard ThermalForgeDaemon.isRunning else {
-            throw ValidationError("Daemon failed to start. Try: sudo launchctl list | grep thermalforge")
+            throw ValidationError("""
+                The background daemon didn't come up after install, so the menu bar
+                app won't be able to control fans yet.
+
+                What to do:
+                  1. Run it again:  sudo thermalforge install
+                  2. If it still fails, the copy at \(installPath) may not be
+                     executable or is crashing on launch. Open Console.app, search
+                     "com.thermalforge.daemon", and check the most recent error.
+                """)
         }
 
         // Copy the menu bar app into /Applications. Homebrew's post_install is

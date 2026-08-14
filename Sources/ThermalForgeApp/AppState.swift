@@ -21,6 +21,11 @@ final class AppState: ObservableObject {
     @Published var launchAtLogin: Bool = false {
         didSet { updateLoginItem() }
     }
+    /// The running daemon's version when it differs from this app's build, else
+    /// nil. Non-nil drives the "update needed" banner and menu bar badge — the
+    /// long-lived daemon keeps running the old binary after a `brew upgrade`
+    /// until `sudo thermalforge install` re-syncs it.
+    @Published var daemonVersionMismatch: String?
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
@@ -48,8 +53,22 @@ final class AppState: ObservableObject {
 
     private func startHeartbeat() {
         let client = DaemonClient()
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             _ = try? client.send("heartbeat")
+
+            // Piggyback a version check on the heartbeat. Detect the raw "error:"
+            // reply from a daemon too old to know the `version` command, and
+            // treat it as an older build rather than a version number.
+            let mismatch: String?
+            if let response = try? client.sendRaw("version") {
+                let daemonVersion = response.hasPrefix("error:") ? "an older build" : response
+                mismatch = daemonVersion == ThermalForgeVersion.current ? nil : daemonVersion
+            } else {
+                mismatch = nil  // can't reach it — don't assert a mismatch we can't prove
+            }
+            Task { @MainActor [weak self] in
+                self?.daemonVersionMismatch = mismatch
+            }
         }
     }
 
