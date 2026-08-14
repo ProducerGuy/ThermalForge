@@ -14,7 +14,7 @@ struct ThermalForge: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "thermalforge",
         abstract: "Fan control for Apple Silicon MacBooks",
-        version: "0.1.1",
+        version: "0.1.2",
         subcommands: [
             Max.self,
             Auto.self,
