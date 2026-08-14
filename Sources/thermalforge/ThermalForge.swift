@@ -543,6 +543,67 @@ struct Install: ParsableCommand {
         guard ThermalForgeDaemon.isRunning else {
             throw ValidationError("Daemon failed to start. Try: sudo launchctl list | grep thermalforge")
         }
+
+        // Copy the menu bar app into /Applications. Homebrew's post_install is
+        // sandboxed and can't write outside its prefix (EPERM on mkdir under
+        // /Applications), so the copy lives here instead — we're root under sudo,
+        // unsandboxed.
+        //
+        // Find the .app in priority order:
+        //   1. Next to the running binary (<keg>/bin/thermalforge -> <keg>/ThermalForge.app):
+        //      the normal `sudo thermalforge install` path, via Homebrew's bin symlink.
+        //   2. Homebrew's stable opt symlink — needed when the copy that this command
+        //      places in /usr/local/bin is what's run (there "up two dirs" is /usr,
+        //      no app). /opt/homebrew and /usr/local are the only two Homebrew
+        //      prefixes on macOS (Apple Silicon / Intel), and opt/<formula> always
+        //      points at the current keg, so this stays version-independent.
+        let appDest = "/Applications/ThermalForge.app"
+
+        let nextToBinary = URL(fileURLWithPath: binaryPath)
+            .resolvingSymlinksInPath()
+            .deletingLastPathComponent()   // <keg>/bin
+            .deletingLastPathComponent()   // <keg>
+            .appendingPathComponent("ThermalForge.app")
+            .path
+
+        let candidates = [
+            nextToBinary,
+            "/opt/homebrew/opt/thermalforge/ThermalForge.app",
+            "/usr/local/opt/thermalforge/ThermalForge.app",
+        ]
+
+        if let appSource = candidates.first(where: { fm.fileExists(atPath: $0) }) {
+            print("Using app bundle at \(appSource)")
+
+            // Replace any existing bundle. If removal fails, FAIL LOUD — do not
+            // swallow it. Homebrew silently ignoring this is exactly what left a
+            // stale bundle in place and produced the nested-path confusion.
+            if fm.fileExists(atPath: appDest) {
+                do {
+                    try fm.removeItem(atPath: appDest)
+                } catch {
+                    throw ValidationError(
+                        "Could not remove existing \(appDest): \(error.localizedDescription). " +
+                        "Remove it manually (sudo rm -rf \"\(appDest)\") and re-run."
+                    )
+                }
+            }
+            try fm.copyItem(atPath: appSource, toPath: appDest)
+
+            // Strip quarantine/extended attributes so Gatekeeper won't block launch.
+            let xattr = Process()
+            xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+            xattr.arguments = ["-cr", appDest]
+            try? xattr.run()
+            xattr.waitUntilExit()
+
+            print("Installed ThermalForge.app to \(appDest)")
+        } else {
+            print("Note: app bundle not found — skipping /Applications copy. Checked:")
+            for path in candidates { print("  \(path)") }
+            print("The CLI and daemon are installed; the menu bar app just won't be in /Applications.")
+        }
+
         print("Done.")
     }
 }
