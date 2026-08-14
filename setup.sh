@@ -29,44 +29,14 @@ fi
 sudo xattr -cr .build/release/thermalforge
 sudo .build/release/thermalforge install
 
-# Create .app bundle in /Applications so it shows in Spotlight/Finder
-APP_DIR="/Applications/ThermalForge.app/Contents"
-sudo mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-sudo cp .build/release/ThermalForgeApp "$APP_DIR/MacOS/ThermalForgeApp"
-sudo cp ThermalForge.icns "$APP_DIR/Resources/AppIcon.icns"
+# Create the .app bundle in /Applications via the single shared assembler.
+# Version and macOS floor come from ThermalForgeVersion — no hardcoding, and
+# byte-identical to the bundle the Homebrew path assembles.
+sudo .build/release/thermalforge build-app \
+    --binary .build/release/ThermalForgeApp \
+    --icon ThermalForge.icns \
+    --dest /Applications/ThermalForge.app
 sudo xattr -cr /Applications/ThermalForge.app
-
-sudo tee "$APP_DIR/Info.plist" > /dev/null << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>ThermalForge</string>
-    <key>CFBundleDisplayName</key>
-    <string>ThermalForge</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.thermalforge.app</string>
-    <key>CFBundleVersion</key>
-    <string>0.1.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>ThermalForgeApp</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
 
 # Update Spotlight index
 sudo mdimport /Applications/ThermalForge.app 2>/dev/null || true
