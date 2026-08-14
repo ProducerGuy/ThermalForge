@@ -142,7 +142,7 @@ Apple doesn't do this because silence sells in store demos and most users never 
 ### FAQ
 
 **What if ThermalForge closes during normal use?**
-The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app resets fans to auto.
+The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app syncs to whatever the daemon is currently holding rather than forcing a reset — so a hold you set deliberately (e.g. `sudo thermalforge max`) survives.
 
 ### Resets and troubleshooting
 
@@ -166,6 +166,8 @@ Removes the daemon, binary, app, and all logs. Clean slate.
 
 If installed via Homebrew, run `brew uninstall thermalforge` first.
 
+**"Update needed" after a Homebrew upgrade:** `brew upgrade` updates the app and CLI, but the background daemon keeps running the old build until you re-sync it. While they differ, the menu bar shows an **"Update needed"** banner and the CLI prints a version-mismatch warning, both naming the two versions. Fix it once with `sudo thermalforge install`; the banner clears when they match again.
+
 ### Disclaimer
 
 ThermalForge is provided as-is with no warranty. Use at your own risk.
@@ -174,14 +176,18 @@ ThermalForge is provided as-is with no warranty. Use at your own risk.
 
 ```bash
 thermalforge status        # JSON output: fan speeds + temps
-thermalforge max           # Max fans (requires sudo)
+thermalforge max           # Max fans — no sudo when the daemon is running
 thermalforge auto          # Reset to Apple defaults
-thermalforge set 4000      # Set specific RPM (requires sudo)
+thermalforge set 4000      # Set specific RPM — no sudo when the daemon is running
 thermalforge discover      # Dump all SMC keys (for new hardware)
 thermalforge watch         # Monitor mode with auto-boost profiles (requires sudo)
 thermalforge log           # Record thermal data to CSV (1Hz, auto-delete 24h)
 thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep forever
 ```
+
+`max` and `set` need root to unlock the fans, so when the daemon is installed they route through it and **don't need `sudo`**; without a daemon (e.g. an uninstalled from-source build) they write the hardware directly and need `sudo`. `auto` also routes through the daemon but never needed the unlock — resetting just hands control back to macOS. `watch` always needs `sudo` (it runs its own root monitor loop). Control a single fan with `--fan`, e.g. `thermalforge set 3000 --fan 1`.
+
+Set fans from the terminal and the menu bar app shows a **"Fans held from Terminal"** banner and pauses its automatic control so it won't fight you — press **Default** (or pick a profile) to release the hold.
 
 ## Compatibility
 
