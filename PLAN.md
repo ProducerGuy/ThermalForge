@@ -73,14 +73,14 @@ Performance is for compiles, renders, LLM inference. It doesn't wait around. Lin
 | Start | **65°C** | Higher start because the response is instant — no need to engage early |
 | Ceiling | N/A | No curve — it's binary |
 | Max fan | 100% | Full send |
-| Curve shape | N/A up / **S-curve down** | Instant on, gentle off |
+| Curve shape | N/A up / **linear down** | Instant on, gentle off |
 | Ramp up | **Instant** | Single reading above 65°C sustained → 100% immediately |
-| Ramp down | ~200 RPM/s with S-curve | Give temps time to stabilize |
+| Ramp down | ~200 RPM/s, linear governor | Give temps time to stabilize |
 | Sustained trigger | **5 seconds** (50 ticks at 100ms) | Filters transient spikes but still catches real events |
 
 **Up behavior**: `sustainedAboveCount >= 50 && peakTemp >= 65` → instant `setMax()`. No ramp governor. They spike, we spike.
 
-**Down behavior**: Once temp drops below 65°C, S-curve governor ramps down at ~200 RPM/s. Below 50°C with rate-of-change ≤ 0 → fans off.
+**Down behavior**: Once temp drops below 65°C, a linear governor ramps down at ~200 RPM/s. Below 50°C with rate-of-change ≤ 0 → fans off.
 
 **Why this fixes the logs**: The Apr 7 22:12 event hit 56°C at tick 1, then 72°C at tick 2. With Option C at 65°C, the 72°C reading (2 seconds later) would have instantly triggered 100% fans. Instead of waiting for safety override at 98°C, fans would have been at 7800+ RPM 26°C earlier.
 

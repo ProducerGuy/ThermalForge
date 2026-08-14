@@ -65,7 +65,7 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 | **Silent (Apple Default)** | N/A | N/A | N/A | Apple | N/A | N/A | Monitoring only. Apple controls fans. |
 | **Balanced** | 50°C | 55°C | 70°C | 60% | Ease-in (pos²) | 8 seconds | Quiet at low temps, ramps harder as heat builds. |
 | **Performance** | 50°C | 55°C | 65°C | 85% | Linear | 4 seconds | Direct proportional response, 2× ramp-up speed. |
-| **Max** | 50°C | 65°C | — | 100% | Instant | 5 seconds | Attack dog: instant 100% when triggered, S-curve ramp-down. |
+| **Max** | 50°C | 65°C | — | 100% | Instant | 5 seconds | Attack dog: instant 100% when triggered, linear ramp-down. |
 | **Smart** | 50°C | 53°C | 85°C | 100% | S-curve | 6 seconds | Proactive with rate-of-change awareness. Starts 2°C earlier. |
 
 **How profiles work:**
@@ -81,11 +81,13 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 ### Option A: Homebrew (recommended)
 
 ```bash
-brew install ProducerGuy/tap/thermalforge
+brew tap ProducerGuy/tap
+brew trust --formula ProducerGuy/tap/thermalforge
+brew install thermalforge
 sudo thermalforge install
 ```
 
-The first command installs the CLI and the menu bar app to `/Applications`. The second sets up a background daemon so the app can control fans without needing sudo every time. You only run it once.
+Homebrew requires third-party taps to be trusted before it will run their formula, which is the `brew trust` step (per-formula, Homebrew's recommended form). `brew install` builds and installs the **CLI**. `sudo thermalforge install` then sets up the background daemon (so the app can control fans without a password every time) **and copies the menu bar app into `/Applications`**. You only run it once.
 
 ### Option B: From source
 
@@ -148,13 +150,13 @@ The daemon's heartbeat watchdog detects the app is gone within 15 seconds and re
 ```bash
 thermalforge auto
 ```
-Kills the app and resets fans to Apple defaults.
+Resets fans to Apple defaults. This also quits the menu bar app, so its icon disappears from the menu bar — that's expected. Relaunch it from Spotlight or `/Applications` when you're done.
 
-**Emergency reset (if nothing else works):**
+**Fans loud and won't stop? Reset them now:**
 ```bash
-sudo killall ThermalForgeApp && sudo /usr/local/bin/thermalforge auto
+sudo killall ThermalForgeApp; sudo /usr/local/bin/thermalforge auto
 ```
-Force-kills the app and resets fans directly via the daemon.
+This always works, even if the app isn't running. It stops ThermalForge and hands fan control straight back to macOS — your fans will settle to normal within a few seconds. It writes directly to the hardware, so it doesn't depend on the app or the background service being healthy.
 
 **Completely remove ThermalForge:**
 ```bash
@@ -172,11 +174,11 @@ ThermalForge is provided as-is with no warranty. Use at your own risk.
 
 ```bash
 thermalforge status        # JSON output: fan speeds + temps
-thermalforge max           # Max fans (requires daemon or sudo)
+thermalforge max           # Max fans (requires sudo)
 thermalforge auto          # Reset to Apple defaults
-thermalforge set 4000      # Set specific RPM
+thermalforge set 4000      # Set specific RPM (requires sudo)
 thermalforge discover      # Dump all SMC keys (for new hardware)
-thermalforge watch          # Monitor mode with auto-boost profiles
+thermalforge watch         # Monitor mode with auto-boost profiles (requires sudo)
 thermalforge log           # Record thermal data to CSV (1Hz, auto-delete 24h)
 thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep forever
 ```
