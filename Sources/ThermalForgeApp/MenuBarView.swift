@@ -201,6 +201,7 @@ private struct ExternalHoldBanner: View {
             Text("Press Default below (or pick a profile) to release.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -243,10 +244,12 @@ private struct DaemonUpdateBanner: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text("sudo thermalforge install")
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)))
