@@ -27,6 +27,7 @@ struct ThermalForge: ParsableCommand {
             Install.self,
             Uninstall.self,
             Daemon.self,
+            BuildApp.self,
         ]
     )
 }
@@ -747,6 +748,89 @@ struct Uninstall: ParsableCommand {
 
         print("ThermalForge fully uninstalled.")
         print("Removed: daemon, binary, app, calibration data, logs.")
+    }
+}
+
+// MARK: - BuildApp (internal)
+
+/// Assembles ThermalForge.app from a built app binary + icon, writing the
+/// Info.plist from ThermalForgeVersion.current. This is the SINGLE place the
+/// bundle is assembled — both install paths (Homebrew formula and setup.sh)
+/// call it, so no field (version included) can drift between them.
+struct BuildApp: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "build-app",
+        abstract: "Assemble ThermalForge.app from a built app binary and icon (internal)",
+        shouldDisplay: false
+    )
+
+    @Option(name: .long, help: "Path to the built ThermalForgeApp executable")
+    var binary: String
+
+    @Option(name: .long, help: "Path to the .icns app icon")
+    var icon: String
+
+    @Option(name: .long, help: "Destination .app bundle path (created or replaced)")
+    var dest: String
+
+    func run() throws {
+        let fm = FileManager.default
+
+        guard fm.fileExists(atPath: binary) else {
+            throw ValidationError("App binary not found: \(binary)")
+        }
+        guard fm.fileExists(atPath: icon) else {
+            throw ValidationError("Icon not found: \(icon)")
+        }
+
+        let contents = "\(dest)/Contents"
+        let macOSDir = "\(contents)/MacOS"
+        let resources = "\(contents)/Resources"
+
+        // Replace any existing bundle so a rebuild is clean.
+        if fm.fileExists(atPath: dest) {
+            try fm.removeItem(atPath: dest)
+        }
+        try fm.createDirectory(atPath: macOSDir, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: resources, withIntermediateDirectories: true)
+
+        try fm.copyItem(atPath: binary, toPath: "\(macOSDir)/ThermalForgeApp")
+        try fm.copyItem(atPath: icon, toPath: "\(resources)/AppIcon.icns")
+
+        let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>CFBundleName</key>
+                <string>ThermalForge</string>
+                <key>CFBundleDisplayName</key>
+                <string>ThermalForge</string>
+                <key>CFBundleIdentifier</key>
+                <string>com.thermalforge.app</string>
+                <key>CFBundleVersion</key>
+                <string>\(ThermalForgeVersion.current)</string>
+                <key>CFBundleShortVersionString</key>
+                <string>\(ThermalForgeVersion.current)</string>
+                <key>CFBundleExecutable</key>
+                <string>ThermalForgeApp</string>
+                <key>CFBundleIconFile</key>
+                <string>AppIcon</string>
+                <key>CFBundlePackageType</key>
+                <string>APPL</string>
+                <key>LSMinimumSystemVersion</key>
+                <string>\(ThermalForgeVersion.minimumMacOS)</string>
+                <key>LSUIElement</key>
+                <true/>
+                <key>NSHighResolutionCapable</key>
+                <true/>
+            </dict>
+            </plist>
+            """
+        try plist.write(toFile: "\(contents)/Info.plist", atomically: true, encoding: .utf8)
+
+        print("Assembled \(dest) (version \(ThermalForgeVersion.current))")
     }
 }
 
