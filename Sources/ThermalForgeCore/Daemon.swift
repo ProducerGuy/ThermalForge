@@ -96,8 +96,35 @@ public enum DaemonError: Error, CustomStringConvertible {
     }
 }
 
+/// The daemon's current hold, returned by the `state` verb as JSON.
+public struct DaemonHoldState: Codable, Equatable {
+    /// The held fan command ("max", "set 3000", "setfan 1 3000"), or nil if none.
+    public let command: String?
+    /// Who set it: "cli" (unsupervised, never watchdog-reverted), "app"
+    /// (supervised, reverted if the app stops checking in), or "none".
+    public let owner: String
+
+    public init(command: String?, owner: String) {
+        self.command = command
+        self.owner = owner
+    }
+
+    public var isEmpty: Bool { owner == "none" }
+    public var isCLIHold: Bool { owner == "cli" }
+}
+
 public final class DaemonClient {
     public init() {}
+
+    /// Read the daemon's current hold (what's set and who owns it) so the menu
+    /// bar app can reflect a CLI hold instead of fighting or wiping it.
+    public func readState() throws -> DaemonHoldState {
+        let reply = try send("state")
+        guard let data = reply.data(using: .utf8),
+              let state = try? JSONDecoder().decode(DaemonHoldState.self, from: data)
+        else { throw DaemonError.commandFailed("malformed state response") }
+        return state
+    }
 
     /// Send a command to the daemon and return the response, throwing
     /// `commandFailed` on an "error:" reply. Use this when an error reply means
@@ -168,6 +195,36 @@ public final class DaemonClient {
     }
 }
 
+// MARK: - Hold State
+
+/// The daemon's current fan hold. Distinguishes an unsupervised CLI hold (never
+/// watchdog-reverted — a fire-and-forget `thermalforge max`) from a supervised
+/// app hold (reverted if the app stops checking in). These are the two states
+/// the old single `lastHeartbeat: Date?` nil conflated, which is why an app
+/// heartbeat silently re-armed the watchdog against a CLI oneshot hold (v0.1.5).
+private enum HoldState {
+    case none
+    case unsupervised(command: String)
+    case supervised(command: String, lastBeat: Date)
+
+    /// The held command string ("max" / "set 3000" / "setfan 1 3000"), for
+    /// wake re-apply. nil when nothing is held.
+    var command: String? {
+        switch self {
+        case .none: return nil
+        case .unsupervised(let c), .supervised(let c, _): return c
+        }
+    }
+
+    var snapshot: DaemonHoldState {
+        switch self {
+        case .none: return DaemonHoldState(command: nil, owner: "none")
+        case .unsupervised(let c): return DaemonHoldState(command: c, owner: "cli")
+        case .supervised(let c, _): return DaemonHoldState(command: c, owner: "app")
+        }
+    }
+}
+
 // MARK: - Daemon Server
 
 public final class DaemonServer {
@@ -175,11 +232,10 @@ public final class DaemonServer {
     private let fanControl: FanControl
     /// Serializes all SMC access — prevents data race between client handler and watchdog
     private let smcLock = NSLock()
-    /// Last fan command — re-applied after sleep/wake
-    private var lastCommand: String?
-    /// Heartbeat: last time the app checked in
-    private var lastHeartbeat: Date?
-    private let heartbeatLock = NSLock()
+    /// The current hold and its owner. Re-applied after sleep/wake; the watchdog
+    /// reverts it only when it's `.supervised` and the app has gone silent.
+    private var hold: HoldState = .none
+    private let stateLock = NSLock()
 
     public init(fanControl: FanControl) throws {
         self.fanControl = fanControl
@@ -249,35 +305,38 @@ public final class DaemonServer {
             while true {
                 Thread.sleep(forTimeInterval: 5)
 
-                heartbeatLock.lock()
-                let lastBeat = lastHeartbeat
-                let hasManualControl = lastCommand != nil
-                heartbeatLock.unlock()
+                stateLock.lock()
+                let current = hold
+                stateLock.unlock()
 
-                // Only reset if: app has connected before (lastBeat != nil),
-                // fans are in manual mode, and heartbeat is stale
-                guard let beat = lastBeat, hasManualControl else { continue }
+                // ONLY a supervised hold is reverted — that's the app's crash
+                // protection: the app set fans manually and stopped checking in,
+                // so hand control back to macOS. An unsupervised CLI hold is
+                // never touched here (the user asked for it; it persists until
+                // CLI `auto` or the menu bar Default clears it). This is the
+                // v0.1.5 fix: the app's heartbeat can no longer drag a CLI hold
+                // into the supervised branch.
+                guard case .supervised(_, let lastBeat) = current,
+                      Date().timeIntervalSince(lastBeat) > 15 else { continue }
 
-                if Date().timeIntervalSince(beat) > 15 {
-                    NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
-                    smcLock.lock()
-                    let resetSucceeded: Bool
-                    do {
-                        try fanControl.resetAuto()
-                        resetSucceeded = true
-                    } catch {
-                        NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
-                        resetSucceeded = false
-                    }
-                    smcLock.unlock()
+                NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                smcLock.lock()
+                let resetSucceeded: Bool
+                do {
+                    try fanControl.resetAuto()
+                    resetSucceeded = true
+                } catch {
+                    NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
+                    resetSucceeded = false
+                }
+                smcLock.unlock()
 
-                    // Only clear state if reset actually worked — otherwise retry next cycle
-                    if resetSucceeded {
-                        heartbeatLock.lock()
-                        lastCommand = nil
-                        lastHeartbeat = nil
-                        heartbeatLock.unlock()
-                    }
+                // Clear only if the reset worked AND the same supervised hold is
+                // still current — a new command may have arrived meanwhile.
+                if resetSucceeded {
+                    stateLock.lock()
+                    if case .supervised(_, let beat) = hold, beat == lastBeat { hold = .none }
+                    stateLock.unlock()
                 }
             }
         }
@@ -324,7 +383,10 @@ public final class DaemonServer {
     }
 
     private func handleWake() {
-        guard let command = lastCommand else {
+        stateLock.lock()
+        let heldCommand = hold.command
+        stateLock.unlock()
+        guard let command = heldCommand else {
             NSLog("ThermalForge daemon: woke — no profile to re-apply")
             return
         }
@@ -379,42 +441,59 @@ public final class DaemonServer {
             // reverted after 15s. Old daemons never see this branch — they just
             // ignore the trailing token.
             let oneshot = parts.contains("oneshot")
+
+            // Record a hold: unsupervised (CLI oneshot — never watchdog-reverted)
+            // or supervised (app — reverted if it stops checking in). Overwrites
+            // whatever was held, so an explicit app command cleanly takes over a
+            // CLI hold with no orphan left behind.
+            func recordHold(_ heldCommand: String) {
+                stateLock.lock()
+                hold = oneshot
+                    ? .unsupervised(command: heldCommand)
+                    : .supervised(command: heldCommand, lastBeat: Date())
+                stateLock.unlock()
+            }
+
+            // A supervised (app) command must NOT silently overwrite an
+            // unsupervised CLI hold — the CLI hold wins and the app is told to
+            // yield via the error, instead of clobbering it in the ~100ms before
+            // its next state poll. `oneshot` commands and `auto` are never
+            // blocked, so explicit app takeover (which sends `auto` first,
+            // clearing the hold) still works. Checked before any SMC write.
+            func blockedByCLIHold() -> Bool {
+                guard !oneshot else { return false }
+                stateLock.lock(); defer { stateLock.unlock() }
+                if case .unsupervised = hold { return true }
+                return false
+            }
+
             switch parts.first.map(String.init) {
             case "max":
+                if blockedByCLIHold() { response = "error: held by cli"; break }
                 try fanControl.setMax()
-                heartbeatLock.lock()
-                lastCommand = "max"
-                lastHeartbeat = oneshot ? nil : Date()
-                heartbeatLock.unlock()
+                recordHold("max")
                 response = "ok"
             case "auto":
                 try fanControl.resetAuto()
-                heartbeatLock.lock()
-                lastCommand = nil
-                lastHeartbeat = nil
-                heartbeatLock.unlock()
+                stateLock.lock(); hold = .none; stateLock.unlock()
                 response = "ok"
             case "set":
                 guard parts.count >= 2, let rpm = Float(parts[1]) else {
                     response = "error: usage: set <rpm>"
                     break
                 }
+                if blockedByCLIHold() { response = "error: held by cli"; break }
                 try fanControl.setAllFans(rpm: rpm)
-                heartbeatLock.lock()
-                lastCommand = "set \(Int(rpm))"
-                lastHeartbeat = oneshot ? nil : Date()
-                heartbeatLock.unlock()
+                recordHold("set \(Int(rpm))")
                 response = "ok"
             case "setfan":
                 guard parts.count >= 3, let index = Int(parts[1]), let rpm = Float(parts[2]) else {
                     response = "error: usage: setfan <index> <rpm>"
                     break
                 }
+                if blockedByCLIHold() { response = "error: held by cli"; break }
                 try fanControl.setSpeed(fan: index, rpm: rpm)
-                heartbeatLock.lock()
-                lastCommand = "setfan \(index) \(Int(rpm))"
-                lastHeartbeat = oneshot ? nil : Date()
-                heartbeatLock.unlock()
+                recordHold("setfan \(index) \(Int(rpm))")
                 response = "ok"
             case "status":
                 let status = try fanControl.status()
@@ -422,10 +501,27 @@ public final class DaemonServer {
                 encoder.keyEncodingStrategy = .convertToSnakeCase
                 let data = try encoder.encode(status)
                 response = String(data: data, encoding: .utf8) ?? "error: encode failed"
+            case "state":
+                // Current hold + owner as JSON, so the app can reflect a CLI hold
+                // rather than fight or wipe it.
+                stateLock.lock()
+                let snap = hold.snapshot
+                stateLock.unlock()
+                if let data = try? JSONEncoder().encode(snap),
+                   let json = String(data: data, encoding: .utf8) {
+                    response = json
+                } else {
+                    response = "error: state encode failed"
+                }
             case "heartbeat":
-                heartbeatLock.lock()
-                lastHeartbeat = Date()
-                heartbeatLock.unlock()
+                // Refreshes a SUPERVISED hold's liveness only. On an unsupervised
+                // CLI hold this is deliberately a no-op — the app checking in must
+                // NOT convert a CLI hold into a supervised one (the v0.1.5 bug).
+                stateLock.lock()
+                if case .supervised(let c, _) = hold {
+                    hold = .supervised(command: c, lastBeat: Date())
+                }
+                stateLock.unlock()
                 response = "ok"
             case "version":
                 // Reports the build this daemon process is running, so a CLI from

@@ -33,6 +33,14 @@ struct MenuBarView: View {
                 Divider()
             }
 
+            // CLI-hold banner — the app is reflecting a hold set from the
+            // terminal and won't adjust fans until the user takes over. The
+            // Default button (or picking a profile) releases it.
+            if let hold = appState.externalHold {
+                ExternalHoldBanner(hold: hold)
+                Divider()
+            }
+
             // Fan speeds
             if let status = appState.latestStatus {
                 SectionHeader(title: "FANS")
@@ -173,6 +181,47 @@ struct MenuBarView: View {
 }
 
 // MARK: - Subviews
+
+/// Banner shown when a hold was set from the CLI. Explains what's pinned and how
+/// to release it without needing to know any terminal commands.
+private struct ExternalHoldBanner: View {
+    let hold: DaemonHoldState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Fans held from Terminal", systemImage: "terminal.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.orange)
+
+            Text(describe(hold.command))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Press Default below (or pick a profile) to release.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12))
+    }
+
+    private func describe(_ command: String?) -> String {
+        let parts = (command ?? "").split(separator: " ").map(String.init)
+        switch parts.first {
+        case "max":
+            return "Fans are pinned to maximum. The app won't adjust them until you take over."
+        case "set" where parts.count > 1:
+            return "Fans are pinned to \(parts[1]) RPM. The app won't adjust them until you take over."
+        case "setfan" where parts.count > 2:
+            return "Fan \(parts[1]) is pinned to \(parts[2]) RPM. The app won't adjust fans until you take over."
+        default:
+            return "Fans are held manually. The app won't adjust them until you take over."
+        }
+    }
+}
 
 /// Non-modal in-menu banner telling the user the background daemon is out of
 /// sync and exactly how to fix it. Command is selectable so it can be copied.

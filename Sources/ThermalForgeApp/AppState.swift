@@ -26,6 +26,11 @@ final class AppState: ObservableObject {
     /// long-lived daemon keeps running the old binary after a `brew upgrade`
     /// until `sudo thermalforge install` re-syncs it.
     @Published var daemonVersionMismatch: String?
+    /// A hold set from the CLI (`sudo thermalforge max`) that the app is
+    /// reflecting rather than fighting. Non-nil suspends the app's automatic
+    /// profile control and drives the "held from Terminal" banner; the user
+    /// takes back over by picking a profile or pressing Default.
+    @Published var externalHold: DaemonHoldState?
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
@@ -34,15 +39,50 @@ final class AppState: ObservableObject {
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
 
-        // Clean state: reset fans to auto on every launch.
-        try? executor.execute(.resetAuto)
-        TFLogger.shared.info("App launched — fans reset to auto")
+        adoptDaemonStateOnLaunch()
 
         // Clean expired logs
         ThermalLogger.cleanExpired()
 
         startMonitoring()
         startHeartbeat()
+    }
+
+    /// Sync to whatever the daemon is actually holding at launch instead of
+    /// blindly resetting (which destroyed a deliberate CLI hold and the daemon's
+    /// record of it). A CLI hold is reflected and left alone; a stale supervised
+    /// hold left by a crashed prior app instance is cleared here — that's the
+    /// crash recovery the old reset provided, without the collateral damage.
+    private func adoptDaemonStateOnLaunch() {
+        guard let state = try? DaemonClient().readState() else {
+            // State unreadable — a pre-0.1.7 daemon with no `state` verb (upgrade
+            // window) or unreachable. DELIBERATE fallback to the old conservative
+            // reset: without arbitration we can't tell a CLI hold from a crashed
+            // prior instance's stale hold, and leaving fans possibly stuck is
+            // worse than clearing a possible CLI hold. Bounded to the pre-0.1.7
+            // daemon window, where the version-mismatch banner already tells the
+            // user to re-sync.
+            externalHold = nil
+            try? executor.execute(.resetAuto)
+            TFLogger.shared.info("App launched — daemon state unreadable; reset to auto (degraded)")
+            return
+        }
+
+        if state.isCLIHold {
+            // Deliberate CLI hold — reflect it, don't touch it.
+            externalHold = state
+            TFLogger.shared.info("App launched — reflecting CLI hold: \(state.command ?? "?")")
+        } else if !state.isEmpty {
+            // Leftover supervised hold from a crashed prior instance — this is the
+            // live app now, so take over by clearing it (the crash recovery the
+            // old blind reset provided).
+            externalHold = nil
+            try? executor.execute(.resetAuto)
+            TFLogger.shared.info("App launched — cleared stale app hold")
+        } else {
+            externalHold = nil
+            TFLogger.shared.info("App launched — no active hold")
+        }
     }
 
     deinit {
@@ -66,8 +106,14 @@ final class AppState: ObservableObject {
             } else {
                 mismatch = nil  // can't reach it — don't assert a mismatch we can't prove
             }
+
+            // Poll the daemon's hold so a CLI hold set out-of-band shows up in the
+            // menu bar and suspends our monitor (nil if unreadable — don't guess).
+            let hold = try? client.readState()
+
             Task { @MainActor [weak self] in
                 self?.daemonVersionMismatch = mismatch
+                self?.externalHold = (hold?.isCLIHold == true) ? hold : nil
             }
         }
     }
@@ -93,7 +139,21 @@ final class AppState: ObservableObject {
         }
         monitor.onFanCommand = { [weak self] command in
             Task { @MainActor [weak self] in
-                try self?.executor.execute(command)
+                guard let self else { return }
+                // Don't fight a CLI hold — the user set it deliberately. The
+                // monitor resumes control when they pick a profile or press
+                // Default (which clears externalHold).
+                guard self.externalHold == nil else { return }
+                do {
+                    try self.executor.execute(command)
+                } catch {
+                    // Daemon rejected us because a CLI hold owns the fans. Latch
+                    // it now (don't wait up to 5s for the poll) so the monitor
+                    // stops trying and the banner appears immediately.
+                    if let state = try? DaemonClient().readState(), state.isCLIHold {
+                        self.externalHold = state
+                    }
+                }
             }
         }
         monitor.start()
@@ -102,14 +162,31 @@ final class AppState: ObservableObject {
 
     // MARK: - Actions
 
+    /// Explicit user takeover of any reflected CLI hold. Returns whether one was
+    /// active, so the caller can clear the daemon's unsupervised hold (send a
+    /// command) rather than leave it orphaned.
+    @discardableResult
+    private func seizeControl() -> Bool {
+        let had = externalHold != nil
+        externalHold = nil
+        return had
+    }
+
     func setSmart() {
+        let took = seizeControl()
         activeProfile = .smart
         monitor?.switchProfile(.smart)
+        // Taking over a CLI hold: clear it so the unsupervised hold isn't
+        // orphaned; the Smart tick then establishes supervised control.
+        if took { try? executor.execute(.resetAuto) }
         TFLogger.shared.profile("Smart activated")
     }
 
     func resetAuto() {
+        seizeControl()
         do {
+            // resetAuto clears any hold (CLI or app) → daemon .none. This is the
+            // no-CLI-knowledge way out of a pinned CLI hold: the Default button.
             try executor.execute(.resetAuto)
             activeProfile = .silent
             monitor?.switchProfile(.silent)
@@ -120,18 +197,18 @@ final class AppState: ObservableObject {
     }
 
     func selectProfile(_ profile: FanProfile) {
+        let took = seizeControl()
         activeProfile = profile
         monitor?.switchProfile(profile)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
-        // All profiles use proportional curves — tick() handles fan engagement.
-        // Reset to auto on profile change so tick() starts from a clean state.
         do {
-            if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" {
+            // Reset to auto when switching to a hands-off profile, OR when taking
+            // over a CLI hold (so its unsupervised hold isn't orphaned). Otherwise
+            // active profiles let tick() ramp from the current temperature.
+            if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" || took {
                 try executor.execute(.resetAuto)
             }
-            // Balanced/Performance/Max: tick() will ramp proportionally
-            // based on current temperature after sustained trigger is met
         } catch {
             TFLogger.shared.error("Profile \(profile.name) failed: \(error)")
         }
