@@ -35,6 +35,46 @@ public enum ThermalForgeDaemon {
         }
         return result == 0
     }
+
+    /// Whether launchd has our label registered in the system domain. This is
+    /// true even when the job is loaded-but-failing (retry-looping on a dead
+    /// exec) — where `isRunning` is false because the socket never comes up — so
+    /// it's the right question to ask before deciding to boot out. Requires root
+    /// (system domain); the install/uninstall callers already run under sudo.
+    public static var isRegisteredWithLaunchd: Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["print", "system/\(label)"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Boot out our launchd job, but only if the label is actually registered —
+    /// so a fresh install (nothing loaded) doesn't provoke a spurious
+    /// "Boot-out failed: No such process". If a bootout IS attempted and fails
+    /// for a real reason, it throws rather than swallowing it.
+    public static func bootoutIfRegistered() throws {
+        guard isRegisteredWithLaunchd else { return }
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["bootout", "system/\(label)"]
+        try p.run()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            throw ThermalForgeError.writeFailed(
+                "launchctl bootout system/\(label) failed (exit \(p.terminationStatus))"
+            )
+        }
+        Thread.sleep(forTimeInterval: 0.5)   // let launchd settle before re-bootstrap
+    }
 }
 
 // MARK: - Daemon Client

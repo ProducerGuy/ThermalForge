@@ -665,18 +665,13 @@ struct Install: ParsableCommand {
             toFile: ThermalForgeDaemon.plistPath,
             atomically: true, encoding: .utf8
         )
-        // Tear down any existing job before bootstrapping — don't gate this on
-        // isRunning. A job can be loaded but failing (e.g. retry-looping on a
-        // dead exec left by a previous broken install): isRunning would be false,
-        // yet bootstrapping the same label would collide with the loaded job.
-        // bootout clears it whether it's healthy, crashing, or looping; ignore
-        // errors because "wasn't loaded" is a perfectly fine outcome here.
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-        try? unload.run()
-        unload.waitUntilExit()
-        Thread.sleep(forTimeInterval: 0.5)
+        // Tear down any existing job before bootstrapping — but only if launchd
+        // actually has the label registered. Checking registration (not
+        // isRunning) still catches a loaded-but-failing job that retry-loops on a
+        // dead exec; skipping when nothing is registered avoids a spurious
+        // "Boot-out failed: No such process" on a fresh install. A real bootout
+        // failure throws.
+        try ThermalForgeDaemon.bootoutIfRegistered()
 
         // Start new daemon
         let load = Process()
@@ -792,12 +787,13 @@ struct Uninstall: ParsableCommand {
             try? fc.resetAuto()
         }
 
-        // Unload daemon (bootout is the modern replacement for unload)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["bootout", "system/\(ThermalForgeDaemon.label)"]
-        try? process.run()
-        process.waitUntilExit()
+        // Unload the daemon if it's registered. Surface a genuine bootout failure
+        // but keep going — uninstall's job is to remove everything regardless.
+        do {
+            try ThermalForgeDaemon.bootoutIfRegistered()
+        } catch {
+            FileHandle.standardError.write(Data("Warning: \(error) — continuing removal.\n".utf8))
+        }
 
         // Remove daemon files
         try? fm.removeItem(atPath: ThermalForgeDaemon.plistPath)
