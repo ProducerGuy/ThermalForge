@@ -150,7 +150,7 @@ The daemon's heartbeat watchdog detects the app is gone within 15 seconds and re
 ```bash
 thermalforge auto
 ```
-Resets fans to Apple defaults. This also quits the menu bar app, so its icon disappears from the menu bar — that's expected. Relaunch it from Spotlight or `/Applications` when you're done.
+Resets the fans to Apple defaults and leaves your menu bar app running. Add `--stop-app` if you also want to quit the app so the reset sticks — otherwise a running profile re-applies its curve within seconds. With `--stop-app` the menu bar icon disappears (that's expected); relaunch from Spotlight or `/Applications` when you're done.
 
 **Fans loud and won't stop? Reset them now:**
 ```bash

@@ -88,19 +88,36 @@ struct Auto: ParsableCommand {
         abstract: "Reset fans to Apple defaults"
     )
 
+    @Flag(name: .long, help: """
+        Also quit the menu bar app. A running app with an active profile
+        re-applies its curve within seconds, so use --stop-app when the reset
+        must STICK (e.g. handing control fully back to macOS). Leave it off — the
+        default — when a script, benchmark, or inference run just needs to restore
+        fans without closing the user's app.
+        """)
+    var stopApp: Bool = false
+
     func run() throws {
         warnIfDaemonVersionMismatch()
-        // Kill the menu bar app first — if it's running with a profile active,
-        // it will override the fan reset within seconds
-        let kill = Process()
-        kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        kill.arguments = ["ThermalForgeApp"]
-        try? kill.run()
-        kill.waitUntilExit()
+
+        // Only quit the menu bar app when explicitly asked. A plain fan reset must
+        // not close the user's app as a side effect — callers that shell out to
+        // restore fans (scripts, benchmark harnesses) would otherwise silently
+        // lose their GUI. The app-override concern is real, so it's preserved
+        // behind --stop-app rather than removed.
+        if stopApp {
+            let kill = Process()
+            kill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            kill.arguments = ["ThermalForgeApp"]
+            try? kill.run()
+            kill.waitUntilExit()
+        }
 
         let fc = try FanControl()
         try fc.resetAuto()
-        print("Fans reset to Apple defaults")
+        print(stopApp
+            ? "Menu bar app stopped; fans reset to Apple defaults"
+            : "Fans reset to Apple defaults")
     }
 }
 
