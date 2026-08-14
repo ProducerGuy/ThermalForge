@@ -9,7 +9,7 @@
 //
 
 public enum ThermalForgeVersion {
-    public static let current = "0.1.7"
+    public static let current = "0.1.8"
 
     /// Daemons at or above this version understand the fan-command protocol
     /// additions from 0.1.5: the `oneshot` token (unsupervised holds that don't
