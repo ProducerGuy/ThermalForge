@@ -9,7 +9,7 @@
 //
 
 public enum ThermalForgeVersion {
-    public static let current = "0.1.3"
+    public static let current = "0.1.4"
 
     /// Minimum macOS version, as written into the app bundle's Info.plist
     /// (LSMinimumSystemVersion) by `build-app`. Kept here so the assembler has
