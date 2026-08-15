@@ -46,10 +46,11 @@ struct ThermalForgeApp: App {
                 needsDaemonUpdate: appState.daemonVersionMismatch != nil
             )
         }
-        // The native menu style keeps the status item discoverable to
-        // macOS/Bartender on newer beta releases. The window style can leave
-        // an accessory app running with no clickable status item.
-        .menuBarExtraStyle(.menu)
+        // MenuBarView is a rich custom panel (live telemetry, inline profile
+        // picker, banners and bordered controls), so it must use window style.
+        // Native menu style can register the status item yet fail to present
+        // this view when clicked on newer macOS releases.
+        .menuBarExtraStyle(.window)
     }
 }
 

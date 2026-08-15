@@ -69,6 +69,11 @@ public final class ThermalMonitor {
     /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
     private static let uiUpdateCadence = 5
 
+    /// Fan hardware does not benefit from ten tiny RPM writes per second. Keep
+    /// telemetry/UI responsive at 100ms while limiting Smart's daemon traffic
+    /// to two coalescible commands per second during a ramp.
+    private static let smartCommandCadence = 5
+
     private var tickCounter = 0
 
     /// A full status read performs many IOKit calls. Refreshing it at 100ms
@@ -403,12 +408,31 @@ public final class ThermalMonitor {
             targetPct = minPct
         }
 
-        // Ramp governors — per-profile rates, per-tick amounts
-        let rampUp = activeProfile.curve.rampUpPerSec * tickInterval
-        let rampDown = activeProfile.curve.rampDownPerSec * tickInterval
+        // Calculate continuously, but only write fan hardware at a useful
+        // cadence. This prevents the 100ms control loop from saturating the
+        // daemon with changes smaller than the fan can physically express.
+        guard tickCounter % Self.smartCommandCadence == 0 else {
+            if fansCurrentlyRunning {
+                state = .active(profileName: "Smart")
+            }
+            return
+        }
+
+        // Ramp governors — scaled to the command cadence so the configured
+        // percent-per-second behavior is unchanged.
+        let commandInterval = tickInterval * Float(Self.smartCommandCadence)
+        let rampUp = activeProfile.curve.rampUpPerSec * commandInterval
+        let rampDown = activeProfile.curve.rampDownPerSec * commandInterval
 
         if targetPct > lastAppliedRPMPercent {
-            targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
+            // A manual fan cannot run below its hardware minimum. Jump directly
+            // to that minimum on engagement instead of sending the same minimum
+            // RPM repeatedly while an imaginary sub-minimum percentage ramps.
+            if lastAppliedRPMPercent == 0 {
+                targetPct = minPct
+            } else {
+                targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
+            }
         } else if targetPct < lastAppliedRPMPercent {
             targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
         }

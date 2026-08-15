@@ -209,11 +209,10 @@ final class AppState: ObservableObject {
             do {
                 try executor.execute(command)
             } catch {
-                // Daemon rejected us because a CLI hold owns the fans. Latch it
-                // immediately, but publish the state on MainActor.
-                if let state = try? DaemonClient().readState(), state.isCLIHold {
-                    await self?.latchExternalHold(state)
-                }
+                // Do not follow a timed-out command with another blocking
+                // state read. The non-overlapping heartbeat owns hold-state
+                // reconciliation and will publish a CLI hold on its next pass.
+                TFLogger.shared.error("Fan command failed: \(command) — \(error)")
             }
             await self?.fanCommandFinished()
         }
