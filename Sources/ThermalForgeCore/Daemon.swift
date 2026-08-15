@@ -28,12 +28,13 @@ public enum ThermalForgeDaemon {
         addr.sun_family = sa_family_t(AF_UNIX)
         setPath(&addr, socketPath)
 
-        let result = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        return result == 0
+        // Bounded connect: a wedged daemon (accept loop stalled, listen backlog
+        // full) must make this return false — NOT hang. This is on the emergency
+        // reset path: `sudo thermalforge auto` → FanCommandRouter.apply → this
+        // guard; returning false there falls back to a direct root SMC reset, which
+        // is exactly the right behavior when the daemon can't be reached. An
+        // unbounded connect here would hang the one command that must always work.
+        return connectWithTimeout(fd, &addr, timeout: 2.0)
     }
 
     /// Whether launchd has our label registered in the system domain. This is
@@ -145,21 +146,34 @@ public final class DaemonClient {
     /// "error: unknown command 'version'" (a normal response, not a dropped
     /// connection), and the caller must see that string to recognize the daemon
     /// as stale rather than mistake the error text for a version number.
-    public func sendRaw(_ command: String) throws -> String {
+    public func sendRaw(_ command: String, timeout: TimeInterval = 2.0) throws -> String {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
+
+        // Bound every send/recv so a hung or contended daemon can never block the
+        // caller indefinitely — the v0.1.7 freeze. Healthy round-trips here are
+        // sub-millisecond (heartbeat/version/state) to low-single-digit ms; 2s is
+        // a stall cutoff with ~100x margin over the heaviest real reply. A caller
+        // sending a heavier verb can raise it.
+        let whole = Int(timeout)
+        var tv = timeval(tv_sec: whole, tv_usec: Int32((timeout - Double(whole)) * 1_000_000))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         setPath(&addr, ThermalForgeDaemon.socketPath)
 
-        let connectResult = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
+        // connect() must ALSO be bounded, not just read/write. A wedged daemon
+        // (accept loop stalled in a slow handleClient, listen backlog full) makes a
+        // fresh connect() block indefinitely — and with the launch-adopt gate that
+        // would silently leave the app with no fan control and no heartbeat. The
+        // shared helper connects non-blocking, polls within `timeout`, and restores
+        // blocking mode on success so SO_RCVTIMEO/SO_SNDTIMEO govern the read/write.
+        guard connectWithTimeout(fd, &addr, timeout: timeout) else {
+            throw DaemonError.notRunning
         }
-        guard connectResult == 0 else { throw DaemonError.notRunning }
 
         // Send command
         let cmdData = Array((command + "\n").utf8)
@@ -555,4 +569,59 @@ private func setPath(_ addr: inout sockaddr_un, _ path: String) {
             _ = strlcpy(dest, path, 104)
         }
     }
+}
+
+/// Connect `fd` to `addr` bounded by `timeout` seconds, so a wedged daemon (accept
+/// loop stalled, listen backlog full) can never block the caller forever. Both
+/// `DaemonClient.sendRaw` (throws on false) and `ThermalForgeDaemon.isRunning`
+/// (returns the Bool) go through here, so the two connect paths can't diverge.
+///
+/// Non-blocking connect, then `poll()` for completion. `poll()` is retried on EINTR
+/// with the REMAINING budget — a signal must not turn a healthy daemon into a
+/// spurious "not running". On success the socket is restored to blocking mode so
+/// any SO_RCVTIMEO/SO_SNDTIMEO the caller set still governs the following read/write.
+private func connectWithTimeout(_ fd: Int32, _ addr: inout sockaddr_un, timeout: TimeInterval) -> Bool {
+    let origFlags = fcntl(fd, F_GETFL, 0)
+    _ = fcntl(fd, F_SETFL, origFlags | O_NONBLOCK)
+
+    let rc = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+
+    var connected: Bool
+    if rc == 0 {
+        connected = true
+    } else if errno == EINPROGRESS {
+        connected = false
+        let deadline = DispatchTime.now() + timeout
+        while true {
+            let now = DispatchTime.now()
+            if now >= deadline { break }   // budget exhausted → not connected
+            let remainingMs = Int32((deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000)
+
+            var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let por = poll(&pfd, 1, remainingMs)
+            if por > 0 {
+                // Woke on writability: connect finished — success iff SO_ERROR == 0.
+                var soErr: Int32 = 0
+                var soLen = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soLen)
+                connected = (soErr == 0)
+                break
+            } else if por == 0 {
+                break                       // timed out → not connected
+            } else if errno == EINTR {
+                continue                    // interrupted — recompute remaining budget, retry
+            } else {
+                break                       // real poll error → not connected
+            }
+        }
+    } else {
+        connected = false                   // ECONNREFUSED, EAGAIN (backlog full), …
+    }
+
+    if connected { _ = fcntl(fd, F_SETFL, origFlags) }   // restore blocking for read/write
+    return connected
 }

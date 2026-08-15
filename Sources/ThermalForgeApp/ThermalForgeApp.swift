@@ -23,9 +23,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Reset fans on quit so daemon doesn't hold stale manual settings
+        // Reset fans on quit so the daemon doesn't hold stale APP settings — but
+        // ONLY if the app owns the hold. A CLI hold (`sudo thermalforge max`) is the
+        // user's deliberate, unsupervised choice; quitting the menu bar app must not
+        // destroy it — that's the v0.1.7 arbitration feature. Synchronous on purpose:
+        // the process is exiting, so an async write would be dropped; both calls are
+        // bounded by the sendRaw timeout.
         let client = DaemonClient()
-        try? client.execute(.resetAuto)
+        if let state = try? client.readState(), state.owner == "app" {
+            try? client.execute(.resetAuto)
+        }
+        // owner == "cli" → leave the CLI hold alone; owner == "none" → nothing to reset.
     }
 }
 

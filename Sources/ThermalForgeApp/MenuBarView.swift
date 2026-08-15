@@ -26,19 +26,27 @@ struct MenuBarView: View {
 
             Divider()
 
-            // Update-needed banner — shown whenever the daemon is out of sync.
-            // Persistent (no dismiss): a stale daemon should keep nagging.
-            if let daemonVersion = appState.daemonVersionMismatch {
-                DaemonUpdateBanner(daemonVersion: daemonVersion)
+            if appState.daemonUnreachable {
+                // Daemon not answering — nothing in the app can touch the fans, so
+                // this takes over the top of the menu and offers a one-click fix.
+                // The version/hold banners are moot while it's unreachable.
+                DaemonDownBanner(onRestart: { appState.restartDaemon() })
                 Divider()
-            }
+            } else {
+                // Update-needed banner — shown whenever the daemon is out of sync.
+                // Persistent (no dismiss): a stale daemon should keep nagging.
+                if let daemonVersion = appState.daemonVersionMismatch {
+                    DaemonUpdateBanner(daemonVersion: daemonVersion)
+                    Divider()
+                }
 
-            // CLI-hold banner — the app is reflecting a hold set from the
-            // terminal and won't adjust fans until the user takes over. The
-            // Default button (or picking a profile) releases it.
-            if let hold = appState.externalHold {
-                ExternalHoldBanner(hold: hold)
-                Divider()
+                // CLI-hold banner — the app is reflecting a hold set from the
+                // terminal and won't adjust fans until the user takes over. The
+                // Default button (or picking a profile) releases it.
+                if let hold = appState.externalHold {
+                    ExternalHoldBanner(hold: hold)
+                    Divider()
+                }
             }
 
             // Fan speeds
@@ -258,6 +266,45 @@ private struct DaemonUpdateBanner: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.12))
+    }
+}
+
+/// Shown when the daemon has stopped answering — fan control is impossible until
+/// it's back. Offers a one-click restart (launchd kickstart via a macOS admin
+/// prompt). The daemon's KeepAlive usually restarts it on its own, so this is the
+/// manual nudge for the rare stuck case; it never asks the user to reinstall.
+private struct DaemonDownBanner: View {
+    let onRestart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Fan control unavailable", systemImage: "exclamationmark.octagon.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.red)
+
+            Text("The background service isn't responding, so profiles and Default can't change the fans right now.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: onRestart) {
+                Label("Restart daemon", systemImage: "arrow.clockwise")
+                    .font(.caption.bold())
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .padding(.top, 2)
+
+            Text("Asks for your password once. If it doesn't come back right away, it will keep retrying on its own.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.12))
     }
 }
 
