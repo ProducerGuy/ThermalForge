@@ -12,6 +12,8 @@ import SwiftUI
 @MainActor
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
+    // Keep Apple-default behavior on first launch. Smart remains selectable
+    // from the menu bar; the local diagnostic build used Smart explicitly.
     @Published var activeProfile: FanProfile = .silent
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
@@ -35,6 +37,12 @@ final class AppState: ObservableObject {
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: Timer?
+    private var heartbeatInFlight = false
+    /// Daemon commands are serialized and coalesced. A stalled daemon must not
+    /// create one detached task per 100ms ramp tick; only the newest pending
+    /// RPM target is useful once the socket becomes available again.
+    private var pendingFanCommand: FanCommand?
+    private var fanCommandInFlight = false
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
@@ -92,8 +100,22 @@ final class AppState: ObservableObject {
     // MARK: - Heartbeat
 
     private func startHeartbeat() {
-        let client = DaemonClient()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.startHeartbeatRequest()
+            }
+        }
+    }
+
+    @MainActor
+    private func startHeartbeatRequest() {
+        guard !heartbeatInFlight else { return }
+        heartbeatInFlight = true
+
+        // Every daemon request has bounded socket I/O, but keep the whole
+        // heartbeat off MainActor so a slow daemon can never pause SwiftUI.
+        Task.detached { [weak self] in
+            let client = DaemonClient()
             _ = try? client.send("heartbeat")
 
             // Piggyback a version check on the heartbeat. Detect the raw "error:"
@@ -111,11 +133,15 @@ final class AppState: ObservableObject {
             // menu bar and suspends our monitor (nil if unreadable — don't guess).
             let hold = try? client.readState()
 
-            Task { @MainActor [weak self] in
-                self?.daemonVersionMismatch = mismatch
-                self?.externalHold = (hold?.isCLIHold == true) ? hold : nil
-            }
+            await self?.completeHeartbeat(mismatch: mismatch, hold: hold)
         }
+    }
+
+    @MainActor
+    private func completeHeartbeat(mismatch: String?, hold: DaemonHoldState?) {
+        daemonVersionMismatch = mismatch
+        externalHold = (hold?.isCLIHold == true) ? hold : nil
+        heartbeatInFlight = false
     }
 
     // MARK: - Monitoring
@@ -129,9 +155,11 @@ final class AppState: ObservableObject {
                 self?.latestStatus = status
                 self?.activeProfile = profile
                 self?.monitorState = state
-                // Max of only the displayed sensors
-                // Peak across all CPU and GPU sensors for menu bar display
-                let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
+                // Prefer aggregate TC* sensors when present. The Tp0* aliases
+                // on M4/M5 can be placeholder values and must not drive the UI
+                // temperature or Smart profile.
+                let hasAggregateCPU = status.temperatures.keys.contains { $0.hasPrefix("TC") }
+                let displayPrefixes = hasAggregateCPU ? ["TC", "TG", "Tg"] : ["Tp", "TG", "Tg"]
                 self?.maxTemp = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
@@ -144,20 +172,56 @@ final class AppState: ObservableObject {
                 // monitor resumes control when they pick a profile or press
                 // Default (which clears externalHold).
                 guard self.externalHold == nil else { return }
-                do {
-                    try self.executor.execute(command)
-                } catch {
-                    // Daemon rejected us because a CLI hold owns the fans. Latch
-                    // it now (don't wait up to 5s for the poll) so the monitor
-                    // stops trying and the banner appears immediately.
-                    if let state = try? DaemonClient().readState(), state.isCLIHold {
-                        self.externalHold = state
-                    }
-                }
+
+                // DaemonClient.sendRaw performs a blocking Unix-socket read.
+                // Never run it on MainActor: a slow SMC transaction must not
+                // freeze the menu bar or make Bartender appear to intercept it.
+                self.enqueueFanCommand(command)
             }
         }
         monitor.start()
         self.monitor = monitor
+    }
+
+    @MainActor
+    private func latchExternalHold(_ state: DaemonHoldState) {
+        externalHold = state
+    }
+
+    @MainActor
+    private func enqueueFanCommand(_ command: FanCommand) {
+        pendingFanCommand = command
+        guard !fanCommandInFlight else { return }
+        fanCommandInFlight = true
+        drainFanCommandQueue()
+    }
+
+    @MainActor
+    private func drainFanCommandQueue() {
+        guard let command = pendingFanCommand else {
+            fanCommandInFlight = false
+            return
+        }
+        pendingFanCommand = nil
+        let executor = self.executor
+
+        Task.detached { [weak self, executor] in
+            do {
+                try executor.execute(command)
+            } catch {
+                // Daemon rejected us because a CLI hold owns the fans. Latch it
+                // immediately, but publish the state on MainActor.
+                if let state = try? DaemonClient().readState(), state.isCLIHold {
+                    await self?.latchExternalHold(state)
+                }
+            }
+            await self?.fanCommandFinished()
+        }
+    }
+
+    @MainActor
+    private func fanCommandFinished() {
+        drainFanCommandQueue()
     }
 
     // MARK: - Actions

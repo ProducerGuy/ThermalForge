@@ -46,7 +46,10 @@ struct ThermalForgeApp: App {
                 needsDaemonUpdate: appState.daemonVersionMismatch != nil
             )
         }
-        .menuBarExtraStyle(.window)
+        // The native menu style keeps the status item discoverable to
+        // macOS/Bartender on newer beta releases. The window style can leave
+        // an accessory app running with no clickable status item.
+        .menuBarExtraStyle(.menu)
     }
 }
 
