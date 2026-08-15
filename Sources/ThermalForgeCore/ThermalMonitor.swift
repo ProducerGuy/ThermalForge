@@ -69,7 +69,19 @@ public final class ThermalMonitor {
     /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
     private static let uiUpdateCadence = 5
 
+    /// Fan hardware does not benefit from ten tiny RPM writes per second. Keep
+    /// telemetry/UI responsive at 100ms while limiting Smart's daemon traffic
+    /// to two coalescible commands per second during a ramp.
+    private static let smartCommandCadence = 5
+
     private var tickCounter = 0
+
+    /// A full status read performs many IOKit calls. Refreshing it at 100ms
+    /// can starve the privileged daemon and produce placeholder SMC values.
+    /// Keep the control loop at 100ms, but refresh telemetry once per second.
+    private let statusRefreshInterval: TimeInterval = 1.0
+    private var cachedStatus: ThermalStatus?
+    private var lastStatusRead: DispatchTime?
 
     // MARK: - Fan State
 
@@ -80,6 +92,9 @@ public final class ThermalMonitor {
     // MARK: - Smart Profile State
 
     private var tempHistory: [Float] = []
+    /// Low-pass filtered control temperature. This prevents a single stale or
+    /// malformed SMC sample from causing a full fan ramp or a false anomaly.
+    private var filteredControlTemp: Float?
 
     // MARK: - Anomaly Detection
 
@@ -149,6 +164,7 @@ public final class ThermalMonitor {
             if profile.id == "smart" {
                 // Reset Smart state and reload calibration data
                 tempHistory.removeAll()
+                filteredControlTemp = nil
                 let loaded = CalibrationData.load()
                 if let error = loaded?.validationError {
                     TFLogger.shared.error("Calibration data rejected on reload: \(error)")
@@ -165,15 +181,30 @@ public final class ThermalMonitor {
     // MARK: - Polling
 
     private func tick() {
-        guard let status = try? fanControl.status() else { return }
+        let now = DispatchTime.now()
+        let shouldRefresh: Bool
+        if let last = lastStatusRead {
+            let elapsed = Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1_000_000_000
+            shouldRefresh = elapsed >= statusRefreshInterval
+        } else {
+            shouldRefresh = true
+        }
+        if shouldRefresh, let fresh = try? fanControl.status() {
+            cachedStatus = fresh
+            lastStatusRead = now
+        }
+        guard let status = cachedStatus else { return }
         latestStatus = status
 
         // Extract peak temperatures
-        // CPU: aggregate keys (M5) + per-core keys (M1-M4)
-        let cpuTemp = peakTemp(status, prefixes: ["TC", "Tp"])
+        // Prefer aggregate TC* sensors when present. On M4/M5 the legacy Tp0*
+        // aliases can be placeholder values and falsely report 70–80°C.
+        let aggregateCPU = peakTemp(status, prefixes: ["TC"])
+        let cpuTemp = aggregateCPU > 0 ? aggregateCPU : peakTemp(status, prefixes: ["Tp"])
         // GPU: ioft keys (M5) + flt keys (M1-M4)
         let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
-        let maxTemp = max(cpuTemp, gpuTemp)
+        let rawMaxTemp = max(cpuTemp, gpuTemp)
+        let maxTemp = stabilizedTemperature(rawMaxTemp, refresh: shouldRefresh)
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
         if tickCounter % Self.monitorCadence == 0 {
@@ -351,7 +382,8 @@ public final class ThermalMonitor {
             if rate > 0 {
                 // Rising: boost proportionally to rate and proximity to ceiling
                 let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
-                targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
+                let lead = min(rate * 0.08 * (1 + urgency), 0.25)
+                targetPct = min(targetPct + lead, 1.0)
             }
         } else {
             // Uncalibrated: S-curve (matches profile curveShape)
@@ -360,7 +392,9 @@ public final class ThermalMonitor {
             targetPct = position * position * (3 - 2 * position)
 
             if rate > 0 {
-                targetPct = min(targetPct + rate * 0.2, 1.0)
+                // Rate-of-change is a modest lead term, not a second control
+                // loop. The ramp governor remains the primary limiter.
+                targetPct = min(targetPct + min(rate * 0.08, 0.25), 1.0)
             }
         }
 
@@ -374,12 +408,31 @@ public final class ThermalMonitor {
             targetPct = minPct
         }
 
-        // Ramp governors — per-profile rates, per-tick amounts
-        let rampUp = activeProfile.curve.rampUpPerSec * tickInterval
-        let rampDown = activeProfile.curve.rampDownPerSec * tickInterval
+        // Calculate continuously, but only write fan hardware at a useful
+        // cadence. This prevents the 100ms control loop from saturating the
+        // daemon with changes smaller than the fan can physically express.
+        guard tickCounter % Self.smartCommandCadence == 0 else {
+            if fansCurrentlyRunning {
+                state = .active(profileName: "Smart")
+            }
+            return
+        }
+
+        // Ramp governors — scaled to the command cadence so the configured
+        // percent-per-second behavior is unchanged.
+        let commandInterval = tickInterval * Float(Self.smartCommandCadence)
+        let rampUp = activeProfile.curve.rampUpPerSec * commandInterval
+        let rampDown = activeProfile.curve.rampDownPerSec * commandInterval
 
         if targetPct > lastAppliedRPMPercent {
-            targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
+            // A manual fan cannot run below its hardware minimum. Jump directly
+            // to that minimum on engagement instead of sending the same minimum
+            // RPM repeatedly while an imaginary sub-minimum percentage ramps.
+            if lastAppliedRPMPercent == 0 {
+                targetPct = minPct
+            } else {
+                targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
+            }
         } else if targetPct < lastAppliedRPMPercent {
             targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
         }
@@ -409,7 +462,28 @@ public final class ThermalMonitor {
         let newest = tempHistory.last!
         // tempHistory sampled at monitor cadence (2s intervals)
         let seconds = Float(tempHistory.count - 1) * Float(Self.monitorCadence) * tickInterval
-        return (newest - oldest) / seconds
+        // Ignore impossible slopes from a single stale SMC sample. A real
+        // sustained thermal change still passes through this bound.
+        return min(max((newest - oldest) / seconds, -3.0), 3.0)
+    }
+
+    /// Smooth only when a fresh SMC snapshot arrives. The one-second refresh
+    /// cadence makes the step limit meaningful and leaves the 100ms fan ramp
+    /// loop responsive without hammering AppleSMC.
+    private func stabilizedTemperature(_ raw: Float, refresh: Bool) -> Float {
+        guard refresh else { return filteredControlTemp ?? raw }
+        guard raw.isFinite, raw > 0, raw < 150 else {
+            return filteredControlTemp ?? 0
+        }
+        guard let previous = filteredControlTemp else {
+            filteredControlTemp = raw
+            return raw
+        }
+
+        let bounded = min(max(raw, previous - 8.0), previous + 8.0)
+        let filtered = previous * 0.65 + bounded * 0.35
+        filteredControlTemp = filtered
+        return filtered
     }
 
     // MARK: - Curve-Based Profiles

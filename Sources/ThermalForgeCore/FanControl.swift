@@ -70,6 +70,10 @@ public final class FanControl {
     private let modeKeyTemplate: String
     /// Whether Ftst unlock is available (M1-M4) or not (M5+)
     private let hasFtst: Bool
+    /// Temperature keys to query for this machine. M4/M5 machines expose a
+    /// stable aggregate CPU temperature, while legacy Tp0* aliases can return
+    /// placeholder values on those machines.
+    private let fltTemperatureKeys: [String]
 
     public init() throws {
         guard let connection = SMCConnection() else {
@@ -92,6 +96,20 @@ public final class FanControl {
         } else {
             self.hasFtst = false
         }
+
+        let aggregateCPUKeys = ["TCDX", "TCHP", "TCMb"]
+        let legacyCPUKeys = [
+            "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
+            "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
+            "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
+        ]
+        let hasAggregateCPU = aggregateCPUKeys.contains { connection.getKeyInfo($0)?.size == 4 }
+
+        self.fltTemperatureKeys = (hasAggregateCPU ? aggregateCPUKeys : legacyCPUKeys) + [
+            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
+            "Tm02", "Tm06", "Tm08", "Tm09", "TRDX", "TMVR",
+            "TPDX", "TH0x", "TH0A", "TH0B", "TAOL", "TA0P", "TS0P", "TB0T",
+        ]
     }
 
     // MARK: - Fan Count
@@ -313,38 +331,12 @@ public final class FanControl {
             ))
         }
 
-        // Probe temperature keys across all known Apple Silicon generations.
-        // Keys that don't exist on a given machine are skipped automatically.
-        // Labels use the raw SMC key name — no assumptions about what a key
-        // means on hardware we haven't verified.
+        // Probe only the temperature family appropriate for this machine.
+        // On M4/M5, Tp0* aliases are present but are not reliable thermal
+        // sensors; querying them also adds substantial SMC traffic.
         var temps: [String: Float] = [:]
 
-        // All known CPU/GPU/memory/misc thermal keys (flt type, 4 bytes)
-        let fltKeys: [String] = [
-            // CPU — aggregate (M5 Max verified)
-            "TCDX", "TCHP", "TCMb",
-            // CPU — per-core (Tp prefix, present across M1-M5 with varying mappings)
-            "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
-            "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
-            "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
-            // GPU (flt type — M1 through M4)
-            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
-            // Memory
-            "Tm02", "Tm06", "Tm08", "Tm09",
-            "TRDX", "TMVR",
-            // Power delivery
-            "TPDX",
-            // SSD
-            "TH0x", "TH0A", "TH0B",
-            // Ambient
-            "TAOL", "TA0P",
-            // Proximity
-            "TS0P",
-            // Battery
-            "TB0T",
-        ]
-
-        for key in fltKeys {
+        for key in fltTemperatureKeys {
             let result = smc.readKey(key)
             if result.success && result.size == 4 {
                 let temp = smcBytesToFloat(result.bytes, size: result.size)

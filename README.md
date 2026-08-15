@@ -139,6 +139,16 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 **0 to minimum RPM is binary:** Apple Silicon MacBook fans cannot spin below their minimum RPM (2317 on M5 Max, 1200 on M1 Max). When Smart decides fans should run, they jump directly to minimum — this is a hardware limitation of brushless DC motors that require a startup burst to overcome static friction. Above minimum, all speed changes are smooth and governed.
 
+### M4/M5 sensor and responsiveness safeguards
+
+On newer Apple Silicon machines, some legacy `Tp0*` keys may exist but return
+placeholder values. ThermalForge prefers the machine's aggregate `TC*` CPU
+sensors when they are available, and falls back to the legacy family only when
+they are not. Full telemetry is refreshed once per second while the 100ms fan
+ramp remains active; this keeps Smart responsive without repeatedly issuing a
+large burst of SMC reads. Daemon commands run off the menu-bar actor as well, so
+a slow privileged-daemon response cannot freeze the menu bar.
+
 ### FAQ
 
 **What if ThermalForge closes during normal use?**

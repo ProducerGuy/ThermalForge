@@ -114,6 +114,11 @@ public struct DaemonHoldState: Codable, Equatable {
 }
 
 public final class DaemonClient {
+    /// A daemon-side SMC stall must not leave callers blocked forever. The app
+    /// treats a timeout like an unreachable daemon and lets the watchdog/reset
+    /// path recover on the next cycle.
+    private static let ioTimeoutSeconds: Int = 2
+
     public init() {}
 
     /// Read the daemon's current hold (what's set and who owns it) so the menu
@@ -149,6 +154,14 @@ public final class DaemonClient {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
+
+        var timeout = timeval(tv_sec: Self.ioTimeoutSeconds, tv_usec: 0)
+        _ = withUnsafePointer(to: &timeout) {
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+        }
+        _ = withUnsafePointer(to: &timeout) {
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+        }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
