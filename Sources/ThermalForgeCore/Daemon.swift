@@ -303,8 +303,15 @@ public final class DaemonServer {
             while true {
                 let clientFD = accept(socketFD, nil, nil)
                 guard clientFD >= 0 else { continue }
-                handleClient(clientFD)
-                close(clientFD)
+                // Drain per-connection autoreleased temporaries. This GCD block
+                // never returns, so without an explicit pool anything autoreleased
+                // inside handleClient would accumulate for the daemon's lifetime.
+                // accept() and the guard stay OUTSIDE the pool so `continue` keeps
+                // its normal loop meaning (no return-scope subtlety).
+                autoreleasepool {
+                    handleClient(clientFD)
+                    close(clientFD)
+                }
             }
         }
 
@@ -333,24 +340,30 @@ public final class DaemonServer {
                 guard case .supervised(_, let lastBeat) = current,
                       Date().timeIntervalSince(lastBeat) > 15 else { continue }
 
-                NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
-                smcLock.lock()
-                let resetSucceeded: Bool
-                do {
-                    try fanControl.resetAuto()
-                    resetSucceeded = true
-                } catch {
-                    NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
-                    resetSucceeded = false
-                }
-                smcLock.unlock()
+                // Only the revert path allocates anything autoreleasable (NSLog +
+                // error interpolation), and it never returns from this loop, so pool
+                // it. The sleep/guard/continue stay outside — a steady tick allocates
+                // nothing autoreleasable (Date is a value type).
+                autoreleasepool {
+                    NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                    smcLock.lock()
+                    let resetSucceeded: Bool
+                    do {
+                        try fanControl.resetAuto()
+                        resetSucceeded = true
+                    } catch {
+                        NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
+                        resetSucceeded = false
+                    }
+                    smcLock.unlock()
 
-                // Clear only if the reset worked AND the same supervised hold is
-                // still current — a new command may have arrived meanwhile.
-                if resetSucceeded {
-                    stateLock.lock()
-                    if case .supervised(_, let beat) = hold, beat == lastBeat { hold = .none }
-                    stateLock.unlock()
+                    // Clear only if the reset worked AND the same supervised hold is
+                    // still current — a new command may have arrived meanwhile.
+                    if resetSucceeded {
+                        stateLock.lock()
+                        if case .supervised(_, let beat) = hold, beat == lastBeat { hold = .none }
+                        stateLock.unlock()
+                    }
                 }
             }
         }
