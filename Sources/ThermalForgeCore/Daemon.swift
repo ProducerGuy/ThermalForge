@@ -449,6 +449,14 @@ public final class DaemonServer {
     }
 
     private func handleClient(_ fd: Int32) {
+        // Bound the server-side read the way DaemonClient.sendRaw bounds the client
+        // (v0.1.7). A connect-and-hang client can now stall this serial accept loop
+        // for at most ~5s instead of forever. On timeout read()/write() return
+        // -1/EAGAIN and the existing `guard n > 0` below closes the connection.
+        var rcvTimeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         var buffer = [UInt8](repeating: 0, count: 256)
         let n = read(fd, &buffer, buffer.count - 1)
         guard n > 0 else { return }
