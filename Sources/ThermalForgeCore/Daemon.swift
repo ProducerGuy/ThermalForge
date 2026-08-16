@@ -13,7 +13,10 @@ import IOKit.pwr_mgt
 // MARK: - Constants
 
 public enum ThermalForgeDaemon {
-    public static let socketPath = "/tmp/thermalforge.sock"
+    // /var/run is root-owned 0755: unprivileged processes cannot create entries,
+    // so path squatting is structurally impossible (unlike world-writable /tmp).
+    // Cleared at boot; RunAtLoad re-creates the socket at daemon load.
+    public static let socketPath = "/var/run/thermalforge.sock"
     public static let plistPath = "/Library/LaunchDaemons/com.thermalforge.daemon.plist"
     public static let installPath = "/usr/local/bin/thermalforge"
     public static let label = "com.thermalforge.daemon"
@@ -244,6 +247,9 @@ private enum HoldState {
 public final class DaemonServer {
     private let socketFD: Int32
     private let fanControl: FanControl
+    /// uid of the controlling user (who ran `sudo thermalforge install`). The
+    /// socket is chown'd to this uid + 0600, so only that user (and root) connect.
+    private let ownerUID: uid_t
     /// Serializes all SMC access — prevents data race between client handler and watchdog
     private let smcLock = NSLock()
     /// The current hold and its owner. Re-applied after sleep/wake; the watchdog
@@ -251,8 +257,19 @@ public final class DaemonServer {
     private var hold: HoldState = .none
     private let stateLock = NSLock()
 
-    public init(fanControl: FanControl) throws {
+    public init(fanControl: FanControl, ownerUID: uid_t) throws {
         self.fanControl = fanControl
+        self.ownerUID = ownerUID
+
+        // Refuse to start with an unusable owner. uid 0 would make the socket
+        // root-only and silently lock every non-root account (the user's app/CLI)
+        // out of fan control. Fail loudly under KeepAlive so Console.app shows why,
+        // rather than a mystery "daemon-down" banner. Install.run() guarantees a
+        // real uid, so reaching here means a hand-edited plist or a dev mistake.
+        guard ownerUID != 0 else {
+            NSLog("ThermalForge daemon: refusing to start — owner uid is 0. Reinstall with `sudo thermalforge install` from your user account.")
+            throw ThermalForgeError.writeFailed("daemon owner uid must be non-zero")
+        }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -260,25 +277,33 @@ public final class DaemonServer {
         }
         self.socketFD = fd
 
-        // Remove stale socket
+        // Remove stale socket (safe now: only root can have created anything in
+        // root-owned /var/run — no unprivileged squatter to preserve).
         unlink(ThermalForgeDaemon.socketPath)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         setPath(&addr, ThermalForgeDaemon.socketPath)
 
+        // Bind under a 0077 umask so the socket is 0700-from-birth — the previous
+        // bind→chmod gap (default umask briefly left it world-accessible) never
+        // exists. Restore the process umask immediately after.
+        let oldMask = umask(0o077)
         let bindResult = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        umask(oldMask)
         guard bindResult == 0 else {
             close(fd)
             throw ThermalForgeError.writeFailed("bind() failed: \(errno)")
         }
 
-        // Allow all local users to connect
-        chmod(ThermalForgeDaemon.socketPath, 0o777)
+        // Hand the socket to the controlling user: owned by them, group wheel,
+        // 0600. Only that user (and root — perms don't bind root) can connect.
+        chown(ThermalForgeDaemon.socketPath, ownerUID, 0)
+        chmod(ThermalForgeDaemon.socketPath, 0o600)
 
         guard listen(fd, 5) == 0 else {
             close(fd)

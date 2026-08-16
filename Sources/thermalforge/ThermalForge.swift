@@ -584,6 +584,39 @@ struct Install: ParsableCommand {
             throw ValidationError("Run with sudo: sudo thermalforge install")
         }
 
+        // The daemon runs under launchd with no SUDO_UID of its own, so capture the
+        // controlling user here and bake it into the plist (1c). Absent means
+        // "already root, not via sudo" (a root shell) — refuse rather than default to
+        // 0, which would make the socket root-only and brick the user's app. A
+        // non-root user never reaches this line — the geteuid() guard above stops them.
+        guard let sudoUIDString = ProcessInfo.processInfo.environment["SUDO_UID"],
+              let ownerUID = Int(sudoUIDString), ownerUID != 0 else {
+            throw ValidationError("""
+                Can't determine who should own fan control: SUDO_UID isn't set.
+                Run the install with sudo from your normal user account:
+
+                    sudo thermalforge install
+
+                Don't run it from a root shell (su / sudo -i) — the daemon needs your
+                user's id so your app and CLI work without sudo. Installing as root
+                would lock every non-root account out of fan control.
+                """)
+        }
+
+        // Non-destructively capture whether the controlling user's app is running
+        // NOW — before this install kills anything — as the signal for whether to
+        // relaunch it at the end (upgrade recovery). Captured here, not inferred from
+        // a later pkill, so it can't be confused by whatever killed the app first
+        // (./setup.sh quits it before calling install; brew leaves it running).
+        func runTool(_ path: String, _ args: [String]) -> Int32 {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: path)
+            p.arguments = args
+            do { try p.run(); p.waitUntilExit(); return p.terminationStatus }
+            catch { return -1 }
+        }
+        let appWasRunning = runTool("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"]) == 0
+
         // Resolve symlinks first. Launched via Homebrew (`sudo thermalforge
         // install`), argv[0] is /opt/homebrew/bin/thermalforge — itself a symlink
         // into the Cellar. Copying that verbatim produces a symlink whose relative
@@ -653,6 +686,8 @@ struct Install: ParsableCommand {
                 <array>
                     <string>\(installPath)</string>
                     <string>daemon</string>
+                    <string>--owner-uid</string>
+                    <string>\(ownerUID)</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
@@ -672,6 +707,11 @@ struct Install: ParsableCommand {
         // "Boot-out failed: No such process" on a fresh install. A real bootout
         // failure throws.
         try ThermalForgeDaemon.bootoutIfRegistered()
+
+        // Migration: drop the legacy world-writable /tmp socket so no old client can
+        // find (or squat) it. The daemon now serves /var/run; a literal path here
+        // because socketPath is /var/run/... from Phase 1a.
+        unlink("/tmp/thermalforge.sock")
 
         // Start new daemon
         let load = Process()
@@ -755,6 +795,25 @@ struct Install: ParsableCommand {
             print("The CLI and daemon are installed; the menu bar app just won't be in /Applications.")
         }
 
+        // Upgrade recovery: if the controlling user's app was running when this
+        // install STARTED (captured above, before anything killed it), it has the OLD
+        // /tmp socket path compiled in and would now connect to the removed /tmp and
+        // show the misleading daemon-down banner. Restart it so it reloads the new
+        // binary + /var/run path. appWasRunning also confirms a live GUI session to
+        // relaunch into (a menu bar app only runs in one) — a not-logged-in user
+        // (app not running) is a clean no-op. ENTIRELY non-fatal: the daemon is
+        // already verified up, so a failed GUI relaunch prints guidance and never
+        // fails the install.
+        if appWasRunning {
+            _ = runTool("/usr/bin/pkill", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+            Thread.sleep(forTimeInterval: 0.5)   // let it fully exit before relaunch
+            let relaunched = runTool("/bin/launchctl",
+                ["asuser", "\(ownerUID)", "/usr/bin/open", appDest]) == 0
+            if !relaunched {
+                print("Quit and reopen ThermalForge — the fan-control socket moved this version.")
+            }
+        }
+
         print("Done.")
     }
 }
@@ -798,7 +857,8 @@ struct Uninstall: ParsableCommand {
         // Remove daemon files
         try? fm.removeItem(atPath: ThermalForgeDaemon.plistPath)
         try? fm.removeItem(atPath: ThermalForgeDaemon.installPath)
-        try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)
+        try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)      // /var/run (current)
+        try? fm.removeItem(atPath: "/tmp/thermalforge.sock")           // legacy path (pre-Phase 1)
 
         // Remove user data
         let appSupport = home.appendingPathComponent("Library/Application Support/ThermalForge")
@@ -905,9 +965,16 @@ struct Daemon: ParsableCommand {
         abstract: "Run the privileged socket server (called by launchd)"
     )
 
+    /// uid of the controlling user, injected by Install.run() into the launchd
+    /// plist's ProgramArguments. Required: the daemon has no SUDO_UID of its own,
+    /// so without this it can't know who owns the socket. Absent → parse failure →
+    /// visible crash-loop under KeepAlive (never a silent root-owned socket).
+    @Option(name: .customLong("owner-uid"), help: "uid that owns the control socket")
+    var ownerUid: Int
+
     func run() throws {
         let fc = try FanControl()
-        let server = try DaemonServer(fanControl: fc)
+        let server = try DaemonServer(fanControl: fc, ownerUID: uid_t(ownerUid))
         server.run()
     }
 }
