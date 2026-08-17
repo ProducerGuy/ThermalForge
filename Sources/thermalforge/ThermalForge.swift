@@ -647,31 +647,111 @@ struct Install: ParsableCommand {
                 """)
         }
 
-        // Remove any prior binary/symlink first. Only "nothing there" is
-        // acceptable — if an existing item can't be removed, fail loud with the
-        // path, or the copyItem below throws a confusing "file exists" that hides
-        // the real cause. fileExists follows symlinks and returns false for a
-        // dangling one (exactly the broken state a prior install could leave), so
-        // check for a symlink target too.
-        let somethingAtInstallPath = fm.fileExists(atPath: installPath)
-            || (try? fm.destinationOfSymbolicLink(atPath: installPath)) != nil
-        if somethingAtInstallPath {
+        // #28 self-delete + upgrade re-sync. Two separate concerns, kept separate.
+        //
+        // SAFETY (never brick): never remove installPath. Stage into installPath.new
+        // (same directory → same filesystem → rename() is atomic, no EXDEV) and
+        // rename() over installPath. The source is read into the temp before
+        // installPath is touched, so a same-path or failed install can never delete
+        // the binary it's reading from (#28), installPath is never absent (the
+        // emergency-reset escape hatch always exists), and a dangling symlink is
+        // replaced too — what the old removeItem was for.
+        //
+        // SOURCE (re-sync, path-independent): install the binary the user invoked
+        // (argv[0]) when it's a DISTINCT file from installPath — right for a
+        // from-source build (.build/release: even same version, newer code) and for
+        // Homebrew-via-/opt/homebrew (the keg). When argv[0] IS installPath — re-run
+        // install from the installed binary, e.g. sudo's secure_path resolving to the
+        // stale /usr/local/bin copy after `brew upgrade` — copying it onto itself is a
+        // permanent no-op that would leave the daemon stale and the mismatch warning
+        // firing forever. So fall back to the Homebrew keg and install it IF it's a
+        // newer version. The keg's version is read from its Cellar PATH (opt/<formula>
+        // → Cellar/<formula>/<version>), never by executing an untrusted-path binary
+        // as root — the installer only ever copies it.
+        let attrs: [FileAttributeKey: Any] =
+            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755]
+        let resolvedBinary = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath().path
+        let resolvedInstall = URL(fileURLWithPath: installPath).resolvingSymlinksInPath().path
+
+        // Atomically replace installPath with a copy of `source`, never removing
+        // installPath. Throws on failure, leaving the existing install intact.
+        func installBinary(from source: String) throws {
+            let tempPath = installPath + ".new"
+            try? fm.removeItem(atPath: tempPath)   // clear a stale temp from a prior crash
             do {
-                try fm.removeItem(atPath: installPath)
+                try fm.copyItem(atPath: source, toPath: tempPath)
+                try fm.setAttributes(attrs, ofItemAtPath: tempPath)
             } catch {
+                try? fm.removeItem(atPath: tempPath)
                 throw ValidationError("""
-                    Couldn't remove the existing binary at \(installPath):
+                    Couldn't stage the daemon binary at \(tempPath):
                     \(error.localizedDescription)
-                    Remove it manually (sudo rm -f "\(installPath)") and re-run.
+                    The existing install at \(installPath) is untouched.
                     """)
+            }
+            guard rename(tempPath, installPath) == 0 else {
+                let err = errno
+                try? fm.removeItem(atPath: tempPath)
+                throw ValidationError(
+                    "Couldn't install the binary to \(installPath) (rename failed: errno \(err)). " +
+                    "The existing install is untouched."
+                )
             }
         }
 
-        try fm.copyItem(atPath: binaryPath, toPath: installPath)
-        try fm.setAttributes(
-            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
-            ofItemAtPath: installPath
-        )
+        if resolvedBinary != resolvedInstall {
+            // Install the binary the user invoked.
+            try installBinary(from: binaryPath)
+        } else {
+            // Self-referential invocation → a re-sync request. The running binary's
+            // version IS installPath's version (same file), so only a strictly-newer
+            // Homebrew keg is worth installing; never downgrade.
+            let current = ThermalForgeVersion.current
+            let kegBinaries = [
+                "/opt/homebrew/opt/thermalforge/bin/thermalforge",
+                "/usr/local/opt/thermalforge/bin/thermalforge",
+            ]
+            // Version from the keg's resolved Cellar path — no execution. opt/<f>
+            // symlinks to Cellar/<f>/<version>; take the component after it.
+            func kegVersion(_ path: String) -> String? {
+                let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+                let parts = real.components(separatedBy: "/Cellar/thermalforge/")
+                guard parts.count == 2 else { return nil }
+                return parts[1].components(separatedBy: "/").first
+            }
+
+            var resynced = false
+            for keg in kegBinaries {
+                guard fm.fileExists(atPath: keg) else { continue }
+                guard let version = kegVersion(keg) else {
+                    // Keg is present but its version couldn't be read from the path —
+                    // most likely the formula was renamed (the parse keys on
+                    // "/Cellar/thermalforge/"). Say so loudly: otherwise re-sync goes
+                    // silent and no one would know why a stale daemon won't update.
+                    let resolved = URL(fileURLWithPath: keg).resolvingSymlinksInPath().path
+                    print("""
+                        Found a Homebrew keg at \(keg) but couldn't parse its version \
+                        from the resolved path \(resolved) (expected \
+                        .../Cellar/thermalforge/<version>/...). Skipping re-sync — \
+                        check whether the formula was renamed.
+                        """)
+                    continue
+                }
+                // Strictly newer than what's installed (numeric, never downgrade).
+                guard ThermalForgeVersion.atLeast(version, current),
+                      !ThermalForgeVersion.atLeast(current, version) else { continue }
+                print("Re-syncing daemon binary from Homebrew keg \(version) at \(keg).")
+                try installBinary(from: URL(fileURLWithPath: keg).resolvingSymlinksInPath().path)
+                resynced = true
+                break
+            }
+            if !resynced {
+                // Already current — nothing newer to install. Re-assert perms; the
+                // plist/daemon refresh below does the rest.
+                print("Binary at \(installPath) is already current (\(current)) — nothing to copy.")
+                try? fm.setAttributes(attrs, ofItemAtPath: installPath)
+            }
+        }
 
         // Write launchd plist
         let plist = """
