@@ -763,8 +763,22 @@ struct Install: ParsableCommand {
             "/usr/local/opt/thermalforge/ThermalForge.app",
         ]
 
-        if let appSource = candidates.first(where: { fm.fileExists(atPath: $0) }) {
-            print("Using app bundle at \(appSource)")
+        // Only copy a bundle whose version matches THIS install — never a stale one
+        // (a leftover Homebrew 0.1.x keg the `opt` symlink still points at) over a
+        // correct /Applications bundle. On a from-source install there is no
+        // pre-assembled current bundle here yet (build-app assembles it right after),
+        // so reject stale candidates and leave /Applications untouched rather than
+        // grab whatever exists — the bug where a direct install clobbered /Applications
+        // with an old Cellar bundle.
+        func bundleVersion(_ appPath: String) -> String? {
+            NSDictionary(contentsOfFile: "\(appPath)/Contents/Info.plist")?["CFBundleShortVersionString"] as? String
+        }
+        let wantedVersion = ThermalForgeVersion.current
+
+        if let appSource = candidates.first(where: {
+            fm.fileExists(atPath: $0) && bundleVersion($0) == wantedVersion
+        }) {
+            print("Using app bundle at \(appSource) (\(wantedVersion))")
 
             // Replace any existing bundle. If removal fails, FAIL LOUD — do not
             // swallow it. Homebrew silently ignoring this is exactly what left a
@@ -790,9 +804,12 @@ struct Install: ParsableCommand {
 
             print("Installed ThermalForge.app to \(appDest)")
         } else {
-            print("Note: app bundle not found — skipping /Applications copy. Checked:")
-            for path in candidates { print("  \(path)") }
-            print("The CLI and daemon are installed; the menu bar app just won't be in /Applications.")
+            print("Note: no \(wantedVersion) app bundle found — leaving /Applications untouched. Checked:")
+            for path in candidates {
+                let tag = bundleVersion(path) ?? (fm.fileExists(atPath: path) ? "unreadable" : "absent")
+                print("  \(path)  [\(tag)]")
+            }
+            print("The CLI and daemon are installed. A from-source build assembles the app next (build-app); otherwise reinstall via ./setup.sh or Homebrew.")
         }
 
         // Upgrade recovery: if the controlling user's app was running when this
