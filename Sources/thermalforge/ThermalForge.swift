@@ -584,6 +584,58 @@ struct Install: ParsableCommand {
             throw ValidationError("Run with sudo: sudo thermalforge install")
         }
 
+        // The daemon runs under launchd with no SUDO_UID of its own, so capture the
+        // controlling user here and bake it into the plist (1c). Absent means
+        // "already root, not via sudo" (a root shell) — refuse rather than default to
+        // 0, which would make the socket root-only and brick the user's app. A
+        // non-root user never reaches this line — the geteuid() guard above stops them.
+        guard let sudoUIDString = ProcessInfo.processInfo.environment["SUDO_UID"],
+              let ownerUID = Int(sudoUIDString), ownerUID != 0 else {
+            throw ValidationError("""
+                Can't determine who should own fan control: SUDO_UID isn't set.
+                Run the install with sudo from your normal user account:
+
+                    sudo thermalforge install
+
+                Don't run it from a root shell (su / sudo -i) — the daemon needs your
+                user's id so your app and CLI work without sudo. Installing as root
+                would lock every non-root account out of fan control.
+                """)
+        }
+
+        // Non-destructively capture whether the controlling user's app is running
+        // NOW — before this install kills anything — as the signal for whether to
+        // relaunch it at the end (upgrade recovery). Captured here, not inferred from
+        // a later pkill, so it can't be confused by whatever killed the app first
+        // (./setup.sh quits it before calling install; brew leaves it running).
+        func runTool(_ path: String, _ args: [String]) -> Int32 {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: path)
+            p.arguments = args
+            do { try p.run(); p.waitUntilExit(); return p.terminationStatus }
+            catch { return -1 }
+        }
+        // Like runTool but returns stdout (first line, trimmed) or nil — used to
+        // capture a pid so the relaunch below can confirm a genuinely NEW process.
+        func runToolOutput(_ path: String, _ args: [String]) -> String? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: path)
+            p.arguments = args
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            do { try p.run() } catch { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let out = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return out.split(separator: "\n").first.map(String.init)
+        }
+        // Capture the controlling user's app PID now — before this install kills
+        // anything — both as the signal for whether to relaunch (upgrade recovery)
+        // and as the baseline for confirming a real relaunch (a different pid).
+        let prePid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+        let appWasRunning = prePid != nil
+
         // Resolve symlinks first. Launched via Homebrew (`sudo thermalforge
         // install`), argv[0] is /opt/homebrew/bin/thermalforge — itself a symlink
         // into the Cellar. Copying that verbatim produces a symlink whose relative
@@ -614,31 +666,123 @@ struct Install: ParsableCommand {
                 """)
         }
 
-        // Remove any prior binary/symlink first. Only "nothing there" is
-        // acceptable — if an existing item can't be removed, fail loud with the
-        // path, or the copyItem below throws a confusing "file exists" that hides
-        // the real cause. fileExists follows symlinks and returns false for a
-        // dangling one (exactly the broken state a prior install could leave), so
-        // check for a symlink target too.
-        let somethingAtInstallPath = fm.fileExists(atPath: installPath)
-            || (try? fm.destinationOfSymbolicLink(atPath: installPath)) != nil
-        if somethingAtInstallPath {
+        // #28 self-delete + upgrade re-sync. Two separate concerns, kept separate.
+        //
+        // SAFETY (never brick): never remove installPath. Stage into installPath.new
+        // (same directory → same filesystem → rename() is atomic, no EXDEV) and
+        // rename() over installPath. The source is read into the temp before
+        // installPath is touched, so a same-path or failed install can never delete
+        // the binary it's reading from (#28), installPath is never absent (the
+        // emergency-reset escape hatch always exists), and a dangling symlink is
+        // replaced too — what the old removeItem was for.
+        //
+        // SOURCE (re-sync, path-independent): install the binary the user invoked
+        // (argv[0]) when it's a DISTINCT file from installPath — right for a
+        // from-source build (.build/release: even same version, newer code) and for
+        // Homebrew-via-/opt/homebrew (the keg). When argv[0] IS installPath — re-run
+        // install from the installed binary, e.g. sudo's secure_path resolving to the
+        // stale /usr/local/bin copy after `brew upgrade` — copying it onto itself is a
+        // permanent no-op that would leave the daemon stale and the mismatch warning
+        // firing forever. So fall back to the Homebrew keg and install it IF it's a
+        // newer version. The keg's version is read from its Cellar PATH (opt/<formula>
+        // → Cellar/<formula>/<version>), never by executing an untrusted-path binary
+        // as root — the installer only ever copies it.
+        let attrs: [FileAttributeKey: Any] =
+            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755]
+        let resolvedBinary = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath().path
+        let resolvedInstall = URL(fileURLWithPath: installPath).resolvingSymlinksInPath().path
+
+        // Atomically replace installPath with a copy of `source`, never removing
+        // installPath. Throws on failure, leaving the existing install intact.
+        func installBinary(from source: String) throws {
+            let tempPath = installPath + ".new"
+            try? fm.removeItem(atPath: tempPath)   // clear a stale temp from a prior crash
             do {
-                try fm.removeItem(atPath: installPath)
+                try fm.copyItem(atPath: source, toPath: tempPath)
+                try fm.setAttributes(attrs, ofItemAtPath: tempPath)
             } catch {
+                try? fm.removeItem(atPath: tempPath)
                 throw ValidationError("""
-                    Couldn't remove the existing binary at \(installPath):
+                    Couldn't stage the daemon binary at \(tempPath):
                     \(error.localizedDescription)
-                    Remove it manually (sudo rm -f "\(installPath)") and re-run.
+                    The existing install at \(installPath) is untouched.
                     """)
+            }
+            guard rename(tempPath, installPath) == 0 else {
+                let err = errno
+                try? fm.removeItem(atPath: tempPath)
+                throw ValidationError(
+                    "Couldn't install the binary to \(installPath) (rename failed: errno \(err)). " +
+                    "The existing install is untouched."
+                )
             }
         }
 
-        try fm.copyItem(atPath: binaryPath, toPath: installPath)
-        try fm.setAttributes(
-            [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o755],
-            ofItemAtPath: installPath
-        )
+        if resolvedBinary != resolvedInstall {
+            // Install the binary the user invoked.
+            try installBinary(from: binaryPath)
+        } else {
+            // Self-referential invocation → a re-sync request. The running binary's
+            // version IS installPath's version (same file), so only a strictly-newer
+            // Homebrew keg is worth installing; never downgrade.
+            let current = ThermalForgeVersion.current
+            let kegBinaries = [
+                "/opt/homebrew/opt/thermalforge/bin/thermalforge",
+                "/usr/local/opt/thermalforge/bin/thermalforge",
+            ]
+            // Version from the keg's resolved Cellar path — no execution. opt/<f>
+            // symlinks to Cellar/<f>/<version>; take the component after it.
+            func kegVersion(_ path: String) -> String? {
+                let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+                let parts = real.components(separatedBy: "/Cellar/thermalforge/")
+                guard parts.count == 2 else { return nil }
+                return parts[1].components(separatedBy: "/").first
+            }
+
+            var resynced = false
+            for keg in kegBinaries {
+                guard fm.fileExists(atPath: keg) else { continue }
+                guard let version = kegVersion(keg) else {
+                    // Keg is present but its version couldn't be read from the path —
+                    // most likely the formula was renamed (the parse keys on
+                    // "/Cellar/thermalforge/"). Say so loudly: otherwise re-sync goes
+                    // silent and no one would know why a stale daemon won't update.
+                    let resolved = URL(fileURLWithPath: keg).resolvingSymlinksInPath().path
+                    print("""
+                        Found a Homebrew keg at \(keg) but couldn't parse its version \
+                        from the resolved path \(resolved) (expected \
+                        .../Cellar/thermalforge/<version>/...). Skipping re-sync — \
+                        check whether the formula was renamed.
+                        """)
+                    continue
+                }
+                // Strictly newer than what's installed (numeric, never downgrade).
+                guard ThermalForgeVersion.atLeast(version, current),
+                      !ThermalForgeVersion.atLeast(current, version) else { continue }
+                print("Re-syncing daemon binary from Homebrew keg \(version) at \(keg).")
+                try installBinary(from: URL(fileURLWithPath: keg).resolvingSymlinksInPath().path)
+                resynced = true
+                break
+            }
+            if !resynced {
+                // Already current — nothing newer to install. Re-assert ownership/
+                // perms and fail LOUD if it doesn't take. launchd execs installPath as
+                // root at every boot, so if a prior bad state left it user-owned or
+                // user-writable, a silent failure here would leave a local user able to
+                // replace the root daemon binary. This is also the most common path
+                // (re-install when already current), so it must not swallow errors —
+                // every other write in this file throws; so does this.
+                print("Binary at \(installPath) is already current (\(current)) — nothing to copy.")
+                do {
+                    try fm.setAttributes(attrs, ofItemAtPath: installPath)
+                } catch {
+                    throw ValidationError("""
+                        Couldn't re-assert ownership/permissions on \(installPath):
+                        \(error.localizedDescription)
+                        """)
+                }
+            }
+        }
 
         // Write launchd plist
         let plist = """
@@ -653,6 +797,8 @@ struct Install: ParsableCommand {
                 <array>
                     <string>\(installPath)</string>
                     <string>daemon</string>
+                    <string>--owner-uid</string>
+                    <string>\(ownerUID)</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
@@ -672,6 +818,21 @@ struct Install: ParsableCommand {
         // "Boot-out failed: No such process" on a fresh install. A real bootout
         // failure throws.
         try ThermalForgeDaemon.bootoutIfRegistered()
+
+        // Migration: drop the legacy world-writable /tmp socket so no old client can
+        // find (or squat) it. The daemon now serves /var/run; a literal path here
+        // because socketPath is /var/run/... from Phase 1a.
+        //
+        // Safe despite being a root unlink() of a path in a world-writable directory
+        // (the classic /tmp symlink/hardlink attack surface), for three reasons:
+        //   - Symlink redirect: unlink() acts on the link itself, never follows it, so
+        //     a planted symlink can't make us delete its target.
+        //   - Hardlink to a victim file: unlink() only removes THIS /tmp directory
+        //     entry and decrements the link count — the victim file persists at its
+        //     original path.
+        //   - Directory planted at that name: unlink() fails with EISDIR; we ignore
+        //     the return, so it's a harmless no-op.
+        unlink("/tmp/thermalforge.sock")
 
         // Start new daemon
         let load = Process()
@@ -723,8 +884,26 @@ struct Install: ParsableCommand {
             "/usr/local/opt/thermalforge/ThermalForge.app",
         ]
 
-        if let appSource = candidates.first(where: { fm.fileExists(atPath: $0) }) {
-            print("Using app bundle at \(appSource)")
+        // Only copy a bundle whose version matches THIS install — never a stale one
+        // (a leftover Homebrew 0.1.x keg the `opt` symlink still points at) over a
+        // correct /Applications bundle. On a from-source install there is no
+        // pre-assembled current bundle here yet (build-app assembles it right after),
+        // so reject stale candidates and leave /Applications untouched rather than
+        // grab whatever exists — the bug where a direct install clobbered /Applications
+        // with an old Cellar bundle.
+        func bundleVersion(_ appPath: String) -> String? {
+            NSDictionary(contentsOfFile: "\(appPath)/Contents/Info.plist")?["CFBundleShortVersionString"] as? String
+        }
+        let wantedVersion = ThermalForgeVersion.current
+
+        // Whether a version-matching bundle was actually installed THIS run. The
+        // relaunch at the end keys off this: reopening a stale /Applications bundle
+        // (old /tmp socket compiled in) is exactly the daemon-down-banner bug to avoid.
+        var freshBundleInstalled = false
+        if let appSource = candidates.first(where: {
+            fm.fileExists(atPath: $0) && bundleVersion($0) == wantedVersion
+        }) {
+            print("Using app bundle at \(appSource) (\(wantedVersion))")
 
             // Replace any existing bundle. If removal fails, FAIL LOUD — do not
             // swallow it. Homebrew silently ignoring this is exactly what left a
@@ -749,10 +928,48 @@ struct Install: ParsableCommand {
             xattr.waitUntilExit()
 
             print("Installed ThermalForge.app to \(appDest)")
+            freshBundleInstalled = true
         } else {
-            print("Note: app bundle not found — skipping /Applications copy. Checked:")
-            for path in candidates { print("  \(path)") }
-            print("The CLI and daemon are installed; the menu bar app just won't be in /Applications.")
+            print("Note: no \(wantedVersion) app bundle found — leaving /Applications untouched. Checked:")
+            for path in candidates {
+                let tag = bundleVersion(path) ?? (fm.fileExists(atPath: path) ? "unreadable" : "absent")
+                print("  \(path)  [\(tag)]")
+            }
+            print("The CLI and daemon are installed. A from-source build assembles the app next (build-app); otherwise reinstall via ./setup.sh or Homebrew.")
+        }
+
+        // Upgrade recovery: if the controlling user's app was running when this
+        // install STARTED (captured above, before anything killed it), it has the OLD
+        // /tmp socket path compiled in and would now connect to the removed /tmp and
+        // show the misleading daemon-down banner. Restart it so it reloads the new
+        // binary + /var/run path. appWasRunning also confirms a live GUI session to
+        // relaunch into (a menu bar app only runs in one) — a not-logged-in user
+        // (app not running) is a clean no-op. ENTIRELY non-fatal: the daemon is
+        // already verified up, so a failed GUI relaunch prints guidance and never
+        // fails the install.
+        let moveGuidance = "Quit and reopen ThermalForge — the fan-control socket moved this version."
+        if appWasRunning && freshBundleInstalled {
+            _ = runTool("/usr/bin/pkill", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+            Thread.sleep(forTimeInterval: 0.5)   // let it fully exit before relaunch
+            _ = runTool("/bin/launchctl",
+                ["asuser", "\(ownerUID)", "/usr/bin/open", appDest])
+            // Don't trust open's exit code — on some macOS versions it returns 0
+            // without launching into the GUI session. Confirm a genuinely NEW app
+            // pid (different from the one captured before install) actually appeared;
+            // if pkill failed and the old app survived, the pid is unchanged and we
+            // fall through to the guidance rather than claim a relaunch.
+            Thread.sleep(forTimeInterval: 1.0)   // give the app time to register
+            let newPid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+            let relaunched = newPid != nil && newPid != prePid
+            if !relaunched {
+                print(moveGuidance)
+            }
+        } else if appWasRunning {
+            // App was running but NO fresh bundle was installed this run, so
+            // /Applications holds a stale (or missing) bundle with the old /tmp socket
+            // compiled in. Reopening it would only reproduce the daemon-down banner —
+            // tell the user instead of relaunching the wrong binary.
+            print(moveGuidance)
         }
 
         print("Done.")
@@ -798,7 +1015,8 @@ struct Uninstall: ParsableCommand {
         // Remove daemon files
         try? fm.removeItem(atPath: ThermalForgeDaemon.plistPath)
         try? fm.removeItem(atPath: ThermalForgeDaemon.installPath)
-        try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)
+        try? fm.removeItem(atPath: ThermalForgeDaemon.socketPath)      // /var/run (current)
+        try? fm.removeItem(atPath: "/tmp/thermalforge.sock")           // legacy path (pre-Phase 1)
 
         // Remove user data
         let appSupport = home.appendingPathComponent("Library/Application Support/ThermalForge")
@@ -905,9 +1123,16 @@ struct Daemon: ParsableCommand {
         abstract: "Run the privileged socket server (called by launchd)"
     )
 
+    /// uid of the controlling user, injected by Install.run() into the launchd
+    /// plist's ProgramArguments. Required: the daemon has no SUDO_UID of its own,
+    /// so without this it can't know who owns the socket. Absent → parse failure →
+    /// visible crash-loop under KeepAlive (never a silent root-owned socket).
+    @Option(name: .customLong("owner-uid"), help: "uid that owns the control socket")
+    var ownerUid: Int
+
     func run() throws {
         let fc = try FanControl()
-        let server = try DaemonServer(fanControl: fc)
+        let server = try DaemonServer(fanControl: fc, ownerUID: uid_t(ownerUid))
         server.run()
     }
 }
