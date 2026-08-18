@@ -41,13 +41,23 @@ struct ThermalForge: ParsableCommand {
 /// fan-affecting command. Advisory only — it never blocks the command.
 func warnIfDaemonVersionMismatch() {
     guard ThermalForgeDaemon.isRunning else { return }
-    guard let response = try? DaemonClient().sendRaw("version") else { return }
 
-    // A daemon that predates the `version` command answers with the literal
-    // "error: unknown command 'version'" — that's a normal reply, so detect the
-    // "error:" prefix and treat it as an older build rather than a version.
-    let daemonVersion = response.hasPrefix("error:") ? "an older build" : response
-    guard daemonVersion != ThermalForgeVersion.current else { return }
+    // A legacy (pre-Phase-2) daemon can't answer the framed `version` request — but
+    // its socket is up, so this is a real mismatch that MUST warn (this is the very
+    // message telling the user to reinstall). Any other failure (daemon down /
+    // transient) stays silent so we don't nag on a blip.
+    let daemonVersion: String
+    do {
+        let response = try DaemonClient().request(DaemonRequest(verb: .version))
+        // Both the `version` reply (ok) and an `unsupportedVersion` reply carry the
+        // daemon's build; a response without one means a build we can't name.
+        daemonVersion = response.version ?? "an older build"
+        guard daemonVersion != ThermalForgeVersion.current else { return }
+    } catch DaemonError.incompatibleDaemon {
+        daemonVersion = "an older build"
+    } catch {
+        return
+    }
 
     let message = """
         ⚠️  Version mismatch: the background daemon is running \(daemonVersion), \
@@ -94,6 +104,13 @@ func reportRoute(_ route: FanRoute) {
             ⚠️  The background daemon (\(version)) is too old to route per-fan \
             commands, so this used a direct hardware write (which needs sudo).
                 Re-sync to drop the sudo requirement:  sudo thermalforge install
+
+            """
+    case .directLegacyDaemon:
+        message = """
+            ⚠️  The background daemon is an older build that can't use the updated \
+            control protocol, so this used a direct hardware write.
+                Finish the upgrade to reconnect it:  sudo thermalforge install
 
             """
     }
