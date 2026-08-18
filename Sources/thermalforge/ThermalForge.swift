@@ -694,7 +694,33 @@ struct Install: ParsableCommand {
 
         // Atomically replace installPath with a copy of `source`, never removing
         // installPath. Throws on failure, leaving the existing install intact.
+        //
+        // Considered: the temp (installPath + ".new") briefly holds the SOURCE's mode
+        // bits between copyItem and setAttributes. copyItem runs as root, so the temp
+        // is root-OWNED throughout — only the permission bits are the source's. A
+        // pre-planted temp can't redirect us: removeItem clears it first and acts on
+        // the link itself, never following a symlink. setAttributes then forces
+        // root:wheel 0755 and rename() is atomic, so installPath's committed state is
+        // always the root-owned binary. The residual window would only matter if the
+        // source binary were itself group/other-writable (ours isn't) — a
+        // user-writable /usr/local/bin is the pre-existing bad state item 1's throw
+        // covers, not something this staging introduces. Documented so safe-here isn't
+        // mistaken for unaudited.
         func installBinary(from source: String) throws {
+            // Enforce the assumption the comment above relies on rather than trusting
+            // it: a group/other-writable source would briefly yield a root-owned but
+            // other-writable temp in /usr/local/bin — a write-into-root-binary window.
+            // Reject it up front, with the exact fix. No effect on a correctly-built
+            // source (0755/0555 keg or from-source binary).
+            if let perms = (try? fm.attributesOfItem(atPath: source))?[.posixPermissions] as? Int,
+               perms & 0o022 != 0 {
+                throw ValidationError("""
+                    Refusing to install \(source): it is group/other-writable
+                    (mode \(String(perms, radix: 8))). Fix with:
+                        chmod go-w "\(source)"
+                    """)
+            }
+
             let tempPath = installPath + ".new"
             try? fm.removeItem(atPath: tempPath)   // clear a stale temp from a prior crash
             do {
@@ -958,9 +984,19 @@ struct Install: ParsableCommand {
             // pid (different from the one captured before install) actually appeared;
             // if pkill failed and the old app survived, the pid is unchanged and we
             // fall through to the guidance rather than claim a relaunch.
-            Thread.sleep(forTimeInterval: 1.0)   // give the app time to register
-            let newPid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
-            let relaunched = newPid != nil && newPid != prePid
+            // Poll for a genuinely new pid instead of sleeping a fixed interval and
+            // hoping — the app can register slower than any single guess, which would
+            // print the guidance on a successful relaunch. Up to ~5 checks at 0.5s,
+            // stopping the moment a pid different from prePid appears.
+            var relaunched = false
+            for _ in 0..<5 {
+                Thread.sleep(forTimeInterval: 0.5)
+                if let newPid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"]),
+                   newPid != prePid {
+                    relaunched = true
+                    break
+                }
+            }
             if !relaunched {
                 print(moveGuidance)
             }

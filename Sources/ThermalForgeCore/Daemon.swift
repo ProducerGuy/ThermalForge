@@ -498,9 +498,18 @@ public final class DaemonServer {
         // (v0.1.7). A connect-and-hang client can now stall this serial accept loop
         // for at most ~5s instead of forever. On timeout read()/write() return
         // -1/EAGAIN and the existing `guard n > 0` below closes the connection.
+        // Log (don't throw) if the timeout can't be set: failure just reverts THIS
+        // connection to the old unbounded blocking — non-fatal — but should be
+        // diagnosable rather than silent (same reasoning as the install chown/chmod
+        // guards). Killing the connection over a failed timeout setting would be worse.
         var rcvTimeout = timeval(tv_sec: 5, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+        let tvLen = socklen_t(MemoryLayout<timeval>.size)
+        if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, tvLen) != 0 {
+            NSLog("ThermalForge daemon: SO_RCVTIMEO on client fd failed: errno %d", errno)
+        }
+        if setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rcvTimeout, tvLen) != 0 {
+            NSLog("ThermalForge daemon: SO_SNDTIMEO on client fd failed: errno %d", errno)
+        }
 
         var buffer = [UInt8](repeating: 0, count: 256)
         let n = read(fd, &buffer, buffer.count - 1)
