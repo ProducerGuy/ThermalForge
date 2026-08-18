@@ -129,7 +129,7 @@ struct Max: ParsableCommand {
         // Route through the daemon (no sudo) when it's running; oneshot so a
         // fire-and-forget max hold isn't reverted by the watchdog. The router
         // handles the version query and reportRoute the single mismatch warning.
-        let route = try FanCommandRouter.apply(.setMax, oneshot: true)
+        let (route, _) = try FanCommandRouter.apply(.setMax, oneshot: true)
         reportRoute(route)
 
         // Status readout is a read — works without root regardless of route.
@@ -174,7 +174,7 @@ struct Auto: ParsableCommand {
 
         // Route through the daemon (coordinates its state, no sudo) when running;
         // resetAuto isn't a hold, so oneshot doesn't apply.
-        let route = try FanCommandRouter.apply(.resetAuto, oneshot: false)
+        let (route, _) = try FanCommandRouter.apply(.resetAuto, oneshot: false)
         reportRoute(route)
         print(stopApp
             ? "Menu bar app stopped; fans reset to Apple defaults"
@@ -202,12 +202,14 @@ struct SetSpeed: ParsableCommand {
         if let index = fan {
             // Per-fan now routes through the daemon too (0.1.5 `setfan`); older
             // daemons fall back to direct SMC, which reportRoute flags.
-            let route = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
+            let (route, note) = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
             reportRoute(route)
+            if let note { print(note) }
             print("Fan \(index) → \(rpm) RPM")
         } else {
-            let route = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
+            let (route, note) = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
             reportRoute(route)
+            if let note { print(note) }
             if let fc = try? FanControl(), let count = try? fc.fanCount() {
                 for i in 0..<count {
                     print("Fan \(i) → \(rpm) RPM")

@@ -152,6 +152,9 @@ public enum DaemonErrorKind: String, Codable, Equatable {
     /// The request's protocol version (or verb) is newer than the daemon understands;
     /// the response's `version` carries the daemon's build so the client can react.
     case unsupportedVersion
+    /// SMC-writing verbs exceeded the daemon's rate cap (flood protection). Reset
+    /// (`auto`) is exempt and never rate-limited.
+    case rateLimited
     /// The daemon hit an internal error applying the verb (e.g. an SMC write failed).
     case `internal`
 }
@@ -169,10 +172,13 @@ public struct DaemonResponse: Codable, Equatable {
     public var statusJSON: String?
     /// `state` payload.
     public var state: DaemonHoldState?
+    /// Advisory result note on an OK response — e.g. "clamped 999999 → 3500 RPM (max)".
+    /// Not an error; the command was applied (with the clamped value).
+    public var note: String?
 
     public init(ok: Bool, error: DaemonErrorKind? = nil, message: String? = nil,
                 version: String? = nil, statusJSON: String? = nil, state: DaemonHoldState? = nil,
-                v: Int = DaemonProtocol.version) {
+                note: String? = nil, v: Int = DaemonProtocol.version) {
         self.v = v
         self.ok = ok
         self.error = error
@@ -180,9 +186,10 @@ public struct DaemonResponse: Codable, Equatable {
         self.version = version
         self.statusJSON = statusJSON
         self.state = state
+        self.note = note
     }
 
-    public static func ok() -> DaemonResponse { .init(ok: true) }
+    public static func ok(note: String? = nil) -> DaemonResponse { .init(ok: true, note: note) }
     public static func failure(_ kind: DaemonErrorKind, _ message: String) -> DaemonResponse {
         .init(ok: false, error: kind, message: message)
     }

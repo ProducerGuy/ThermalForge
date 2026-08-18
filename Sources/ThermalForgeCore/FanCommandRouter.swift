@@ -69,10 +69,12 @@ public enum FanCommandRouter {
     /// - oneshot: for one-shot CLI holds — asks the daemon not to arm its
     ///   heartbeat watchdog so the hold persists. Ignored by the direct path and
     ///   for resetAuto.
-    public static func apply(_ command: FanCommand, oneshot: Bool) throws -> FanRoute {
+    /// Returns the route taken plus an advisory note from the daemon (e.g. a clamp),
+    /// which is a command *result* — kept off FanRoute, which is only about routing.
+    public static func apply(_ command: FanCommand, oneshot: Bool) throws -> (route: FanRoute, note: String?) {
         guard ThermalForgeDaemon.isRunning else {
             try applyDirect(command)   // fails fast if a hold needs root
-            return .direct
+            return (.direct, nil)
         }
 
         let client = DaemonClient()
@@ -88,7 +90,7 @@ public enum FanCommandRouter {
         case .legacy:
             guard geteuid() == 0 else { throw FanRouteError.legacyDaemonNeedsReinstall }
             try applyDirect(command)
-            return .directLegacyDaemon
+            return (.directLegacyDaemon, nil)
         case .version(let v):
             daemonVersion = v
         case .unreachable:
@@ -117,27 +119,29 @@ public enum FanCommandRouter {
                 throw FanRouteError.perFanNeedsNewerDaemon(daemonVersion: daemonVersion ?? "an older build")
             }
             try applyDirect(command)
-            return .directOldDaemon(daemonVersion: daemonVersion ?? "an older build")
+            return (.directOldDaemon(daemonVersion: daemonVersion ?? "an older build"), nil)
         }
 
         // Backstop: a daemon that turned legacy between the probe and here (restarted
         // mid-call) still gets the reinstall path, not a raw FrameError. Only this
         // specifically-detected condition falls back — any other error propagates.
+        // The daemon's advisory note (e.g. a clamp) rides back through execute().
+        let note: String?
         do {
-            try client.execute(command, oneshot: oneshot)
+            note = try client.execute(command, oneshot: oneshot)
         } catch DaemonError.incompatibleDaemon {
             guard geteuid() == 0 else { throw FanRouteError.legacyDaemonNeedsReinstall }
             try applyDirect(command)
-            return .directLegacyDaemon
+            return (.directLegacyDaemon, nil)
         }
 
         // A hold sent with oneshot to a daemon KNOWN to predate the token will be
         // reverted by the watchdog — surface it. Gated on known-old (not unknown) for
         // the same reason as the per-fan path above.
         if oneshot && command.isHold && protocolKnownUnsupported {
-            return .daemonHoldWillRevert(daemonVersion: daemonVersion ?? "an older build")
+            return (.daemonHoldWillRevert(daemonVersion: daemonVersion ?? "an older build"), note)
         }
-        return .daemon(daemonVersion: daemonVersion)
+        return (.daemon(daemonVersion: daemonVersion), note)
     }
 
     private static func applyDirect(_ command: FanCommand) throws {

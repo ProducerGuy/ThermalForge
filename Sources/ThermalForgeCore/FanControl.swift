@@ -55,6 +55,20 @@ public struct ThermalStatus: Encodable {
     }
 }
 
+extension ThermalStatus {
+    /// Peak of the CPU (`TC`/`Tp`) and GPU (`TG`/`Tg`) sensors — the temperature the
+    /// thermal safety floor watches. Single source of truth so the client
+    /// `ThermalMonitor` and the daemon's floor read the identical value; mirroring
+    /// can't drift because it's the same code.
+    public var safetyPeakTemp: Float {
+        func peak(_ prefixes: [String]) -> Float {
+            temperatures.filter { key, _ in prefixes.contains { key.hasPrefix($0) } }
+                .values.max() ?? 0
+        }
+        return max(peak(["TC", "Tp"]), peak(["TG", "Tg"]))
+    }
+}
+
 public struct DiscoveredKey {
     public let key: String
     public let size: UInt32
@@ -294,6 +308,59 @@ public final class FanControl {
         log("Reset to Apple defaults")
     }
 
+    // MARK: - Thermal Sensor Keys
+
+    /// All thermal sensor keys probed for `status()`. Keys absent on a given machine
+    /// return nil from `readTemp` and are skipped. Single source of truth so the
+    /// daemon's safety floor reads exactly the CPU/GPU subset `status()` would.
+    public static let thermalKeys: [String] = [
+        // CPU — aggregate (M5 Max verified)
+        "TCDX", "TCHP", "TCMb",
+        // CPU — per-core (Tp prefix, present across M1-M5 with varying mappings)
+        "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
+        "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
+        "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
+        // GPU (flt — M1-M4, and ioft 8-byte — M5 Max)
+        "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
+        "TG0B", "TG0H", "TG0V",
+        // Memory
+        "Tm02", "Tm06", "Tm08", "Tm09", "TRDX", "TMVR",
+        // Power delivery
+        "TPDX",
+        // SSD
+        "TH0x", "TH0A", "TH0B",
+        // Ambient
+        "TAOL", "TA0P",
+        // Proximity
+        "TS0P",
+        // Battery
+        "TB0T",
+    ]
+
+    /// The CPU (TC/Tp) and GPU (TG/Tg) subset the thermal safety floor watches —
+    /// derived from `thermalKeys` so it can't drift from what `status()` reports.
+    public static let safetyTempKeys: [String] =
+        thermalKeys.filter { key in ["TC", "Tp", "TG", "Tg"].contains { key.hasPrefix($0) } }
+
+    /// Read one temperature key, decoding by returned size (flt 4-byte or ioft 8-byte).
+    /// nil if absent, wrong size, or out of the sane 0–150°C range. Does NOT lock — the
+    /// caller serializes SMC access (the daemon takes smcLock per key so a full sweep
+    /// never blocks a client write for more than a single read).
+    public func readTemp(_ key: String) -> Float? {
+        let result = smc.readKey(key)
+        guard result.success else { return nil }
+        let temp: Float
+        if result.size == 4 {
+            temp = smcBytesToFloat(result.bytes, size: result.size)
+        } else if result.size == 8 {
+            temp = ioftBytesToFloat(result.bytes)
+        } else {
+            return nil
+        }
+        guard temp > 0, temp < 150 else { return nil }
+        return (temp * 10).rounded() / 10
+    }
+
     // MARK: - Status
 
     /// Read current fan speeds and temperatures
@@ -317,54 +384,11 @@ public final class FanControl {
         // Keys that don't exist on a given machine are skipped automatically.
         // Labels use the raw SMC key name — no assumptions about what a key
         // means on hardware we haven't verified.
+        // Probe every known thermal key (flt/ioft decoded by size in readTemp). Keys
+        // that don't exist on this machine return nil and are skipped.
         var temps: [String: Float] = [:]
-
-        // All known CPU/GPU/memory/misc thermal keys (flt type, 4 bytes)
-        let fltKeys: [String] = [
-            // CPU — aggregate (M5 Max verified)
-            "TCDX", "TCHP", "TCMb",
-            // CPU — per-core (Tp prefix, present across M1-M5 with varying mappings)
-            "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
-            "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
-            "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
-            // GPU (flt type — M1 through M4)
-            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
-            // Memory
-            "Tm02", "Tm06", "Tm08", "Tm09",
-            "TRDX", "TMVR",
-            // Power delivery
-            "TPDX",
-            // SSD
-            "TH0x", "TH0A", "TH0B",
-            // Ambient
-            "TAOL", "TA0P",
-            // Proximity
-            "TS0P",
-            // Battery
-            "TB0T",
-        ]
-
-        for key in fltKeys {
-            let result = smc.readKey(key)
-            if result.success && result.size == 4 {
-                let temp = smcBytesToFloat(result.bytes, size: result.size)
-                if temp > 0 && temp < 150 {
-                    temps[key] = (temp * 10).rounded() / 10
-                }
-            }
-        }
-
-        // ioft type (16.16 fixed-point, 8 bytes) — GPU temps on M5 Max
-        let ioftKeys = ["TG0B", "TG0H", "TG0V"]
-
-        for key in ioftKeys {
-            let result = smc.readKey(key)
-            if result.success && result.size == 8 {
-                let temp = ioftBytesToFloat(result.bytes)
-                if temp > 0 && temp < 150 {
-                    temps[key] = (temp * 10).rounded() / 10
-                }
-            }
+        for key in Self.thermalKeys {
+            if let t = readTemp(key) { temps[key] = t }
         }
 
         return ThermalStatus(fans: fans, temperatures: temps)
