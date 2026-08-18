@@ -25,6 +25,10 @@ public enum FanRoute: Equatable {
     /// A per-fan command hit a daemon too old for `setfan`, and we were root, so it
     /// fell back to a direct SMC write. Distinguished so the CLI can nudge a re-sync.
     case directOldDaemon(daemonVersion: String)
+    /// The running daemon predates the Phase 2 framed protocol (upgrade window), so it
+    /// couldn't take the command; we were root and applied it directly. The CLI nudges
+    /// the reinstall that reconnects the daemon on the new protocol.
+    case directLegacyDaemon
 }
 
 public enum FanRouteError: Error, LocalizedError, CustomStringConvertible {
@@ -32,6 +36,9 @@ public enum FanRouteError: Error, LocalizedError, CustomStringConvertible {
     case rootRequired
     /// Per-fan write needs root because the running daemon is too old for `setfan`.
     case perFanNeedsNewerDaemon(daemonVersion: String)
+    /// The running daemon predates the Phase 2 framed protocol and we aren't root, so
+    /// we can't apply directly either. Only the reinstall fixes it for good.
+    case legacyDaemonNeedsReinstall
 
     public var description: String {
         switch self {
@@ -45,6 +52,11 @@ public enum FanRouteError: Error, LocalizedError, CustomStringConvertible {
                 The background daemon (\(version)) is too old to set individual fans, so this needs \
                 a direct hardware write (root).
                 Run it with sudo, or re-sync the daemon:  sudo thermalforge install
+                """
+        case .legacyDaemonNeedsReinstall:
+            return """
+                The background daemon is an older build that can't use the updated control protocol.
+                Finish the upgrade to reconnect it:  sudo thermalforge install
                 """
         }
     }
@@ -64,16 +76,43 @@ public enum FanCommandRouter {
         }
 
         let client = DaemonClient()
-        let daemonVersion = reportedVersion(client)
-        let supportsProtocol = daemonVersion.map {
-            ThermalForgeVersion.atLeast($0, ThermalForgeVersion.oneshotProtocolSince)
+
+        // Classify the daemon FIRST. A pre-Phase-2 (string) daemon can't parse our
+        // frames, and its socket is up (isRunning true), so it wouldn't take the
+        // daemon-down direct path on its own. Detecting it here — BEFORE the per-fan
+        // gate — is what makes EVERY verb get the reinstall diagnosis in the upgrade
+        // window, instead of a "needs a newer daemon" misread on the per-fan path
+        // (where a nil version would otherwise look like a pre-`setfan` daemon).
+        let daemonVersion: String?
+        switch probeDaemon(client) {
+        case .legacy:
+            guard geteuid() == 0 else { throw FanRouteError.legacyDaemonNeedsReinstall }
+            try applyDirect(command)
+            return .directLegacyDaemon
+        case .version(let v):
+            daemonVersion = v
+        case .unreachable:
+            // isRunning saw the socket up but the version probe couldn't complete (a
+            // transient in between, or the daemon died right after). Treat the version
+            // as UNKNOWN — not old — so the per-fan/hold-revert gates below don't
+            // misdiagnose it; execute() runs and surfaces the real error.
+            daemonVersion = nil
+        }
+
+        // "Known unsupported" = we have a REAL version and it's below the oneshot/setfan
+        // threshold. A nil version now means "unknown" (an unreachable probe), NOT
+        // "old": after Phase 1 a genuinely old daemon can't speak frames and is caught
+        // as .legacy above. So unknown must not masquerade as old on the per-fan or
+        // hold-revert paths — that was this same misdiagnosis one layer down.
+        let protocolKnownUnsupported = daemonVersion.map {
+            !ThermalForgeVersion.atLeast($0, ThermalForgeVersion.oneshotProtocolSince)
         } ?? false
 
-        // Per-fan needs the 0.1.5 `setfan` verb; older daemons reject it, so it
-        // must fall back to a direct SMC write (root). Fail fast WITH the reason
-        // when we're not root, so the explanation reaches the person who hit it —
-        // instead of a bare unlock timeout after applyDirect would throw.
-        if command.isPerFan && !supportsProtocol {
+        // Per-fan needs the 0.1.5 `setfan` verb; a daemon KNOWN to predate it must fall
+        // back to a direct SMC write (root). Fires only for a positively-old daemon now
+        // — never for legacy (handled above) or unknown (falls through to execute, which
+        // surfaces the real error). Fail fast WITH the reason when we're not root.
+        if command.isPerFan && protocolKnownUnsupported {
             guard geteuid() == 0 else {
                 throw FanRouteError.perFanNeedsNewerDaemon(daemonVersion: daemonVersion ?? "an older build")
             }
@@ -81,11 +120,21 @@ public enum FanCommandRouter {
             return .directOldDaemon(daemonVersion: daemonVersion ?? "an older build")
         }
 
-        try client.execute(command, oneshot: oneshot)
+        // Backstop: a daemon that turned legacy between the probe and here (restarted
+        // mid-call) still gets the reinstall path, not a raw FrameError. Only this
+        // specifically-detected condition falls back — any other error propagates.
+        do {
+            try client.execute(command, oneshot: oneshot)
+        } catch DaemonError.incompatibleDaemon {
+            guard geteuid() == 0 else { throw FanRouteError.legacyDaemonNeedsReinstall }
+            try applyDirect(command)
+            return .directLegacyDaemon
+        }
 
-        // A hold sent with oneshot to a daemon that doesn't understand the token
-        // will be reverted by the watchdog — surface it rather than let it happen.
-        if oneshot && command.isHold && !supportsProtocol {
+        // A hold sent with oneshot to a daemon KNOWN to predate the token will be
+        // reverted by the watchdog — surface it. Gated on known-old (not unknown) for
+        // the same reason as the per-fan path above.
+        if oneshot && command.isHold && protocolKnownUnsupported {
             return .daemonHoldWillRevert(daemonVersion: daemonVersion ?? "an older build")
         }
         return .daemon(daemonVersion: daemonVersion)
@@ -107,13 +156,27 @@ public enum FanCommandRouter {
         }
     }
 
-    /// The daemon's reported version, or nil if it can't be determined — a daemon
-    /// old enough to predate the `version` command also predates the
-    /// oneshot/setfan protocol, so nil is treated as "unsupported".
-    private static func reportedVersion(_ client: DaemonClient) -> String? {
-        guard let reply = try? client.sendRaw("version"),
-              !reply.hasPrefix("error:"), !reply.isEmpty
-        else { return nil }
-        return reply
+    /// How the running daemon answered a `version` probe.
+    private enum DaemonProbe {
+        case version(String?)   // reachable framed daemon; String? is its build if named
+        case legacy             // pre-Phase-2 string daemon (couldn't parse our frame)
+        case unreachable        // probe couldn't complete (down / transient)
+    }
+
+    /// Classify the daemon by probing `version`. A daemon old enough to predate the
+    /// `version` verb also predates the oneshot/setfan protocol, so a named-but-nil
+    /// build is treated as "unsupported"; a pre-Phase-2 string daemon is `.legacy`.
+    private static func probeDaemon(_ client: DaemonClient) -> DaemonProbe {
+        do {
+            let response = try client.request(DaemonRequest(verb: .version))
+            // Both `version` (ok) and `unsupportedVersion` carry the daemon's build.
+            if response.ok { return .version(response.version) }
+            if response.error == .unsupportedVersion { return .version(response.version) }
+            return .version(nil)
+        } catch DaemonError.incompatibleDaemon {
+            return .legacy
+        } catch {
+            return .unreachable
+        }
     }
 }

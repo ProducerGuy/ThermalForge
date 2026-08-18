@@ -163,27 +163,33 @@ final class AppState: ObservableObject {
         timer.schedule(deadline: .now() + 5, repeating: 5)
         timer.setEventHandler { [weak self] in
             // Runs OFF the main thread. Each socket round-trip is bounded by the
-            // sendRaw timeout, so a hung daemon can no longer stall the UI.
+            // request timeout, so a hung daemon can no longer stall the UI.
 
             // Heartbeat is NOT advisory: it refreshes the supervised hold's
             // liveness and the daemon watchdog reverts after 15s of silence. One
             // immediate retry absorbs a transient blip without waiting a full 5s
             // for the next tick.
-            let firstBeat = (try? client.send("heartbeat")) != nil
-            let hbOK = firstBeat || ((try? client.send("heartbeat")) != nil)
+            let firstBeat = (try? client.request(DaemonRequest(verb: .heartbeat)))?.ok == true
+            let hbOK = firstBeat || ((try? client.request(DaemonRequest(verb: .heartbeat)))?.ok == true)
 
             // Advisory: version + state. On failure/timeout DON'T assert — leave
             // the last known value untouched rather than clearing the banner on a
-            // transient blip. Only a definitive read updates published state.
-            // (Detect the raw "error:" reply from a daemon too old to know the
-            // `version` command, and treat it as an older build, not a number.)
+            // transient blip. Only a definitive read updates published state. Both
+            // the `version` reply and an `unsupportedVersion` reply carry the
+            // daemon's build; a reply without one is treated as an older build.
             let didReadVersion: Bool
             let versionValue: String?
-            if let response = try? client.sendRaw("version") {
-                let daemonVersion = response.hasPrefix("error:") ? "an older build" : response
+            do {
+                let response = try client.request(DaemonRequest(verb: .version))
+                let daemonVersion = response.version ?? "an older build"
                 versionValue = (daemonVersion == ThermalForgeVersion.current) ? nil : daemonVersion
                 didReadVersion = true
-            } else {
+            } catch DaemonError.incompatibleDaemon {
+                // Legacy (pre-Phase-2) daemon in the upgrade window → show the
+                // update-needed banner rather than leaving it stale.
+                versionValue = "an older build"
+                didReadVersion = true
+            } catch {
                 versionValue = nil
                 didReadVersion = false
             }

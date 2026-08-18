@@ -87,6 +87,11 @@ public enum DaemonError: Error, CustomStringConvertible {
     case notRunning
     case connectionFailed
     case commandFailed(String)
+    /// The running daemon speaks the pre-Phase-2 string protocol (upgrade window:
+    /// `brew upgrade` done, `sudo thermalforge install` not yet). Its socket is up so
+    /// it isn't "not running" — callers must handle this distinctly (reinstall nudge /
+    /// direct-SMC fallback), not mistake it for a transient failure.
+    case incompatibleDaemon
 
     public var description: String {
         switch self {
@@ -96,6 +101,8 @@ public enum DaemonError: Error, CustomStringConvertible {
             return "Failed to connect to daemon socket"
         case .commandFailed(let msg):
             return "Daemon error: \(msg)"
+        case .incompatibleDaemon:
+            return "The background daemon is an older build using the previous control protocol. Reinstall to reconnect: sudo thermalforge install"
         }
     }
 }
@@ -123,42 +130,40 @@ public final class DaemonClient {
     /// Read the daemon's current hold (what's set and who owns it) so the menu
     /// bar app can reflect a CLI hold instead of fighting or wiping it.
     public func readState() throws -> DaemonHoldState {
-        let reply = try send("state")
-        guard let data = reply.data(using: .utf8),
-              let state = try? JSONDecoder().decode(DaemonHoldState.self, from: data)
-        else { throw DaemonError.commandFailed("malformed state response") }
+        let response = try request(DaemonRequest(verb: .state))
+        guard response.ok, let state = response.state else {
+            throw DaemonError.commandFailed("malformed state response")
+        }
         return state
     }
 
-    /// Send a command to the daemon and return the response, throwing
-    /// `commandFailed` on an "error:" reply. Use this when an error reply means
-    /// the command genuinely failed.
-    public func send(_ command: String) throws -> String {
-        let response = try sendRaw(command)
-        if response.hasPrefix("error:") {
+    /// Apply a `FanCommand`, throwing `commandFailed` on an error response.
+    /// - oneshot: apply the command but do NOT arm the heartbeat watchdog — for
+    ///   fire-and-forget CLI holds that must persist without a supervising process.
+    ///   The menu bar app leaves this false so it stays supervised/crash-protected.
+    ///   No effect on resetAuto (nothing to hold).
+    public func execute(_ command: FanCommand, oneshot: Bool = false) throws {
+        let response = try request(DaemonRequest(command, oneshot: oneshot))
+        guard response.ok else {
             throw DaemonError.commandFailed(
-                String(response.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                response.message ?? response.error.map { String(describing: $0) } ?? "daemon error"
             )
         }
-        return response
     }
 
-    /// Send a command and return the raw response WITHOUT throwing on an
-    /// "error:" reply. Needed for version reconciliation: a daemon that predates
-    /// the `version` command replies with the literal string
-    /// "error: unknown command 'version'" (a normal response, not a dropped
-    /// connection), and the caller must see that string to recognize the daemon
-    /// as stale rather than mistake the error text for a version number.
-    public func sendRaw(_ command: String, timeout: TimeInterval = 2.0) throws -> String {
+    /// Send one typed request and return the typed response — length-prefixed JSON
+    /// frames, no string protocol. Runs over the SAME bounded socket code as before
+    /// (the v0.1.7 freeze fix): non-blocking `connectWithTimeout` plus
+    /// SO_RCVTIMEO/SO_SNDTIMEO, so a wedged daemon can never block the caller.
+    public func request(_ req: DaemonRequest, timeout: TimeInterval = 2.0) throws -> DaemonResponse {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
 
         // Bound every send/recv so a hung or contended daemon can never block the
         // caller indefinitely — the v0.1.7 freeze. Healthy round-trips here are
-        // sub-millisecond (heartbeat/version/state) to low-single-digit ms; 2s is
-        // a stall cutoff with ~100x margin over the heaviest real reply. A caller
-        // sending a heavier verb can raise it.
+        // sub-millisecond (heartbeat/version/state) to low-single-digit ms; 2s is a
+        // stall cutoff with wide margin over the heaviest real reply.
         let whole = Int(timeout)
         var tv = timeval(tv_sec: whole, tv_usec: Int32((timeout - Double(whole)) * 1_000_000))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -173,42 +178,22 @@ public final class DaemonClient {
         // fresh connect() block indefinitely — and with the launch-adopt gate that
         // would silently leave the app with no fan control and no heartbeat. The
         // shared helper connects non-blocking, polls within `timeout`, and restores
-        // blocking mode on success so SO_RCVTIMEO/SO_SNDTIMEO govern the read/write.
+        // blocking mode on success so SO_RCVTIMEO/SO_SNDTIMEO govern the frame I/O.
         guard connectWithTimeout(fd, &addr, timeout: timeout) else {
             throw DaemonError.notRunning
         }
 
-        // Send command
-        let cmdData = Array((command + "\n").utf8)
-        _ = cmdData.withUnsafeBufferPointer { buf in
-            write(fd, buf.baseAddress!, buf.count)
+        let frame = try DaemonProtocol.encodeFrame(req, max: DaemonProtocol.maxRequestBytes)
+        try DaemonProtocol.writeFrame(fd, frame)
+        do {
+            let body = try DaemonProtocol.readFrame(fd, max: DaemonProtocol.maxResponseBytes)
+            return try DaemonProtocol.decode(DaemonResponse.self, from: body)
+        } catch DaemonProtocol.FrameError.legacyPeer {
+            // A pre-Phase-2 daemon replied with a raw string; surface it distinctly so
+            // callers can nudge a reinstall / fall back to direct SMC, not treat it as
+            // a generic failure.
+            throw DaemonError.incompatibleDaemon
         }
-
-        // Read response — 8KB handles status JSON on sensor-rich machines
-        var buffer = [UInt8](repeating: 0, count: 8192)
-        let n = read(fd, &buffer, buffer.count - 1)
-        guard n > 0 else { throw DaemonError.connectionFailed }
-
-        return String(bytes: buffer[0..<n], encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
-    /// Send a FanCommand to the daemon.
-    /// - oneshot: append the `oneshot` token so the daemon applies the command
-    ///   but does NOT arm its heartbeat watchdog — for fire-and-forget CLI holds
-    ///   that must persist without a supervising process. The menu bar app leaves
-    ///   this false so it stays supervised/crash-protected. No effect on
-    ///   resetAuto (nothing to hold).
-    public func execute(_ command: FanCommand, oneshot: Bool = false) throws {
-        let token = (oneshot && command.isHold) ? " oneshot" : ""
-        let cmdString: String
-        switch command {
-        case .setMax: cmdString = "max" + token
-        case .setRPM(let rpm): cmdString = "set \(Int(rpm))" + token
-        case .setFan(let index, let rpm): cmdString = "setfan \(index) \(Int(rpm))" + token
-        case .resetAuto: cmdString = "auto"
-        }
-        _ = try send(cmdString)
     }
 }
 
@@ -494,10 +479,10 @@ public final class DaemonServer {
     }
 
     private func handleClient(_ fd: Int32) {
-        // Bound the server-side read the way DaemonClient.sendRaw bounds the client
-        // (v0.1.7). A connect-and-hang client can now stall this serial accept loop
-        // for at most ~5s instead of forever. On timeout read()/write() return
-        // -1/EAGAIN and the existing `guard n > 0` below closes the connection.
+        // Bound the server-side frame reads the way DaemonClient.request bounds the
+        // client (v0.1.7). A connect-and-hang client can now stall this serial accept
+        // loop for at most ~5s instead of forever: on timeout the read returns
+        // -1/EAGAIN, DaemonProtocol.readFrame throws, and the connection is dropped.
         // Log (don't throw) if the timeout can't be set: failure just reverts THIS
         // connection to the old unbounded blocking — non-fatal — but should be
         // diagnosable rather than silent (same reasoning as the install chown/chmod
@@ -511,30 +496,52 @@ public final class DaemonServer {
             NSLog("ThermalForge daemon: SO_SNDTIMEO on client fd failed: errno %d", errno)
         }
 
-        var buffer = [UInt8](repeating: 0, count: 256)
-        let n = read(fd, &buffer, buffer.count - 1)
-        guard n > 0 else { return }
+        // Parse one framed request. Oversized → structured usage error; a body we
+        // can't decode (unknown verb, or a shape from a newer client) → unsupported
+        // carrying our build; a closed/timed-out connection → nothing to answer.
+        let request: DaemonRequest
+        do {
+            let body = try DaemonProtocol.readFrame(fd, max: DaemonProtocol.maxRequestBytes)
+            request = try DaemonProtocol.decode(DaemonRequest.self, from: body)
+        } catch DaemonProtocol.FrameError.oversized {
+            NSLog("ThermalForge daemon: rejected oversized request frame")
+            sendResponse(fd, .failure(.usage, "request exceeds \(DaemonProtocol.maxRequestBytes) bytes"))
+            return
+        } catch DaemonProtocol.FrameError.legacyPeer {
+            // A pre-Phase-2 client (string protocol). Reply in ITS format — a raw
+            // "error:" line, NOT a frame — so its existing hasPrefix("error:") turns
+            // this into a thrown error with guidance, instead of silently misreading a
+            // framed reply as success. No verb is dispatched; nothing is executed.
+            NSLog("ThermalForge daemon: legacy (pre-Phase-2) client — advising reinstall")
+            let legacy = "error: daemon protocol updated; reinstall the CLI: sudo thermalforge install\n"
+            _ = Array(legacy.utf8).withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
+            return
+        } catch DaemonProtocol.FrameError.closed {
+            return
+        } catch {
+            sendResponse(fd, .unsupported(daemonVersion: ThermalForgeVersion.current))
+            return
+        }
 
-        let command = String(bytes: buffer[0..<n], encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // A newer protocol than we speak → tell the client our build so it can react.
+        guard request.v <= DaemonProtocol.version else {
+            sendResponse(fd, .unsupported(daemonVersion: ThermalForgeVersion.current))
+            return
+        }
 
-        NSLog("ThermalForge daemon: received: %@", command)
+        NSLog("ThermalForge daemon: received verb %@", request.verb.rawValue)
 
-        let response: String
+        let response: DaemonResponse
         smcLock.lock()
         defer { smcLock.unlock() }
         do {
-            let parts = command.split(separator: " ")
-            // `oneshot` token (0.1.5+): apply the command but leave the watchdog
-            // disarmed, so a fire-and-forget CLI hold persists instead of being
-            // reverted after 15s. Old daemons never see this branch — they just
-            // ignore the trailing token.
-            let oneshot = parts.contains("oneshot")
+            let oneshot = request.oneshot
 
-            // Record a hold: unsupervised (CLI oneshot — never watchdog-reverted)
-            // or supervised (app — reverted if it stops checking in). Overwrites
-            // whatever was held, so an explicit app command cleanly takes over a
-            // CLI hold with no orphan left behind.
+            // Record a hold: unsupervised (CLI oneshot — never watchdog-reverted) or
+            // supervised (app — reverted if it stops checking in). Overwrites whatever
+            // was held, so an explicit app command cleanly takes over a CLI hold with
+            // no orphan left behind. The command STRING is kept verbatim so wake
+            // re-apply (handleWake) and the `state` snapshot are unchanged.
             func recordHold(_ heldCommand: String) {
                 stateLock.lock()
                 hold = oneshot
@@ -543,12 +550,11 @@ public final class DaemonServer {
                 stateLock.unlock()
             }
 
-            // A supervised (app) command must NOT silently overwrite an
-            // unsupervised CLI hold — the CLI hold wins and the app is told to
-            // yield via the error, instead of clobbering it in the ~100ms before
-            // its next state poll. `oneshot` commands and `auto` are never
-            // blocked, so explicit app takeover (which sends `auto` first,
-            // clearing the hold) still works. Checked before any SMC write.
+            // A supervised (app) command must NOT silently overwrite an unsupervised
+            // CLI hold — the CLI hold wins and the app is told to yield via the error,
+            // instead of clobbering it in the ~100ms before its next state poll.
+            // `oneshot` commands and `auto` are never blocked, so explicit app takeover
+            // (which sends `auto` first, clearing the hold) still works.
             func blockedByCLIHold() -> Bool {
                 guard !oneshot else { return false }
                 stateLock.lock(); defer { stateLock.unlock() }
@@ -556,77 +562,80 @@ public final class DaemonServer {
                 return false
             }
 
-            switch parts.first.map(String.init) {
-            case "max":
-                if blockedByCLIHold() { response = "error: held by cli"; break }
+            switch request.verb {
+            case .max:
+                if blockedByCLIHold() { response = .failure(.heldByCLI, "held by cli"); break }
                 try fanControl.setMax()
                 recordHold("max")
-                response = "ok"
-            case "auto":
+                response = .ok()
+            case .auto:
                 try fanControl.resetAuto()
                 stateLock.lock(); hold = .none; stateLock.unlock()
-                response = "ok"
-            case "set":
-                guard parts.count >= 2, let rpm = Float(parts[1]) else {
-                    response = "error: usage: set <rpm>"
+                response = .ok()
+            case .set:
+                guard let rpm = request.rpm else {
+                    response = .failure(.usage, "usage: set <rpm>")
                     break
                 }
-                if blockedByCLIHold() { response = "error: held by cli"; break }
-                try fanControl.setAllFans(rpm: rpm)
-                recordHold("set \(Int(rpm))")
-                response = "ok"
-            case "setfan":
-                guard parts.count >= 3, let index = Int(parts[1]), let rpm = Float(parts[2]) else {
-                    response = "error: usage: setfan <index> <rpm>"
+                if blockedByCLIHold() { response = .failure(.heldByCLI, "held by cli"); break }
+                try fanControl.setAllFans(rpm: Float(rpm))
+                recordHold("set \(rpm)")
+                response = .ok()
+            case .setfan:
+                guard let index = request.fan, let rpm = request.rpm else {
+                    response = .failure(.usage, "usage: setfan <index> <rpm>")
                     break
                 }
-                if blockedByCLIHold() { response = "error: held by cli"; break }
-                try fanControl.setSpeed(fan: index, rpm: rpm)
-                recordHold("setfan \(index) \(Int(rpm))")
-                response = "ok"
-            case "status":
+                if blockedByCLIHold() { response = .failure(.heldByCLI, "held by cli"); break }
+                try fanControl.setSpeed(fan: index, rpm: Float(rpm))
+                recordHold("setfan \(index) \(rpm)")
+                response = .ok()
+            case .status:
+                // Same snake_case shape as the standalone CLI `status`, carried as an
+                // opaque payload string (no consumer decodes it today).
                 let status = try fanControl.status()
                 let encoder = JSONEncoder()
                 encoder.keyEncodingStrategy = .convertToSnakeCase
                 let data = try encoder.encode(status)
-                response = String(data: data, encoding: .utf8) ?? "error: encode failed"
-            case "state":
-                // Current hold + owner as JSON, so the app can reflect a CLI hold
-                // rather than fight or wipe it.
+                response = .statusResponse(String(data: data, encoding: .utf8) ?? "{}")
+            case .state:
+                // Current hold + owner, so the app can reflect a CLI hold rather than
+                // fight or wipe it.
                 stateLock.lock()
                 let snap = hold.snapshot
                 stateLock.unlock()
-                if let data = try? JSONEncoder().encode(snap),
-                   let json = String(data: data, encoding: .utf8) {
-                    response = json
-                } else {
-                    response = "error: state encode failed"
-                }
-            case "heartbeat":
-                // Refreshes a SUPERVISED hold's liveness only. On an unsupervised
-                // CLI hold this is deliberately a no-op — the app checking in must
-                // NOT convert a CLI hold into a supervised one (the v0.1.5 bug).
+                response = .stateResponse(snap)
+            case .heartbeat:
+                // Refreshes a SUPERVISED hold's liveness only. On an unsupervised CLI
+                // hold this is deliberately a no-op — the app checking in must NOT
+                // convert a CLI hold into a supervised one (the v0.1.5 bug).
                 stateLock.lock()
                 if case .supervised(let c, _) = hold {
                     hold = .supervised(command: c, lastBeat: Date())
                 }
                 stateLock.unlock()
-                response = "ok"
-            case "version":
-                // Reports the build this daemon process is running, so a CLI from
-                // a newer install can detect it's talking to a stale daemon.
-                response = ThermalForgeVersion.current
-            default:
-                response = "error: unknown command '\(command)'"
+                response = .ok()
+            case .version:
+                // Reports the build this daemon process is running, so a CLI from a
+                // newer install can detect it's talking to a stale daemon.
+                response = .versionResponse(ThermalForgeVersion.current)
             }
         } catch {
-            response = "error: \(error)"
+            response = .failure(.internal, "\(error)")
         }
 
-        let responseBytes = Array((response + "\n").utf8)
-        _ = responseBytes.withUnsafeBufferPointer { buf in
-            write(fd, buf.baseAddress!, buf.count)
+        sendResponse(fd, response)
+    }
+
+    /// Encode and write a response frame. Drops the connection if the response
+    /// somehow exceeds the cap (never happens for our payloads) rather than sending
+    /// a truncated frame.
+    private func sendResponse(_ fd: Int32, _ response: DaemonResponse) {
+        guard let frame = try? DaemonProtocol.encodeFrame(response, max: DaemonProtocol.maxResponseBytes) else {
+            NSLog("ThermalForge daemon: response exceeds frame cap; dropping connection")
+            return
         }
+        try? DaemonProtocol.writeFrame(fd, frame)
     }
 
     deinit {
