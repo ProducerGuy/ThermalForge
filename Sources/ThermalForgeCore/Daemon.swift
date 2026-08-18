@@ -302,8 +302,28 @@ public final class DaemonServer {
 
         // Hand the socket to the controlling user: owned by them, group wheel,
         // 0600. Only that user (and root — perms don't bind root) can connect.
-        chown(ThermalForgeDaemon.socketPath, ownerUID, 0)
-        chmod(ThermalForgeDaemon.socketPath, 0o600)
+        //
+        // The boundary is the umask(0o077) above — the socket is 0700-from-birth
+        // unconditionally. These two calls are refinement, not the boundary: chown so
+        // the user (not just root) can connect, chmod to trim the meaningless execute
+        // bit on a socket. Neither degrades security if it fails — chown failing
+        // leaves it root-only (fails closed); chmod failing leaves user-owned 0700,
+        // functionally identical to 0600 on a socket. We guard them anyway for
+        // DIAGNOSABILITY: an unchecked failure would surface as a mystery
+        // "daemon-down" banner with no cause. A loud crash-loop under KeepAlive that
+        // puts the errno in Console.app beats a silent lockout.
+        guard chown(ThermalForgeDaemon.socketPath, ownerUID, 0) == 0 else {
+            let err = errno
+            NSLog("ThermalForge daemon: chown of the socket to uid %u failed: errno %d", ownerUID, err)
+            close(fd)
+            throw ThermalForgeError.writeFailed("chown() failed: errno \(err)")
+        }
+        guard chmod(ThermalForgeDaemon.socketPath, 0o600) == 0 else {
+            let err = errno
+            NSLog("ThermalForge daemon: chmod(0600) on the socket failed: errno %d", err)
+            close(fd)
+            throw ThermalForgeError.writeFailed("chmod() failed: errno \(err)")
+        }
 
         guard listen(fd, 5) == 0 else {
             close(fd)

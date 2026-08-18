@@ -615,7 +615,26 @@ struct Install: ParsableCommand {
             do { try p.run(); p.waitUntilExit(); return p.terminationStatus }
             catch { return -1 }
         }
-        let appWasRunning = runTool("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"]) == 0
+        // Like runTool but returns stdout (first line, trimmed) or nil — used to
+        // capture a pid so the relaunch below can confirm a genuinely NEW process.
+        func runToolOutput(_ path: String, _ args: [String]) -> String? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: path)
+            p.arguments = args
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            do { try p.run() } catch { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let out = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return out.split(separator: "\n").first.map(String.init)
+        }
+        // Capture the controlling user's app PID now — before this install kills
+        // anything — both as the signal for whether to relaunch (upgrade recovery)
+        // and as the baseline for confirming a real relaunch (a different pid).
+        let prePid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+        let appWasRunning = prePid != nil
 
         // Resolve symlinks first. Launched via Homebrew (`sudo thermalforge
         // install`), argv[0] is /opt/homebrew/bin/thermalforge — itself a symlink
@@ -746,10 +765,22 @@ struct Install: ParsableCommand {
                 break
             }
             if !resynced {
-                // Already current — nothing newer to install. Re-assert perms; the
-                // plist/daemon refresh below does the rest.
+                // Already current — nothing newer to install. Re-assert ownership/
+                // perms and fail LOUD if it doesn't take. launchd execs installPath as
+                // root at every boot, so if a prior bad state left it user-owned or
+                // user-writable, a silent failure here would leave a local user able to
+                // replace the root daemon binary. This is also the most common path
+                // (re-install when already current), so it must not swallow errors —
+                // every other write in this file throws; so does this.
                 print("Binary at \(installPath) is already current (\(current)) — nothing to copy.")
-                try? fm.setAttributes(attrs, ofItemAtPath: installPath)
+                do {
+                    try fm.setAttributes(attrs, ofItemAtPath: installPath)
+                } catch {
+                    throw ValidationError("""
+                        Couldn't re-assert ownership/permissions on \(installPath):
+                        \(error.localizedDescription)
+                        """)
+                }
             }
         }
 
@@ -791,6 +822,16 @@ struct Install: ParsableCommand {
         // Migration: drop the legacy world-writable /tmp socket so no old client can
         // find (or squat) it. The daemon now serves /var/run; a literal path here
         // because socketPath is /var/run/... from Phase 1a.
+        //
+        // Safe despite being a root unlink() of a path in a world-writable directory
+        // (the classic /tmp symlink/hardlink attack surface), for three reasons:
+        //   - Symlink redirect: unlink() acts on the link itself, never follows it, so
+        //     a planted symlink can't make us delete its target.
+        //   - Hardlink to a victim file: unlink() only removes THIS /tmp directory
+        //     entry and decrements the link count — the victim file persists at its
+        //     original path.
+        //   - Directory planted at that name: unlink() fails with EISDIR; we ignore
+        //     the return, so it's a harmless no-op.
         unlink("/tmp/thermalforge.sock")
 
         // Start new daemon
@@ -855,6 +896,10 @@ struct Install: ParsableCommand {
         }
         let wantedVersion = ThermalForgeVersion.current
 
+        // Whether a version-matching bundle was actually installed THIS run. The
+        // relaunch at the end keys off this: reopening a stale /Applications bundle
+        // (old /tmp socket compiled in) is exactly the daemon-down-banner bug to avoid.
+        var freshBundleInstalled = false
         if let appSource = candidates.first(where: {
             fm.fileExists(atPath: $0) && bundleVersion($0) == wantedVersion
         }) {
@@ -883,6 +928,7 @@ struct Install: ParsableCommand {
             xattr.waitUntilExit()
 
             print("Installed ThermalForge.app to \(appDest)")
+            freshBundleInstalled = true
         } else {
             print("Note: no \(wantedVersion) app bundle found — leaving /Applications untouched. Checked:")
             for path in candidates {
@@ -901,14 +947,29 @@ struct Install: ParsableCommand {
         // (app not running) is a clean no-op. ENTIRELY non-fatal: the daemon is
         // already verified up, so a failed GUI relaunch prints guidance and never
         // fails the install.
-        if appWasRunning {
+        let moveGuidance = "Quit and reopen ThermalForge — the fan-control socket moved this version."
+        if appWasRunning && freshBundleInstalled {
             _ = runTool("/usr/bin/pkill", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
             Thread.sleep(forTimeInterval: 0.5)   // let it fully exit before relaunch
-            let relaunched = runTool("/bin/launchctl",
-                ["asuser", "\(ownerUID)", "/usr/bin/open", appDest]) == 0
+            _ = runTool("/bin/launchctl",
+                ["asuser", "\(ownerUID)", "/usr/bin/open", appDest])
+            // Don't trust open's exit code — on some macOS versions it returns 0
+            // without launching into the GUI session. Confirm a genuinely NEW app
+            // pid (different from the one captured before install) actually appeared;
+            // if pkill failed and the old app survived, the pid is unchanged and we
+            // fall through to the guidance rather than claim a relaunch.
+            Thread.sleep(forTimeInterval: 1.0)   // give the app time to register
+            let newPid = runToolOutput("/usr/bin/pgrep", ["-x", "-u", "\(ownerUID)", "ThermalForgeApp"])
+            let relaunched = newPid != nil && newPid != prePid
             if !relaunched {
-                print("Quit and reopen ThermalForge — the fan-control socket moved this version.")
+                print(moveGuidance)
             }
+        } else if appWasRunning {
+            // App was running but NO fresh bundle was installed this run, so
+            // /Applications holds a stale (or missing) bundle with the old /tmp socket
+            // compiled in. Reopening it would only reproduce the daemon-down banner —
+            // tell the user instead of relaunching the wrong binary.
+            print(moveGuidance)
         }
 
         print("Done.")
