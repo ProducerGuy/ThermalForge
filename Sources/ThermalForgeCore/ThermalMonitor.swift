@@ -168,12 +168,9 @@ public final class ThermalMonitor {
         guard let status = try? fanControl.status() else { return }
         latestStatus = status
 
-        // Extract peak temperatures
-        // CPU: aggregate keys (M5) + per-core keys (M1-M4)
-        let cpuTemp = peakTemp(status, prefixes: ["TC", "Tp"])
-        // GPU: ioft keys (M5) + flt keys (M1-M4)
-        let gpuTemp = peakTemp(status, prefixes: ["TG", "Tg"])
-        let maxTemp = max(cpuTemp, gpuTemp)
+        // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
+        // so the client monitor and the daemon's floor read the identical value.
+        let maxTemp = status.safetyPeakTemp
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
         if tickCounter % Self.monitorCadence == 0 {
@@ -530,12 +527,6 @@ public final class ThermalMonitor {
     }
 
     // MARK: - Helpers
-
-    private func peakTemp(_ status: ThermalStatus, prefixes: [String]) -> Float {
-        status.temperatures
-            .filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }
-            .values.max() ?? 0
-    }
 
     private func applyCommand(_ command: FanCommand) {
         do {

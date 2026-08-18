@@ -57,12 +57,15 @@ struct DaemonProtocolTests {
     func responseRoundTrip() throws {
         let responses: [DaemonResponse] = [
             .ok(),
+            .ok(note: "clamped 999999 → 3500 RPM (max)"),
             .failure(.usage, "usage: set <rpm>"),
             .failure(.heldByCLI, "held by cli"),
+            .failure(.rateLimited, "too many fan commands; try again shortly"),
             .failure(.internal, "smc write failed"),
             .versionResponse("0.1.10"),
             .statusResponse(#"{"fans":[],"temperatures":{}}"#),
             .stateResponse(DaemonHoldState(command: "set 3000", owner: "cli")),
+            .stateResponse(DaemonHoldState(command: "set 2000", owner: "app", safetySuspended: true)),
             .unsupported(daemonVersion: "0.1.10"),
         ]
         for resp in responses {

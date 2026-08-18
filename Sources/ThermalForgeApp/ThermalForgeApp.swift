@@ -31,7 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // bounded by the sendRaw timeout.
         let client = DaemonClient()
         if let state = try? client.readState(), state.owner == "app" {
-            try? client.execute(.resetAuto)
+            _ = try? client.execute(.resetAuto)
         }
         // owner == "cli" → leave the CLI hold alone; owner == "none" → nothing to reset.
     }
