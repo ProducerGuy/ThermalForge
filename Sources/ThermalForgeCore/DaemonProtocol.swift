@@ -47,21 +47,36 @@ public enum DaemonProtocol {
 
     /// Read one length-prefixed frame body from `fd`, rejecting a declared length
     /// over `max` BEFORE reading it (no unbounded allocation on a hostile prefix).
-    public static func readFrame(_ fd: Int32, max: Int) throws -> Data {
-        let header = try readFully(fd, 4)
+    public enum HeaderClass: Equatable {
+        case length(Int)   // a real body length within the cap
+        case legacyPeer    // pre-Phase-2 string peer
+        case oversized     // over-cap / hostile binary
+    }
+
+    /// Classify a 4-byte length prefix. A legitimate frame length is <= 64KB, so
+    /// header[0] is always 0x00; a peer still speaking the pre-Phase-2 string protocol
+    /// sends text ("max\n", "error: ...") whose first byte is printable ASCII — the
+    /// legacy signal, distinct from a non-ASCII over-cap/binary frame (hostile). Shared
+    /// by the blocking client read and the daemon's async DispatchIO read so the two
+    /// can't diverge. A valid frame never reaches the over-cap branch, so it can't be
+    /// misread.
+    public static func classifyHeader(_ header: [UInt8], max: Int) -> HeaderClass {
         let len = (Int(header[0]) << 24) | (Int(header[1]) << 16) | (Int(header[2]) << 8) | Int(header[3])
         if len < 0 || len > max {
-            // A legitimate frame length is <= 64KB, so header[0] is always 0x00. A peer
-            // still speaking the pre-Phase-2 string protocol sends text (e.g. "max\n",
-            // "error: ...", "0.1.10", "{...}") whose first byte is a printable ASCII
-            // char — that's the legacy signal. A non-ASCII high byte is a genuine
-            // over-cap/binary frame, still rejected as oversized (hostile). Splitting
-            // the two lets both daemon and client answer an old peer gracefully rather
-            // than fail raw. A valid frame never reaches here, so it can't be misread.
-            throw (header[0] >= 0x20 && header[0] <= 0x7e) ? FrameError.legacyPeer : FrameError.oversized
+            return (header[0] >= 0x20 && header[0] <= 0x7e) ? .legacyPeer : .oversized
         }
-        guard len > 0 else { return Data() }
-        return Data(try readFully(fd, len))
+        return .length(len)
+    }
+
+    public static func readFrame(_ fd: Int32, max: Int) throws -> Data {
+        let header = try readFully(fd, 4)
+        switch classifyHeader(header, max: max) {
+        case .legacyPeer: throw FrameError.legacyPeer
+        case .oversized: throw FrameError.oversized
+        case .length(let len):
+            guard len > 0 else { return Data() }
+            return Data(try readFully(fd, len))
+        }
     }
 
     /// Write all of `bytes` to `fd`, looping on partial writes.

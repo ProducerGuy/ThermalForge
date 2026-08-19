@@ -264,6 +264,9 @@ public final class DaemonServer {
     /// and runs without head-of-line blocking in production.
     private let injectedSampler: (() -> Float?)?
 
+    /// Phase 4 connection layer (concurrent bounded accept + framed I/O), created in run().
+    private var connectionServer: ConnectionServer?
+
     public init(fanControl: FanControl, ownerUID: uid_t,
                 sampleMaxTemp: (() -> Float?)? = nil) throws {
         self.fanControl = fanControl
@@ -339,7 +342,7 @@ public final class DaemonServer {
             throw ThermalForgeError.writeFailed("chmod() failed: errno \(err)")
         }
 
-        guard listen(fd, 5) == 0 else {
+        guard listen(fd, 16) == 0 else {   // backlog holds queued connects while at the 8-handler cap
             close(fd)
             throw ThermalForgeError.writeFailed("listen() failed")
         }
@@ -361,23 +364,12 @@ public final class DaemonServer {
         // the client monitor is primary; this is the backstop that survives the app.
         startThermalFloor()
 
-        // Accept connections on a background thread
-        // (RunLoop.main needed for NSWorkspace notifications)
-        DispatchQueue.global(qos: .utility).async { [self] in
-            while true {
-                let clientFD = accept(socketFD, nil, nil)
-                guard clientFD >= 0 else { continue }
-                // Drain per-connection autoreleased temporaries. This GCD block
-                // never returns, so without an explicit pool anything autoreleased
-                // inside handleClient would accumulate for the daemon's lifetime.
-                // accept() and the guard stay OUTSIDE the pool so `continue` keeps
-                // its normal loop meaning (no return-scope subtlety).
-                autoreleasepool {
-                    handleClient(clientFD)
-                    close(clientFD)
-                }
-            }
-        }
+        // Accept connections concurrently (bounded) so one hung connection can't stall
+        // others, and — the security fix — a slow-reading client can no longer hold
+        // smcLock during the response write (processFrame takes it only around process()).
+        let server = ConnectionServer(listenFD: socketFD) { [self] body in processFrame(body) }
+        server.start()
+        connectionServer = server
 
         // Main thread runs the RunLoop for wake notifications
         RunLoop.main.run()
@@ -650,62 +642,38 @@ public final class DaemonServer {
         }
     }
 
-    private func handleClient(_ fd: Int32) {
-        // Bound the server-side frame reads the way DaemonClient.request bounds the
-        // client (v0.1.7). A connect-and-hang client can now stall this serial accept
-        // loop for at most ~5s instead of forever: on timeout the read returns
-        // -1/EAGAIN, DaemonProtocol.readFrame throws, and the connection is dropped.
-        // Log (don't throw) if the timeout can't be set: failure just reverts THIS
-        // connection to the old unbounded blocking — non-fatal — but should be
-        // diagnosable rather than silent (same reasoning as the install chown/chmod
-        // guards). Killing the connection over a failed timeout setting would be worse.
-        var rcvTimeout = timeval(tv_sec: 5, tv_usec: 0)
-        let tvLen = socklen_t(MemoryLayout<timeval>.size)
-        if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, tvLen) != 0 {
-            NSLog("ThermalForge daemon: SO_RCVTIMEO on client fd failed: errno %d", errno)
-        }
-        if setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rcvTimeout, tvLen) != 0 {
-            NSLog("ThermalForge daemon: SO_SNDTIMEO on client fd failed: errno %d", errno)
-        }
+    // MARK: - Request Processing
 
-        // Parse one framed request. Oversized → structured usage error; a body we
-        // can't decode (unknown verb, or a shape from a newer client) → unsupported
-        // carrying our build; a closed/timed-out connection → nothing to answer.
-        let request: DaemonRequest
-        do {
-            let body = try DaemonProtocol.readFrame(fd, max: DaemonProtocol.maxRequestBytes)
-            request = try DaemonProtocol.decode(DaemonRequest.self, from: body)
-        } catch DaemonProtocol.FrameError.oversized {
-            NSLog("ThermalForge daemon: rejected oversized request frame")
-            sendResponse(fd, .failure(.usage, "request exceeds \(DaemonProtocol.maxRequestBytes) bytes"))
-            return
-        } catch DaemonProtocol.FrameError.legacyPeer {
-            // A pre-Phase-2 client (string protocol). Reply in ITS format — a raw
-            // "error:" line, NOT a frame — so its existing hasPrefix("error:") turns
-            // this into a thrown error with guidance, instead of silently misreading a
-            // framed reply as success. No verb is dispatched; nothing is executed.
-            NSLog("ThermalForge daemon: legacy (pre-Phase-2) client — advising reinstall")
-            let legacy = "error: daemon protocol updated; reinstall the CLI: sudo thermalforge install\n"
-            _ = Array(legacy.utf8).withUnsafeBufferPointer { write(fd, $0.baseAddress!, $0.count) }
-            return
-        } catch DaemonProtocol.FrameError.closed {
-            return
-        } catch {
-            sendResponse(fd, .unsupported(daemonVersion: ThermalForgeVersion.current))
-            return
+    /// Decode a request body → response: the framing/version/log wrapper around the
+    /// atomic process(). smcLock is taken ONLY for the process() call — never around
+    /// the I/O, so a slow-reading client can no longer hold it during the write.
+    private func processFrame(_ body: Data) -> DaemonResponse {
+        guard let request = try? DaemonProtocol.decode(DaemonRequest.self, from: body) else {
+            // Undecodable = unknown verb or a shape from a newer client.
+            return .unsupported(daemonVersion: ThermalForgeVersion.current)
         }
-
         // A newer protocol than we speak → tell the client our build so it can react.
         guard request.v <= DaemonProtocol.version else {
-            sendResponse(fd, .unsupported(daemonVersion: ThermalForgeVersion.current))
-            return
+            return .unsupported(daemonVersion: ThermalForgeVersion.current)
         }
-
-        NSLog("ThermalForge daemon: received verb %@", request.verb.rawValue)
-
-        let response: DaemonResponse
         smcLock.lock()
-        defer { smcLock.unlock() }
+        let response = process(request)
+        smcLock.unlock()
+        // Verb + outcome only — never raw client bytes.
+        NSLog("ThermalForge daemon: verb=%@ outcome=%@", request.verb.rawValue,
+              response.ok ? "ok" : (response.error?.rawValue ?? "error"))
+        return response
+    }
+
+    /// The full request dispatch — MOVED VERBATIM from the pre-Phase-4 serial handler.
+    /// The CALLER holds smcLock for the whole call, so every check-then-act
+    /// (blockedByCLIHold, rate limit, clamp, recordHold + SMC write) stays atomic exactly
+    /// as before; Phase 4 concurrency lives only in the I/O around this, never inside it.
+    /// Same-class concurrent writers resolve by last-write-wins (recordHold overwrites) —
+    /// the one authority rule is cross-class (CLI outranks app via blockedByCLIHold);
+    /// equal-authority ties are arbitrary-but-consistent by design, not by lock order.
+    private func process(_ request: DaemonRequest) -> DaemonResponse {
+        let response: DaemonResponse
         do {
             let oneshot = request.oneshot
 
@@ -810,18 +778,7 @@ public final class DaemonServer {
             response = .failure(.internal, "\(error)")
         }
 
-        sendResponse(fd, response)
-    }
-
-    /// Encode and write a response frame. Drops the connection if the response
-    /// somehow exceeds the cap (never happens for our payloads) rather than sending
-    /// a truncated frame.
-    private func sendResponse(_ fd: Int32, _ response: DaemonResponse) {
-        guard let frame = try? DaemonProtocol.encodeFrame(response, max: DaemonProtocol.maxResponseBytes) else {
-            NSLog("ThermalForge daemon: response exceeds frame cap; dropping connection")
-            return
-        }
-        try? DaemonProtocol.writeFrame(fd, frame)
+        return response
     }
 
     deinit {
