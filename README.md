@@ -18,7 +18,7 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 | Feature | ThermalForge | Macs Fan Control | TG Pro |
 |---|---|---|---|
 | Smart adaptive fan curve | **Yes** | No | No |
-| Machine-specific calibration | **Coming soon** | No | No |
+| Machine-specific calibration | No | No | No |
 | Multi-sensor safety | **Yes — all sensors** | [One sensor per fan](https://github.com/crystalidea/macs-fan-control/issues/266) | Manual rules only |
 | Proactive cooling (ramps before throttle) | **Yes** | No | No |
 | Fan curve type | Per-profile shapes (ease-in, linear, S-curve, instant) | Linear between 2 points | Manual step-function |
@@ -28,8 +28,8 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 | Thermal data logging (CSV) | **Yes** | No | Yes |
 | Process correlation in logs | **Yes** | No | No |
 | Sleep/wake re-apply | Yes | Yes | Yes |
-| Safety override (95°C) | **Yes — always active** | No | Requires manual setup |
-| Crash recovery (heartbeat watchdog) | **Yes** | Reverts on quit only | Override removes macOS safety |
+| Safety override (95°C) | **Yes — daemon-enforced, works with app closed** | No | Requires manual setup |
+| Crash recovery (heartbeat watchdog) | **Yes — daemon-enforced, holds during overheat** | Reverts on quit only | Override removes macOS safety |
 | Open source | **Yes** | No | No |
 | Price | **Free** | $15 | $20 |
 
@@ -48,8 +48,8 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 - Thermal logging — CSV + JSON data export with process correlation for research
 - Automatic fan re-apply after sleep/wake
 - Fahrenheit / Celsius toggle
-- Safety override: forces max fans if any sensor hits 95°C
-- Crash recovery: heartbeat watchdog resets fans if app dies
+- Safety override: the background daemon forces fans to maximum if a critical sensor crosses 95°C while a manual hold is keeping them too low — enforced in the daemon, so it works even with the menu bar app closed
+- Crash recovery: the daemon's heartbeat watchdog resets fans to Apple defaults if the app dies — and if a thermal safety override is active, it holds fans at max and defers the reset until the machine cools, so it never hands hot fans back to auto
 - Temperature anomaly detection: logs instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with process capture
 - Privileged daemon — one-time sudo, zero password prompts after
 - Native Swift — lightweight, no Electron, no bloat
@@ -109,6 +109,15 @@ open /Applications/ThermalForge.app
 
 Turn on **Launch at Login** in the menu bar dropdown and it starts automatically on every boot.
 
+## Security
+
+ThermalForge controls fans through a background daemon, and 0.2.0 locks down how you talk to it:
+
+- **Private control socket.** The daemon listens on `/var/run/thermalforge.sock`, mode `0600`, owned by the user who ran `sudo thermalforge install`. Only that user and root can send fan commands — no other local account can drive your fans.
+- **Structured, versioned protocol.** The CLI, app, and daemon speak a size-capped, versioned message format. Oversized or malformed input is rejected rather than parsed, and a version mismatch surfaces as an "Update needed" prompt instead of silent divergence.
+- **Safety enforced in the daemon.** RPM requests above a fan's maximum are clamped in the daemon, not just the app. Commands are rate-limited. A thermal floor forces fans to maximum if a critical sensor crosses 95°C while a manual hold is keeping them too low — and it runs in the background service, so it works even with the menu bar app closed.
+- **Robust connection handling.** Connections are handled concurrently, bounded, and timed out, so a stuck or slow client can't stall fan control.
+
 ## Smart Profile
 
 ### Why proactive cooling matters
@@ -142,7 +151,7 @@ Apple doesn't do this because silence sells in store demos and most users never 
 ### FAQ
 
 **What if ThermalForge closes during normal use?**
-The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app syncs to whatever the daemon is currently holding rather than forcing a reset — so a hold you set deliberately (e.g. `sudo thermalforge max`) survives.
+The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app syncs to whatever the daemon is currently holding rather than forcing a reset — so a hold you set deliberately (e.g. `sudo thermalforge max`) survives. If a thermal safety override is active when the app dies, the watchdog keeps fans at maximum and defers the reset until the machine has cooled below the safety threshold — it never drops fans back to auto while the machine is hot.
 
 ### Resets and troubleshooting
 
@@ -187,6 +196,8 @@ thermalforge log --rate 10 --duration 1h --no-expire   # 10Hz for 1 hour, keep f
 
 `max` and `set` need root to unlock the fans, so when the daemon is installed they route through it and **don't need `sudo`**; without a daemon (e.g. an uninstalled from-source build) they write the hardware directly and need `sudo`. `auto` also routes through the daemon but never needed the unlock — resetting just hands control back to macOS. `watch` always needs `sudo` (it runs its own root monitor loop). Control a single fan with `--fan`, e.g. `thermalforge set 3000 --fan 1`.
 
+Fans settle **near** a commanded target rather than exactly on it, so `status` and the menu bar report an RPM slightly above or below what you set — that's the live tach reading, not an error.
+
 Set fans from the terminal and the menu bar app shows a **"Fans held from Terminal"** banner and pauses its automatic control so it won't fight you — press **Default** (or pick a profile) to release the hold.
 
 ## Compatibility
@@ -199,6 +210,13 @@ Run `thermalforge discover` on your machine and [submit a compatibility report](
 | MacBook Pro 16" (2025) | M5 Max | Tested |
 | Mac Studio (2022) | M2 Ultra | Tested |
 | MacBook Pro 16" (2021) | M1 Max | Tested |
+| MacBook Pro 16" M5 Pro (Mac17,8) | M5 Pro | Reported |
+| MacBook Pro 14" M5 Pro (Mac17,9) | M5 Pro | Reported |
+| MacBook Pro M4 Max (Mac16,5) | M4 Max | Reported |
+| MacBook Pro M3 Max (2023, 128GB) | M3 Max | Reported |
+| MacBook Pro 14" M2 Pro (2023) | M2 Pro | Reported |
+| MacBook Pro 14" M2 Max (2023) | M2 Max | Reported |
+| MacBook Pro M1 (2020) | M1 | Reported |
 
 SMC key names vary across chip generations — ThermalForge auto-detects at startup. The `discover` command dumps all keys so we can verify what your hardware uses. The more machines tested, the more robust ThermalForge becomes.
 
@@ -274,7 +292,7 @@ ThermalForge has three types of stored data, all automatically managed:
 
 Nothing accumulates indefinitely. All cleanup runs automatically on app launch.
 
-## Coming Soon
+## Future Specs
 
 ### Enhanced Logging
 
