@@ -205,14 +205,18 @@ struct SetSpeed: ParsableCommand {
             let (route, note) = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
             reportRoute(route)
             if let note { print(note) }
-            print("Fan \(index) → \(rpm) RPM")
+            // Echo the value that was actually APPLIED (read back the target register),
+            // not the raw input — a clamped request would otherwise print the wrong number.
+            let applied = (try? FanControl().fanInfo(index)).map { Int($0.targetRPM) } ?? rpm
+            print("Fan \(index) → \(applied) RPM")
         } else {
             let (route, note) = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
             reportRoute(route)
             if let note { print(note) }
             if let fc = try? FanControl(), let count = try? fc.fanCount() {
                 for i in 0..<count {
-                    print("Fan \(i) → \(rpm) RPM")
+                    let applied = (try? fc.fanInfo(i)).map { Int($0.targetRPM) } ?? rpm
+                    print("Fan \(i) → \(applied) RPM")
                 }
             } else {
                 print("All fans → \(rpm) RPM")

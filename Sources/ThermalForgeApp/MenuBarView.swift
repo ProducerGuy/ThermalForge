@@ -220,12 +220,15 @@ private struct ExternalHoldBanner: View {
     private func describe(_ command: String?) -> String {
         let parts = (command ?? "").split(separator: " ").map(String.init)
         switch parts.first {
+        // Approximate language on purpose: the held value is the fan's TARGET, but the
+        // RPM shown in the fan rows is the actual tach, which hovers ~1% around it. Exact
+        // wording ("pinned to 3500") next to a row reading 3488/3512 looks like a bug.
         case "max":
-            return "Fans are pinned to maximum. The app won't adjust them until you take over."
+            return "Fans are held at maximum. The app won't adjust them until you take over."
         case "set" where parts.count > 1:
-            return "Fans are pinned to \(parts[1]) RPM. The app won't adjust them until you take over."
+            return "Fans are held at about \(parts[1]) RPM. The app won't adjust them until you take over."
         case "setfan" where parts.count > 2:
-            return "Fan \(parts[1]) is pinned to \(parts[2]) RPM. The app won't adjust fans until you take over."
+            return "Fan \(parts[1]) is held at about \(parts[2]) RPM. The app won't adjust fans until you take over."
         default:
             return "Fans are held manually. The app won't adjust them until you take over."
         }
