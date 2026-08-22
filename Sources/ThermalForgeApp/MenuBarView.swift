@@ -47,6 +47,14 @@ struct MenuBarView: View {
                     ExternalHoldBanner(hold: hold)
                     Divider()
                 }
+
+                // Update-available banner — informational, lowest priority. Suppressed
+                // while "Update needed" (daemon out of sync) shows, so two update-ish
+                // banners never stack; can coexist with a CLI hold.
+                if appState.daemonVersionMismatch == nil, let update = appState.availableUpdate {
+                    UpdateAvailableBanner(update: update, onDismiss: { appState.dismissUpdate() })
+                    Divider()
+                }
             }
 
             // Fan speeds
@@ -269,6 +277,64 @@ private struct DaemonUpdateBanner: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.12))
+    }
+}
+
+/// Shown when a newer ThermalForge release exists than the installed build. Purely
+/// informational (blue, not the orange "Update needed"): it tells the user an update
+/// shipped and how to get it — the app can't run `brew upgrade` for them. Dismissible
+/// per-version via "Later".
+private struct UpdateAvailableBanner: View {
+    let update: AvailableUpdate
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Update available", systemImage: "arrow.down.circle.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.blue)
+
+            Text("ThermalForge \(update.version) is available. You have \(ThermalForgeVersion.current).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Update with:")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("brew upgrade thermalforge && sudo thermalforge install")
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)))
+
+            Text("Built from source? Run  git pull && ./setup.sh")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                if let url = URL(string: update.url) {
+                    Link("What's new", destination: url)
+                        .font(.caption2)
+                }
+                Spacer()
+                Button("Later", action: onDismiss)
+                    .buttonStyle(.plain)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.blue.opacity(0.12))
     }
 }
 

@@ -36,6 +36,11 @@ final class AppState: ObservableObject {
     /// without the daemon the app can't control fans at all, so this must be
     /// visible, not just logged. Cleared the moment a heartbeat succeeds.
     @Published var daemonUnreachable: Bool = false
+    /// A GitHub release newer than this installed build, else nil. Non-nil drives
+    /// the "Update available" banner. Set from a once-daily check and from persisted
+    /// state on launch (so it shows without waiting for a network round-trip); a
+    /// dismissed version is suppressed until a newer one ships.
+    @Published var availableUpdate: AvailableUpdate?
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
@@ -76,6 +81,9 @@ final class AppState: ObservableObject {
 
     init() {
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
+
+        // Show a previously-found update immediately, before any network call.
+        availableUpdate = Self.storedAvailableUpdate()
 
         adoptDaemonStateOnLaunch()
 
@@ -222,9 +230,93 @@ final class AppState: ObservableObject {
                     if self.heartbeatFailures >= 2 { self.daemonUnreachable = true }
                 }
             }
+
+            // Ride the heartbeat as a cheap clock, but hit the network at most once a
+            // day. Runs off-main; nothing here touches published state directly.
+            self?.maybeCheckForUpdate()
         }
         timer.resume()
         heartbeatTimer = timer
+    }
+
+    // MARK: - Update check
+
+    // nonisolated: read from `maybeCheckForUpdate` on the heartbeat queue. Static
+    // members of a @MainActor type are otherwise MainActor-isolated (a Swift 6 error
+    // to touch off-main); these are immutable constants, so isolation buys nothing.
+    //
+    // We persist the NEXT allowed check time, not the last one, so the gate is a plain
+    // `now >= nextCheck` and both the normal and backed-off cases store `now + interval`
+    // — no negative-interval arithmetic to misread as a bug later.
+    nonisolated private static let updateNextCheckKey = "updateNextCheck"
+    nonisolated private static let updateLatestVersionKey = "updateLatestVersion"
+    nonisolated private static let updateLatestURLKey = "updateLatestURL"
+    nonisolated private static let updateDismissedKey = "updateDismissedVersion"
+    /// Normal cadence: next check a day out. A machine asleep/off checks on next wake.
+    nonisolated private static let updateCheckInterval: TimeInterval = 24 * 60 * 60
+    /// After a failed check, next check ~1h out instead of a full day.
+    nonisolated private static let updateRetryInterval: TimeInterval = 60 * 60
+
+    /// Reconstruct the last-known available update from persisted state (launch path),
+    /// suppressing a version the user dismissed.
+    private static func storedAvailableUpdate() -> AvailableUpdate? {
+        let d = UserDefaults.standard
+        guard let version = d.string(forKey: updateLatestVersionKey),
+              version != d.string(forKey: updateDismissedKey) else { return nil }
+        return UpdateChecker.evaluate(
+            current: ThermalForgeVersion.current,
+            tagName: version,
+            url: d.string(forKey: updateLatestURLKey) ?? UpdateChecker.releasesPageURL
+        )
+    }
+
+    /// Fire a check if a day has elapsed. `nonisolated` so it runs on the heartbeat
+    /// queue; only UserDefaults (thread-safe) is touched here, and the result is
+    /// applied back on the main actor.
+    nonisolated private func maybeCheckForUpdate() {
+        let defaults = UserDefaults.standard
+        let nextCheck = (defaults.object(forKey: Self.updateNextCheckKey) as? Date) ?? .distantPast
+        guard Date() >= nextCheck else { return }
+        // Claim the window up front so the 5s heartbeat can't refire the fetch.
+        defaults.set(Date().addingTimeInterval(Self.updateCheckInterval), forKey: Self.updateNextCheckKey)
+
+        Task { [weak self] in
+            let result = await UpdateChecker.check()
+            if case .failed = result {
+                // Transient failure — pull the next check back to ~1h out, not a day.
+                defaults.set(Date().addingTimeInterval(Self.updateRetryInterval), forKey: Self.updateNextCheckKey)
+            }
+            await self?.applyUpdateCheck(result)
+        }
+    }
+
+    /// Apply a completed check. `.failed` is silent (prior state untouched). Only a
+    /// definitive result changes what the user sees.
+    func applyUpdateCheck(_ result: UpdateCheckResult) {
+        let d = UserDefaults.standard
+        switch result {
+        case .failed:
+            return
+        case .upToDate:
+            d.removeObject(forKey: Self.updateLatestVersionKey)
+            d.removeObject(forKey: Self.updateLatestURLKey)
+            availableUpdate = nil
+        case .update(let update):
+            d.set(update.version, forKey: Self.updateLatestVersionKey)
+            d.set(update.url, forKey: Self.updateLatestURLKey)
+            // Honor a dismissal until a still-newer version arrives.
+            if update.version != d.string(forKey: Self.updateDismissedKey) {
+                availableUpdate = update
+            }
+        }
+    }
+
+    /// "Later" — hide the banner for this version; it returns when a newer one ships.
+    func dismissUpdate() {
+        if let version = availableUpdate?.version {
+            UserDefaults.standard.set(version, forKey: Self.updateDismissedKey)
+        }
+        availableUpdate = nil
     }
 
     // MARK: - Monitoring
