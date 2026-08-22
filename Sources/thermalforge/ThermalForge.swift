@@ -129,7 +129,7 @@ struct Max: ParsableCommand {
         // Route through the daemon (no sudo) when it's running; oneshot so a
         // fire-and-forget max hold isn't reverted by the watchdog. The router
         // handles the version query and reportRoute the single mismatch warning.
-        let (route, _) = try FanCommandRouter.apply(.setMax, oneshot: true)
+        let (route, _, _) = try FanCommandRouter.apply(.setMax, oneshot: true)
         reportRoute(route)
 
         // Status readout is a read — works without root regardless of route.
@@ -174,7 +174,7 @@ struct Auto: ParsableCommand {
 
         // Route through the daemon (coordinates its state, no sudo) when running;
         // resetAuto isn't a hold, so oneshot doesn't apply.
-        let (route, _) = try FanCommandRouter.apply(.resetAuto, oneshot: false)
+        let (route, _, _) = try FanCommandRouter.apply(.resetAuto, oneshot: false)
         reportRoute(route)
         print(stopApp
             ? "Menu bar app stopped; fans reset to Apple defaults"
@@ -196,30 +196,47 @@ struct SetSpeed: ParsableCommand {
     @Option(name: .shortAndLong, help: "Fan index (default: all fans)")
     var fan: Int?
 
+    /// Printed instead of a "Fan N → X RPM" line when a daemon applied the command but
+    /// is too old (pre-0.2.1) to report the RPM it clamped to. We echo the value the
+    /// daemon says it applied — never a target-register read-back (it lags a command
+    /// ~1s) and never the raw request as if the daemon confirmed it. On the direct
+    /// (no-daemon) path the request IS authoritative, because FanControl throws on an
+    /// out-of-range value rather than clamping. When neither holds, we say the value is
+    /// unknown rather than print a number we can't vouch for.
+    private static let appliedUnknownByOldDaemon = """
+        Fan speed set, but the background daemon is an older build that doesn't report \
+        the applied RPM, so the exact value can't be shown. Re-sync to fix:
+          sudo thermalforge install
+        """
+
     func run() throws {
         let target = Float(rpm)
 
         if let index = fan {
             // Per-fan now routes through the daemon too (0.1.5 `setfan`); older
             // daemons fall back to direct SMC, which reportRoute flags.
-            let (route, note) = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
+            let (route, note, applied) = try FanCommandRouter.apply(.setFan(index: index, rpm: target), oneshot: true)
             reportRoute(route)
             if let note { print(note) }
-            // Echo the value that was actually APPLIED (read back the target register),
-            // not the raw input — a clamped request would otherwise print the wrong number.
-            let applied = (try? FanControl().fanInfo(index)).map { Int($0.targetRPM) } ?? rpm
-            print("Fan \(index) → \(applied) RPM")
+            if let shown = applied ?? (route.wentThroughDaemon ? nil : rpm) {
+                print("Fan \(index) → \(shown) RPM")
+            } else {
+                print(Self.appliedUnknownByOldDaemon)
+            }
         } else {
-            let (route, note) = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
+            let (route, note, applied) = try FanCommandRouter.apply(.setRPM(target), oneshot: true)
             reportRoute(route)
             if let note { print(note) }
-            if let fc = try? FanControl(), let count = try? fc.fanCount() {
-                for i in 0..<count {
-                    let applied = (try? fc.fanInfo(i)).map { Int($0.targetRPM) } ?? rpm
-                    print("Fan \(i) → \(applied) RPM")
+            if let shown = applied ?? (route.wentThroughDaemon ? nil : rpm) {
+                if let fc = try? FanControl(), let count = try? fc.fanCount() {
+                    for i in 0..<count {
+                        print("Fan \(i) → \(shown) RPM")
+                    }
+                } else {
+                    print("All fans → \(shown) RPM")
                 }
             } else {
-                print("All fans → \(rpm) RPM")
+                print(Self.appliedUnknownByOldDaemon)
             }
         }
     }

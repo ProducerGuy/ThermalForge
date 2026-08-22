@@ -129,6 +129,18 @@ public struct DaemonHoldState: Codable, Equatable {
     public var isCLIHold: Bool { owner == "cli" }
 }
 
+/// The result of applying a fan command: the daemon's advisory note (e.g. a clamp)
+/// and the RPM it actually applied. Both come straight from the daemon's response so
+/// the CLI echoes the authoritative value, never a laggy target-register read-back.
+public struct FanApplyResult: Equatable {
+    public let note: String?
+    public let appliedRPM: Int?
+    public init(note: String?, appliedRPM: Int?) {
+        self.note = note
+        self.appliedRPM = appliedRPM
+    }
+}
+
 public final class DaemonClient {
     public init() {}
 
@@ -148,14 +160,15 @@ public final class DaemonClient {
     ///   The menu bar app leaves this false so it stays supervised/crash-protected.
     ///   No effect on resetAuto (nothing to hold).
     @discardableResult
-    public func execute(_ command: FanCommand, oneshot: Bool = false) throws -> String? {
+    public func execute(_ command: FanCommand, oneshot: Bool = false) throws -> FanApplyResult {
         let response = try request(DaemonRequest(command, oneshot: oneshot))
         guard response.ok else {
             throw DaemonError.commandFailed(
                 response.message ?? response.error.map { String(describing: $0) } ?? "daemon error"
             )
         }
-        return response.note   // advisory note on an OK response (e.g. a clamp)
+        // Note + applied RPM ride back on an OK response (e.g. a clamp).
+        return FanApplyResult(note: response.note, appliedRPM: response.appliedRPM)
     }
 
     /// Send one typed request and return the typed response — length-prefixed JSON
@@ -732,7 +745,7 @@ public final class DaemonServer {
                 let (clamped, note) = clampRPM(Float(rpm), fan: 0)
                 if !isSuspended() { try fanControl.setAllFans(rpm: clamped) }
                 recordHold("set \(Int(clamped))")
-                response = .ok(note: note)
+                response = .ok(note: note, appliedRPM: Int(clamped))
             case .setfan:
                 guard let index = request.fan, let rpm = request.rpm else {
                     response = .failure(.usage, "usage: setfan <index> <rpm>")
@@ -743,7 +756,7 @@ public final class DaemonServer {
                 let (clamped, note) = clampRPM(Float(rpm), fan: index)
                 if !isSuspended() { try fanControl.setSpeed(fan: index, rpm: clamped) }
                 recordHold("setfan \(index) \(Int(clamped))")
-                response = .ok(note: note)
+                response = .ok(note: note, appliedRPM: Int(clamped))
             case .status:
                 // Same snake_case shape as the standalone CLI `status`, carried as an
                 // opaque payload string (no consumer decodes it today).

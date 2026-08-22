@@ -190,10 +190,15 @@ public struct DaemonResponse: Codable, Equatable {
     /// Advisory result note on an OK response — e.g. "clamped 999999 → 3500 RPM (max)".
     /// Not an error; the command was applied (with the clamped value).
     public var note: String?
+    /// The RPM the daemon actually applied after clamping — the authoritative value for
+    /// a CLI echo, so it never re-reads the target register (which lags a command by ~1s
+    /// and would print a stale RPM) or recomputes the clamp (a second source that can
+    /// drift). Set on OK `set`/`setfan`; nil otherwise.
+    public var appliedRPM: Int?
 
     public init(ok: Bool, error: DaemonErrorKind? = nil, message: String? = nil,
                 version: String? = nil, statusJSON: String? = nil, state: DaemonHoldState? = nil,
-                note: String? = nil, v: Int = DaemonProtocol.version) {
+                note: String? = nil, appliedRPM: Int? = nil, v: Int = DaemonProtocol.version) {
         self.v = v
         self.ok = ok
         self.error = error
@@ -202,9 +207,12 @@ public struct DaemonResponse: Codable, Equatable {
         self.statusJSON = statusJSON
         self.state = state
         self.note = note
+        self.appliedRPM = appliedRPM
     }
 
-    public static func ok(note: String? = nil) -> DaemonResponse { .init(ok: true, note: note) }
+    public static func ok(note: String? = nil, appliedRPM: Int? = nil) -> DaemonResponse {
+        .init(ok: true, note: note, appliedRPM: appliedRPM)
+    }
     public static func failure(_ kind: DaemonErrorKind, _ message: String) -> DaemonResponse {
         .init(ok: false, error: kind, message: message)
     }

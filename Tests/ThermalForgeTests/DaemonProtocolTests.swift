@@ -58,6 +58,8 @@ struct DaemonProtocolTests {
         let responses: [DaemonResponse] = [
             .ok(),
             .ok(note: "clamped 999999 → 3500 RPM (max)"),
+            .ok(note: "clamped 999999 → 3500 RPM (max)", appliedRPM: 3500),
+            .ok(appliedRPM: 2500),
             .failure(.usage, "usage: set <rpm>"),
             .failure(.heldByCLI, "held by cli"),
             .failure(.rateLimited, "too many fan commands; try again shortly"),
