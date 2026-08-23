@@ -36,6 +36,9 @@ final class AppState: ObservableObject {
     /// without the daemon the app can't control fans at all, so this must be
     /// visible, not just logged. Cleared the moment a heartbeat succeeds.
     @Published var daemonUnreachable: Bool = false
+    /// Power-mode overheat protection — what the controller believes right
+    /// now. Published from the controller's queue onto the main actor.
+    @Published var powerProtection = PowerModeControllerState(enabled: true, highTemp: 88, lowTemp: 70)
     /// A GitHub release newer than this installed build, else nil. Non-nil drives
     /// the "Update available" banner. Set from a once-daily check and from persisted
     /// state on launch (so it shows without waiting for a network round-trip); a
@@ -44,6 +47,12 @@ final class AppState: ObservableObject {
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
+    /// Overheat protection: chips the system into reduced performance when a
+    /// sensor crosses the high threshold. Owns its serial queue; the app only
+    /// feeds it temperatures (100 ms) and asks for re-reads (2 s).
+    private var powerController: PowerModeController?
+    /// Source of truth for the user-tunable thresholds (persisted UserDefaults).
+    private var powerConfig: PowerModeConfig = PowerModeConfig.default
     private var heartbeatTimer: DispatchSourceTimer?
     /// Consecutive failed heartbeats, for debouncing `daemonUnreachable`.
     private var heartbeatFailures = 0
@@ -89,6 +98,10 @@ final class AppState: ObservableObject {
 
         // Clean expired logs
         ThermalLogger.cleanExpired()
+
+        // Power protection FIRST: startMonitoring() wires the monitor's tick
+        // hooks to the controller, so it must exist before the monitor runs.
+        setupPowerProtection()
 
         startMonitoring()
         // startHeartbeat() is intentionally NOT called here — it is launched from
@@ -322,7 +335,12 @@ final class AppState: ObservableObject {
     // MARK: - Monitoring
 
     func startMonitoring() {
-        guard let fc = try? FanControl() else { return }
+        guard let fc = try? FanControl() else {
+            // Without the daemon there is no temperature source — the power
+            // protection (which rides the monitor's ticks) is also inactive.
+            TFLogger.shared.power("Protection inactive: no temperature source (fan control unavailable)")
+            return
+        }
 
         let monitor = ThermalMonitor(fanControl: fc, profile: activeProfile)
         monitor.onUpdate = { [weak self] status, profile, state in
@@ -352,6 +370,20 @@ final class AppState: ObservableObject {
                 self.commandPump.submit(command)
             }
         }
+
+        // Power protection: feed the controller off-main. The controller is
+        // Sendable and owns its queue — capture it directly (no MainActor hop):
+        // the 100 ms tick must not create main-actor tasks just to forward a
+        // Float, and pmset I/O stays on the controller's queue by construction.
+        if let controller = powerController {
+            monitor.onTick = { status in
+                controller.evaluate(peakTemp: status.maxSensorTemperature)
+            }
+            monitor.onMonitorTick = {
+                controller.refreshMode()
+            }
+        }
+
         monitor.start()
         self.monitor = monitor
     }
@@ -416,6 +448,61 @@ final class AppState: ObservableObject {
         if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" || took {
             commandPump.submit(.resetAuto)
         }
+    }
+
+    // MARK: - Power protection (overheat)
+
+    private func setupPowerProtection() {
+        powerConfig = PowerModeConfig(defaults: UserDefaults.standard)
+
+        let controller = PowerModeController(
+            backend: PmsetPowerModeBackend(),
+            config: powerConfig
+        )
+        // The controller fires this on its own queue — hop to the main actor.
+        controller.onStateChange = { [weak self] state in
+            Task { @MainActor [weak self] in
+                self?.powerProtection = state
+            }
+        }
+        powerController = controller
+        powerProtection = PowerModeControllerState(
+            enabled: powerConfig.enabled,
+            highTemp: powerConfig.highTemp,
+            lowTemp: powerConfig.lowTemp
+        )
+
+        TFLogger.shared.power(
+            "Protection armed: enabled=\(powerConfig.enabled), high=\(powerConfig.highTemp)°C, low=\(powerConfig.lowTemp)°C"
+        )
+        // Initial read of the actual system mode (unprivileged pmset).
+        controller.refreshMode()
+    }
+
+    func setPowerProtectionEnabled(_ enabled: Bool) {
+        powerConfig.enabled = enabled
+        powerConfig.save()
+        powerController?.update(config: powerConfig)
+        powerProtection.enabled = enabled
+        TFLogger.shared.power(enabled ? "Protection enabled by user" : "Protection disabled by user")
+    }
+
+    func setReduceThreshold(_ celsius: Float) {
+        powerConfig.highTemp = celsius
+        powerConfig.validate()
+        powerConfig.save()
+        powerController?.update(config: powerConfig)
+        powerProtection.highTemp = powerConfig.highTemp
+        powerProtection.lowTemp = powerConfig.lowTemp
+    }
+
+    func setRestoreThreshold(_ celsius: Float) {
+        powerConfig.lowTemp = celsius
+        powerConfig.validate()
+        powerConfig.save()
+        powerController?.update(config: powerConfig)
+        powerProtection.highTemp = powerConfig.highTemp
+        powerProtection.lowTemp = powerConfig.lowTemp
     }
 
     // MARK: - Daemon recovery
