@@ -1,6 +1,11 @@
 # ThermalForge
 
-**Free, open-source fan control for Apple Silicon Macs.** Menu bar app + CLI.
+**Free, open-source fan control for Apple Silicon Macs.** Menu bar app + CLI,
+plus **overheat protection**: when the fans can't hold the
+temperature, the whole system drops into reduced performance automatically —
+and returns to full performance once the machine cools.
+A checkmark in the GUI marks the selected profile, Smart included.
+
 
 Built in 2026 with Swift. No subscriptions, no telemetry, no ads.
 
@@ -29,6 +34,7 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 | Process correlation in logs | **Yes** | No | No |
 | Sleep/wake re-apply | Yes | Yes | Yes |
 | Safety override (95°C) | **Yes — daemon-enforced, works with app closed** | No | Requires manual setup |
+| Overheat protection | **Yes — reduces system performance automatically** | No | No |
 | Crash recovery (heartbeat watchdog) | **Yes — daemon-enforced, holds during overheat** | Reverts on quit only | Override removes macOS safety |
 | Open source | **Yes** | No | No |
 | Price | **Free** | $15 | $20 |
@@ -49,6 +55,7 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 - Automatic fan re-apply after sleep/wake
 - Fahrenheit / Celsius toggle
 - Safety override: the background daemon forces fans to maximum if a critical sensor crosses 95°C while a manual hold is keeping them too low — enforced in the daemon, so it works even with the menu bar app closed
+- **Overheat protection: drops the system into reduced performance when a sensor crosses your threshold — a second line of defense that works even when fans alone can't hold the temperature**
 - Crash recovery: the daemon's heartbeat watchdog resets fans to Apple defaults if the app dies — and if a thermal safety override is active, it holds fans at max and defers the reset until the machine cools, so it never hands hot fans back to auto
 - Temperature anomaly detection: logs instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with process capture
 - Privileged daemon — one-time sudo, zero password prompts after
@@ -75,6 +82,18 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 - **Between start and ceiling:** Fan speed scales based on the profile's curve shape. Balanced (ease-in) is quiet at low temps — at 62.5°C (midpoint of 55–70°C), fans run at only 15% of max RPM instead of 30% linear. Performance (linear) is proportional. Max has no proportional zone — it's binary.
 - **At ceiling and above:** Fan speed at the profile's maximum (60%/85%/100%).
 - **Ramp down:** Each profile has its own ramp-down rate. Max uses a gentle governor to let temps stabilize before backing off.
+
+
+## Overheat Protection
+
+Fans are the first line of defense. But on a machine where fan speed alone can't hold the temperature (sustained renders, training jobs, a struggling cooling system), the chip simply cannot take the load. Overheat protection is the second line: when the hottest sensor stays above your threshold, ThermalForge switches the whole system into **reduced performance** — the same setting as System Settings → Battery → Power mode — and switches back when the machine cools.
+
+- **Reduce at ≥ 88 °C** (default) — performance drops. Tune between 50–100 °C in the dropdown.
+- **Restore at ≤ 70 °C** (default) — full performance returns. Tune between 30–95 °C; the app keeps at least a 2 °C gap so you can't configure away the hysteresis.
+- Decisions run on the 100 ms thermal tick; the setting is confirmed by re-reading it, and the current mode (🐢 reduced / 🐇 high) is shown in the dropdown at all times.
+
+The guard and the fan profile **coexist**: the fans do their normal job, and protection only kicks in if the temperature gets past them anyway. It's a deliberate trade — reduced performance is *safe*, full performance at an uncontrolled temperature is not.
+
 
 ## Install
 
@@ -152,6 +171,25 @@ Apple doesn't do this because silence sells in store demos and most users never 
 
 **What if ThermalForge closes during normal use?**
 The daemon's heartbeat watchdog detects the app is gone within 15 seconds and resets fans to Apple defaults. On next launch, the app syncs to whatever the daemon is currently holding rather than forcing a reset — so a hold you set deliberately (e.g. `sudo thermalforge max`) survives. If a thermal safety override is active when the app dies, the watchdog keeps fans at maximum and defers the reset until the machine has cooled below the safety threshold — it never drops fans back to auto while the machine is hot.
+
+**Do I need to enter a password?**
+Only for the one-time setup, same as everything else in ThermalForge. Switching performance mode requires root, and a background app can't prompt for a password — so ThermalForge needs a passwordless sudo exception for `pmset` (the same mechanism the fan daemon already uses). `./setup.sh` asks once and creates it. Every subsequent mode switch is silent, a few times a year at most. The dropdown shows a warning banner if `sudo` ever refuses the call (e.g. the sudoers entry was removed) — until then the guard cannot act, and the warning says so.
+
+**What if the app quits or the daemon stops?**
+Protection stops with them — and the system falls back to Apple's stock thermal management, which always exists underneath. The guard is *additional*, never the only thing between you and a hot chip. (A future version can move the guard into the daemon so it survives app restarts; see the backlog.)
+
+**How do I pin the performance mode myself?**
+Turn the guard off in the dropdown — then set the mode in System Settings. Off = the app never touches the mode (it won't force it back in either direction). One known quirk, by design: while the guard is *on*, it can't tell "you pinned reduced" from "I set reduced" — so if the machine cools, it releases back to high. Want it to stick? Guard off.
+
+**Does it work on battery?**
+Yes — the power-mode setting applies regardless of power source. (There are no user-controllable fans on battery, so the guard is the main lever in that state.)
+
+**Why did the mode flap between reduced and high a few times during a big build?**
+The hysteresis band is narrow relative to how fast your temperature moves, so the guard follows the curve. That's the mechanism doing its job — tune the thresholds to sit where *your* workloads actually plateau (the dropdown values are deliberately easy to change; they persist).
+
+## Known limitations
+
+- **Smart indicator.** When Smart is active, a checkmark is added in front of the Smart button, mirroring the picker's selected-row indicator on the other four profiles (space is always reserved, so nothing jumps when it appears). Because Smart is a bordered button, the checkmark sits slightly inset relative to the picker's column — a deliberate trade; matching it pixel-for-pixel would require restyling Smart as a full-width menu row. The orange tint marks the active state; see `backlog.md`.
 
 ### Resets and troubleshooting
 
