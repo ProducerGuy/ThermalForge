@@ -404,6 +404,10 @@ final class AppState: ObservableObject {
     }
 
     func selectProfile(_ profile: FanProfile) {
+        // switchProfile zeroes the ramp governor and a handsOff profile also hands
+        // fans back to Apple auto, so re-selecting what is already active must not
+        // reach either. An external hold is the one reason to run it again.
+        guard profile.id != activeProfile.id || externalHold != nil else { return }
         let took = seizeControl()
         activeProfile = profile
         monitor?.switchProfile(profile)

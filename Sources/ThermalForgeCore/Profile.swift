@@ -272,4 +272,7 @@ extension FanProfile {
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
+    /// Above this, profiles drop their sustained trigger and ramp-up governor.
+    /// Both are acoustic comfort; neither is worth reaching safetyTempThreshold for.
+    public static let dangerZoneTemp: Float = 85.0
 }
