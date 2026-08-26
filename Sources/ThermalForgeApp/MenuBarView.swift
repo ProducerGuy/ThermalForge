@@ -92,11 +92,13 @@ struct MenuBarView: View {
             // Profile picker
             SectionHeader(title: "PROFILE")
             // Buttons, not a Picker: an inline Picker's binding is written by
-            // SwiftUI on re-render, not only on a click. After a wake the panel
-            // re-rendered and wrote the first row (Silent) before re-asserting the
-            // real profile. Silent is handsOff, so that echo reset fans to Apple
-            // auto and zeroed the ramp governor mid-heat-up. A Button action can
-            // only come from a gesture.
+            // SwiftUI on re-render, not only on a click. Every re-render writes the
+            // first row (Silent) before re-asserting the real profile, logged as a
+            // same-second "Selected: Silent" / "Selected: Performance" pair. One such
+            // pair fired at 01:21:27 with no user present -- pmset puts that inside
+            // DarkWake (01:21:03), six seconds before DarkWake to FullWake (01:21:33).
+            // Silent is handsOff, so the echo hands fans back to Apple auto and zeroes
+            // the ramp governor. A Button action can only come from a gesture.
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(FanProfile.builtIn) { profile in
                     Button(action: { appState.selectProfile(profile) }) {
