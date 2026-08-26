@@ -13,6 +13,12 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
     @Published var activeProfile: FanProfile = .silent
+
+    /// Key for the last profile the user chose. Fan behaviour is a standing
+    /// preference, not a per-launch decision: without this, every restart,
+    /// update, crash or logout silently drops the machine back to Apple's curve
+    /// while the menu still reads whatever the user last picked.
+    private static let activeProfileKey = "activeProfileID"
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
@@ -85,6 +91,10 @@ final class AppState: ObservableObject {
         // Show a previously-found update immediately, before any network call.
         availableUpdate = Self.storedAvailableUpdate()
 
+        // Before startMonitoring() — it hands activeProfile to the ThermalMonitor
+        // it constructs, so a restore after that point would not reach the monitor.
+        activeProfile = Self.restoredProfile()
+
         adoptDaemonStateOnLaunch()
 
         // Clean expired logs
@@ -96,6 +106,23 @@ final class AppState: ObservableObject {
         // so the first heartbeat poll can never land before adopt has applied the
         // launch state. The original synchronous adopt gave this ordering for free;
         // the async version must restore it explicitly.
+    }
+
+    /// Resolve the persisted profile id against the profiles that exist now.
+    /// Smart lives outside `loadAll()`, and a custom profile may have been deleted
+    /// since it was chosen — both fall back to Apple's default rather than leaving
+    /// the menu showing a profile the monitor isn't actually running.
+    private static func restoredProfile() -> FanProfile {
+        guard let id = UserDefaults.standard.string(forKey: activeProfileKey) else { return .silent }
+        if id == FanProfile.smart.id { return .smart }
+        return FanProfile.loadAll().first { $0.id == id } ?? .silent
+    }
+
+    /// Record an explicit user choice. Called only from the three places the user
+    /// expresses intent — never from the monitor's onUpdate, whose in-flight value
+    /// can still carry the previous profile for one tick after a switch.
+    private func persistProfile(_ profile: FanProfile) {
+        UserDefaults.standard.set(profile.id, forKey: Self.activeProfileKey)
     }
 
     /// Sync to whatever the daemon is actually holding at launch instead of
@@ -371,6 +398,7 @@ final class AppState: ObservableObject {
     func setSmart() {
         let took = seizeControl()
         activeProfile = .smart
+        persistProfile(.smart)
         monitor?.switchProfile(.smart)
         // Taking over a CLI hold: clear it so the unsupervised hold isn't
         // orphaned; the Smart tick then establishes supervised control. Off-main
@@ -397,6 +425,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 self.activeProfile = .silent
+                self.persistProfile(.silent)
                 self.monitor?.switchProfile(.silent)
                 TFLogger.shared.profile("Reset to Default (Silent (Apple Default))")
             }
@@ -406,6 +435,7 @@ final class AppState: ObservableObject {
     func selectProfile(_ profile: FanProfile) {
         let took = seizeControl()
         activeProfile = profile
+        persistProfile(profile)
         monitor?.switchProfile(profile)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
