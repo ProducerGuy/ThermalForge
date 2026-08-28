@@ -134,11 +134,25 @@ struct MenuBarView: View {
 
             // Quick actions
             HStack(spacing: 8) {
-                Button(action: { appState.setSmart() }) {
+                // Toggle-as-button holds the system fill while Smart is the active
+                // profile — Apple draws it, it honors .tint, and it adapts to light/dark.
+                Toggle(isOn: Binding(
+                    get: { appState.activeProfile.id == "smart" },
+                    set: { isOn in
+                        if isOn {
+                            appState.setSmart()
+                        } else {
+                            // Turning Smart off returns fans to Apple's default (Silent),
+                            // same as the Default button. Required so the toggle can turn
+                            // off at all — otherwise `get` stays true and snaps it back on.
+                            appState.resetAuto()
+                        }
+                    }
+                )) {
                     Label("Smart", systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .toggleStyle(.button)
                 .tint(.orange)
 
                 Button(action: { appState.resetAuto() }) {
