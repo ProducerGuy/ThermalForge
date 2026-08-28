@@ -18,7 +18,12 @@ final class AppState: ObservableObject {
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
-    @Published var launchAtLogin: Bool = false {
+    /// Reflects the current SMAppService login-item status so the menu toggle shows the
+    /// right state. Initialized from that status as the property's DEFAULT (not reassigned
+    /// in init), so `didSet` does NOT fire on launch — reading the state must never
+    /// re-register. `updateLoginItem()` runs only when the user flips the toggle (the
+    /// SwiftUI binding writes this), never on every launch.
+    @Published var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled) {
         didSet { updateLoginItem() }
     }
     /// The running daemon's version when it differs from this app's build, else
@@ -80,7 +85,9 @@ final class AppState: ObservableObject {
     }()
 
     init() {
-        launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        // launchAtLogin is initialized from SMAppService status as its property default
+        // (above), NOT reassigned here — reassigning would fire didSet and re-register on
+        // every launch. Reflecting state is a read; only a user toggle should register.
 
         // Show a previously-found update immediately, before any network call.
         availableUpdate = Self.storedAvailableUpdate()
