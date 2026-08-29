@@ -299,6 +299,9 @@ public final class ThermalMonitor {
     private static let smartStopTemp: Float = 50.0
 
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
+        // Same race as tickCurve — see the comment there.
+        let inDangerZone = peakTemp >= FanProfile.dangerZoneTemp
+
         // Sample temperature history at monitor cadence (2s) for stable rate-of-change
         if tickCounter % Self.monitorCadence == 0 {
             tempHistory.append(peakTemp)
@@ -331,7 +334,7 @@ public final class ThermalMonitor {
 
         // Sustained trigger: per-profile duration
         let sustainedTicksNeeded = Int(activeProfile.curve.sustainedTriggerSec / tickInterval)
-        if !fansCurrentlyRunning && sustainedAboveCount < sustainedTicksNeeded {
+        if !fansCurrentlyRunning && sustainedAboveCount < sustainedTicksNeeded && !inDangerZone {
             if sustainedAboveCount == 1 {
                 TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(sustainedTicksNeeded)) [Smart]")
             }
@@ -375,7 +378,7 @@ public final class ThermalMonitor {
         let rampUp = activeProfile.curve.rampUpPerSec * tickInterval
         let rampDown = activeProfile.curve.rampDownPerSec * tickInterval
 
-        if targetPct > lastAppliedRPMPercent {
+        if targetPct > lastAppliedRPMPercent && !inDangerZone {
             targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
         } else if targetPct < lastAppliedRPMPercent {
             targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
@@ -416,6 +419,12 @@ public final class ThermalMonitor {
         let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
         let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
 
+        // Newer Apple Silicon covers startTemp -> safetyTempThreshold in under ten
+        // seconds, less than the sustained trigger plus the governed ramp takes to
+        // reach the curve's target. Waiting means the 95C override is what spins
+        // the fans, in one step from a standstill. Past dangerZoneTemp, drop both.
+        let inDangerZone = peakTemp >= FanProfile.dangerZoneTemp
+
         // Hands-off profiles (Silent): don't control fans, just monitor
         if curve.handsOff {
             if fansCurrentlyRunning {
@@ -443,7 +452,7 @@ public final class ThermalMonitor {
         // Sustained trigger: per-profile duration.
         // Converted to tick count at runtime based on tick interval.
         let sustainedTicksNeeded = Int(curve.sustainedTriggerSec / tickInterval)
-        if !fansCurrentlyRunning && sustainedAboveCount < sustainedTicksNeeded {
+        if !fansCurrentlyRunning && sustainedAboveCount < sustainedTicksNeeded && !inDangerZone {
             if sustainedAboveCount == 1 {
                 TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(sustainedTicksNeeded)) [\(activeProfile.name)]")
             }
@@ -461,11 +470,11 @@ public final class ThermalMonitor {
         let rampDown = curve.rampDownPerSec * tickInterval
 
         if targetPct > lastAppliedRPMPercent {
-            if !curve.instantEngage {
+            if !curve.instantEngage && !inDangerZone {
                 // Governed ramp-up
                 targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
             }
-            // instantEngage: skip governor, jump directly to target
+            // instantEngage / danger zone: skip governor, jump directly to target
         } else if targetPct < lastAppliedRPMPercent {
             // Ramp-down governor always applies (even for instantEngage profiles)
             targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
