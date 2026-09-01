@@ -76,6 +76,38 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 - **At ceiling and above:** Fan speed at the profile's maximum (60%/85%/100%).
 - **Ramp down:** Each profile has its own ramp-down rate. Max uses a gentle governor to let temps stabilize before backing off.
 
+### Custom profiles
+
+Drop a JSON file in `~/Library/Application Support/ThermalForge/profiles/`. A file whose `id` matches a built-in replaces it; any other `id` is added as a new profile. Both the menu bar picker and `thermalforge watch --profile <id>` read the same directory. Relaunch the app to pick up changes.
+
+This one keeps the `balanced` id, so it replaces the built-in Balanced rather than adding a sixth entry to the picker. It widens the band to 62–85°C and drops the cap to 45%, trading higher steady temperatures for less fan noise under sustained load:
+
+```json
+{
+  "id": "balanced",
+  "name": "Balanced",
+  "curve": {
+    "stopTemp": 50, "startTemp": 62, "ceilingTemp": 85,
+    "maxRPMPercent": 0.45, "curveShape": "easeIn",
+    "rampUpPerSec": 0.05, "rampDownPerSec": 0.025,
+    "sustainedTriggerSec": 8,
+    "handsOff": false, "alwaysOn": false, "instantEngage": false
+  }
+}
+```
+
+Give it any other `id` instead and it appears as an additional profile alongside the built-ins.
+
+Every `curve` field is required. A file is skipped, and the reason written to the app's log in `~/Library/Logs/ThermalForge/`, when it can't be read or decoded, claims the reserved `silent` or `smart` id (the code branches on both by id), or describes a curve that can't be used. The built-in stays in place when that happens. A usable curve needs:
+
+- `stopTemp` between 20°C and 90°C, and `startTemp` at least 5°C above it — the project's hysteresis rule, since start/stop cycling is the main cause of fan bearing wear
+- `startTemp` below and `ceilingTemp` no higher than the 95°C safety threshold, so the profile is reachable before the override fires
+- `ceilingTemp` above `startTemp`, or equal to it when `instantEngage` is set
+- `maxRPMPercent` in 0–1, positive ramp rates, `sustainedTriggerSec` of 0–300
+- `alwaysOn` off, since it would hold the fans at a fixed speed and never hand them back
+
+The 95°C safety override and the daemon's crash watchdog apply to custom profiles exactly as they do to the built-ins — they're enforced in the daemon, which knows nothing about profiles.
+
 ## Install
 
 ### Option A: Homebrew (recommended)
