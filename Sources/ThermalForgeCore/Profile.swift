@@ -224,6 +224,15 @@ extension FanProfile {
     )
 
     public static let builtIn: [FanProfile] = [silent, balanced, performance, max]
+
+    /// Resolve a persisted profile id to a known profile for launch restore. Searches the
+    /// built-ins plus Smart (which is surfaced via its own button, so it isn't in
+    /// `builtIn`). Returns Silent when the id is nil (nothing saved) or unrecognized (a
+    /// profile removed or renamed in a later version), so a stale saved id never crashes.
+    public static func selectable(id: String?) -> FanProfile {
+        guard let id else { return .silent }
+        return (builtIn + [smart]).first { $0.id == id } ?? .silent
+    }
 }
 
 // MARK: - Persistence

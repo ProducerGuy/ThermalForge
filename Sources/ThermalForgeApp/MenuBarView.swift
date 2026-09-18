@@ -142,26 +142,27 @@ struct MenuBarView: View {
 
             // Quick actions
             HStack(spacing: 8) {
-                Button(action: { appState.setSmart() }) {
-                    HStack(spacing: 4) {
-                        // Leading checkmark (space always reserved — no layout
-                        // jump), mirroring the picker's selected-row
-                        // indicator on the other four profiles.
-                        Image(systemName: "checkmark")
-                            .opacity(smartSelected ? 1 : 0)
-                        Label("Smart", systemImage: "fan.fill")
-                            // The menu's rendering can swallow `.tint` on the
-                            // bordered style, leaving the selected state
-                            // invisible except for the checkmark — pin the
-                            // label color explicitly so the orange selected
-                            // look (0.3.1) survives.
-                            .foregroundStyle(smartSelected ? Color.orange : Color.secondary)
+                // Toggle-as-button holds the system fill while Smart is the active
+                // profile — Apple draws it, it honors .tint, and it adapts to light/dark.
+                Toggle(isOn: Binding(
+                    get: { appState.activeProfile.id == "smart" },
+                    set: { isOn in
+                        if isOn {
+                            appState.setSmart()
+                        } else {
+                            // Turning Smart off returns fans to Apple's default (Silent),
+                            // same as the Default button. Required so the toggle can turn
+                            // off at all — otherwise `get` stays true and snaps it back on.
+                            appState.resetAuto()
+                        }
                     }
-                    .frame(maxWidth: .infinity)
+                )) {
+                    Label("Smart", systemImage: "fan.fill")
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .tint(smartSelected ? .orange : Color.secondary)
-                .help(smartSelected ? "Smart is the active profile" : "Switch to the Smart profile")
+                .toggleStyle(.button)
+                .tint(.orange)
+                .help(appState.activeProfile.id == "smart" ? "Smart is the active profile" : "Switch to the Smart profile")
 
                 Button(action: { appState.resetAuto() }) {
                     Label("Default", systemImage: "arrow.counterclockwise")
@@ -192,14 +193,6 @@ struct MenuBarView: View {
     }
 
     // MARK: - Helpers
-
-    /// The Smart profile lives outside the picker (it's a quick-action button)
-    /// and so has no system checkmark — mirror the picker's selected state so
-    /// all five modes show the same "I'm the active one" signal.
-    private var smartSelected: Bool {
-        if case .smart = appState.activeProfile { return true }
-        return false
-    }
 
     @ViewBuilder
     private var stateIndicator: some View {

@@ -18,7 +18,12 @@ final class AppState: ObservableObject {
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
-    @Published var launchAtLogin: Bool = false {
+    /// Reflects the current SMAppService login-item status so the menu toggle shows the
+    /// right state. Initialized from that status as the property's DEFAULT (not reassigned
+    /// in init), so `didSet` does NOT fire on launch — reading the state must never
+    /// re-register. `updateLoginItem()` runs only when the user flips the toggle (the
+    /// SwiftUI binding writes this), never on every launch.
+    @Published var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled) {
         didSet { updateLoginItem() }
     }
     /// The running daemon's version when it differs from this app's build, else
@@ -89,7 +94,9 @@ final class AppState: ObservableObject {
     }()
 
     init() {
-        launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        // launchAtLogin is initialized from SMAppService status as its property default
+        // (above), NOT reassigned here — reassigning would fire didSet and re-register on
+        // every launch. Reflecting state is a read; only a user toggle should register.
 
         // Show a previously-found update immediately, before any network call.
         availableUpdate = Self.storedAvailableUpdate()
@@ -161,6 +168,17 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.externalHold = adopted
+                // Restore the user's last chosen profile, but NEVER over a reflected CLI
+                // hold — that hold is the most recent explicit intent and wins. With no
+                // hold (including the crash-recovery branch above that just cleared a
+                // stale app hold), apply the saved choice, so a crash while Smart was
+                // running comes back to Smart. Deferred to here so the hold state is known
+                // before any fan command is issued (no pre-adopt commands in the window).
+                if adopted == nil {
+                    let restored = self.restoredProfile()
+                    self.activeProfile = restored
+                    self.monitor?.switchProfile(restored)
+                }
                 // Ordering gate: only now that adopt has applied the launch state
                 // do we start the heartbeat. This makes adopt's externalHold write
                 // strictly precede the first poll's write, so a late adopt (e.g. the
@@ -403,6 +421,7 @@ final class AppState: ObservableObject {
     func setSmart() {
         let took = seizeControl()
         activeProfile = .smart
+        persistSelectedProfile(FanProfile.smart.id)
         monitor?.switchProfile(.smart)
         // Taking over a CLI hold: clear it so the unsupervised hold isn't
         // orphaned; the Smart tick then establishes supervised control. Off-main
@@ -429,6 +448,9 @@ final class AppState: ObservableObject {
                     return
                 }
                 self.activeProfile = .silent
+                // Default is a deliberate user click, so it persists Silent — but only
+                // here, on the daemon-confirmed success path, never on a failed reset.
+                self.persistSelectedProfile(FanProfile.silent.id)
                 self.monitor?.switchProfile(.silent)
                 TFLogger.shared.profile("Reset to Default (Silent (Apple Default))")
             }
@@ -438,6 +460,7 @@ final class AppState: ObservableObject {
     func selectProfile(_ profile: FanProfile) {
         let took = seizeControl()
         activeProfile = profile
+        persistSelectedProfile(profile.id)
         monitor?.switchProfile(profile)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
@@ -503,6 +526,24 @@ final class AppState: ObservableObject {
         powerController?.update(config: powerConfig)
         powerProtection.highTemp = powerConfig.highTemp
         powerProtection.lowTemp = powerConfig.lowTemp
+    }
+
+    // MARK: - Profile persistence
+
+    /// The user's last explicitly-chosen profile id, so the app reopens to it instead of
+    /// always Silent. Written ONLY on a user click (picker, Smart, Default) via
+    /// `persistSelectedProfile`, never on the monitor's per-tick echo of `activeProfile`
+    /// or on watchdog / thermal-floor / crash-recovery fan resets.
+    private static let selectedProfileKey = "selectedProfile"
+
+    private func persistSelectedProfile(_ id: String) {
+        UserDefaults.standard.set(id, forKey: Self.selectedProfileKey)
+    }
+
+    /// The profile to restore at launch: the persisted choice resolved against the known
+    /// profiles, or Silent when nothing is saved or the id no longer exists.
+    private func restoredProfile() -> FanProfile {
+        FanProfile.selectable(id: UserDefaults.standard.string(forKey: Self.selectedProfileKey))
     }
 
     // MARK: - Daemon recovery

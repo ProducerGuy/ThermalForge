@@ -11,6 +11,22 @@ import Testing
 @Suite("Profiles")
 struct ProfileTests {
 
+    // MARK: - Launch restore resolution
+
+    @Test("selectable(id:) resolves known profiles, including Smart, and falls back to Silent")
+    func selectableResolution() {
+        // Every built-in resolves to itself.
+        #expect(FanProfile.selectable(id: "silent").id == "silent")
+        #expect(FanProfile.selectable(id: "balanced").id == "balanced")
+        #expect(FanProfile.selectable(id: "performance").id == "performance")
+        #expect(FanProfile.selectable(id: "max").id == "max")
+        // Smart resolves even though it isn't in `builtIn`.
+        #expect(FanProfile.selectable(id: "smart").id == "smart")
+        // Unknown id (a profile removed in a future version) and nil both fall to Silent.
+        #expect(FanProfile.selectable(id: "does-not-exist").id == "silent")
+        #expect(FanProfile.selectable(id: nil).id == "silent")
+    }
+
     // MARK: - Built-in Profile Parameters
 
     @Test("Built-in profiles have correct curve parameters")
