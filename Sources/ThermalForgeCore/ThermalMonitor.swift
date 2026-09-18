@@ -412,7 +412,8 @@ public final class ThermalMonitor {
     // MARK: - Curve-Based Profiles
 
     private func tickCurve(status: ThermalStatus, peakTemp: Float) {
-        let curve = activeProfile.curve
+        let profile = activeProfile
+        let curve = profile.curve
         let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
         let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
 
@@ -427,15 +428,41 @@ public final class ThermalMonitor {
             return
         }
 
-        // Get target from curve (now applies curve shape: easeIn, linear, easeOut, sCurve)
-        guard let rawTarget = curve.targetPercent(at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning) else {
+        // Dual sensor condition gate (Custom Profile only — empty for every built-in
+        // profile, so this is always satisfied and built-in behavior is unchanged).
+        // Not satisfied → same "fans off" handling as the curve saying off below.
+        guard SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: status) else {
+            if fansCurrentlyRunning {
+                applyCommand(.resetAuto)
+                fansCurrentlyRunning = false
+                lastAppliedRPMPercent = 0
+                state = .idle
+                TFLogger.shared.fan("Fans off: sensor condition not satisfied [\(profile.name)]")
+            }
+            return
+        }
+
+        // Curve temperature input: the peak of the configured sensors (rq.md §9 — AND
+        // and OR both use max(sensor readings)) when conditions are set, otherwise the
+        // same CPU+GPU peak every other profile uses (unchanged for built-ins). At
+        // least one configured sensor is available here — the gate above already
+        // failed otherwise — so `?? peakTemp` is just a defensive fallback.
+        let curveTemperature = profile.sensorConditions.isEmpty
+            ? peakTemp
+            : profile.sensorConditions.compactMap { $0.sensor.temperature(in: status) }.max() ?? peakTemp
+
+        // Get target from curve — a Custom Curve's points (linear interpolation) when
+        // set, else the shape function (easeIn, linear, easeOut, sCurve).
+        guard let rawTarget = curve.targetPercent(
+            at: curveTemperature, fansCurrentlyRunning: fansCurrentlyRunning, customCurve: profile.customCurve
+        ) else {
             // Curve says fans should be off
             if fansCurrentlyRunning {
                 applyCommand(.resetAuto)
                 fansCurrentlyRunning = false
                 lastAppliedRPMPercent = 0
                 state = .idle
-                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
+                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", curveTemperature))°C below \(Int(curve.stopTemp))°C [\(profile.name)]")
             }
             return
         }

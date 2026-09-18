@@ -94,7 +94,7 @@ struct MenuBarView: View {
             Picker("Profile", selection: Binding(
                 get: { appState.activeProfile.id },
                 set: { id in
-                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
+                    if let profile = (FanProfile.builtIn + customProfiles).first(where: { $0.id == id }) {
                         appState.selectProfile(profile)
                     }
                 }
@@ -124,6 +124,20 @@ struct MenuBarView: View {
                         }
                     }
                     .tag(profile.id)
+                }
+
+                if !customProfiles.isEmpty {
+                    Divider()
+                    ForEach(customProfiles) { profile in
+                        HStack {
+                            Text(profile.name)
+                            Spacer()
+                            Text("Custom")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(profile.id)
+                    }
                 }
             }
             .pickerStyle(.inline)
@@ -184,6 +198,14 @@ struct MenuBarView: View {
     }
 
     // MARK: - Helpers
+
+    /// Custom Profiles saved to disk (rq.md §15) — distinguished from a built-in
+    /// override by carrying a `customCurve`. Re-read each time the menu opens rather
+    /// than cached, so a profile added/edited outside the app (or a future in-app
+    /// editor) shows up without a relaunch.
+    private var customProfiles: [FanProfile] {
+        FanProfile.loadAll().filter { $0.customCurve != nil }
+    }
 
     @ViewBuilder
     private var stateIndicator: some View {
