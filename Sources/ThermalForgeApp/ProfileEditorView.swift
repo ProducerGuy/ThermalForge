@@ -207,12 +207,15 @@ struct ProfileEditorView: View {
     private func pointRow(index: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             sensorValueField(label: sensorA.displayName, value: clampedToPercentRange($points[index].sensorAValue))
-            sensorValueField(label: sensorB.displayName, value: clampedToPercentRange($points[index].sensorBValue))
+            // Fan % rides on the same line as the second reading, right after the
+            // arrow, instead of its own row — two lines per point, not three.
             HStack(spacing: 4) {
+                sensorValueField(label: sensorB.displayName, value: clampedToPercentRange($points[index].sensorBValue))
+                Text("→")
+                    .foregroundStyle(.secondary)
                 Text("Fan")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .leading)
                 temperatureField(clampedToPercentRange($points[index].fanPercent))
                 Text("%")
                     .foregroundStyle(.secondary)
