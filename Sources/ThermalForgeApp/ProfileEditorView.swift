@@ -4,8 +4,11 @@
 //
 //  In-app Custom Profile editor (rq.md §16): a dual-sensor curve. The two sensors are
 //  chosen ONCE at the top (any of `Sensor`'s cases — CPU/GPU/RAM/SSD/Ambient, not
-//  fixed to CPU/GPU) and apply to every point; each point row then shows just its two
-//  readings, stacked vertically under those sensors' labels, then the fan %.
+//  fixed to CPU/GPU) and apply to every point; each point row is one line: both
+//  readings, then the fan value. Fan is always stored as a % (0...100 — this is what
+//  keeps a saved profile portable across Macs with different fan hardware), but can be
+//  entered/viewed as RPM instead, converted live against this Mac's actual SMC-reported
+//  min/max (see `fanRPMRange`) rather than a guessed-at-generation table.
 //  Add/Edit/Move/Delete on points, plus the governor knobs (ramp up/down, sustained
 //  trigger, max fan %). Saves through the same `FanProfile.custom(customCurve2D:)` +
 //  `.save()` path the CLI's `profile save --curve2d` uses, so a profile created in
@@ -58,6 +61,11 @@ struct ProfileEditorView: View {
     @State private var sustainedTriggerSec: Double
     @State private var maxPercent: Double
     @State private var errorMessage: String?
+    /// Display/entry mode for curve points' fan values. Storage is always `fanPercent`
+    /// (0...100) — RPM is a view onto that, converted against this Mac's live SMC
+    /// min/max, so a saved Custom Profile stays portable across machines with
+    /// different fan hardware (rather than baking in one Mac's RPM numbers).
+    @State private var useRPM = false
 
     init(target: ProfileEditorTarget) {
         self.target = target
@@ -124,10 +132,29 @@ struct ProfileEditorView: View {
                     }
                 }
 
-                Section("Curve — \(sensorA.displayName) °C / \(sensorB.displayName) °C → Fan %") {
-                    Text("Each point sets the fan % for that \(sensorA.displayName)/\(sensorB.displayName) pair; the curve blends between points by how close the current readings are to each one.")
+                Section("Curve — \(sensorA.displayName) °C / \(sensorB.displayName) °C → Fan") {
+                    Text("Each point sets the fan speed for that \(sensorA.displayName)/\(sensorB.displayName) pair; the curve blends between points by how close the current readings are to each one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    Picker("Fan value", selection: $useRPM) {
+                        Text("%").tag(false)
+                        Text("RPM").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(fanRPMRange == nil)
+
+                    if let range = fanRPMRange {
+                        Text(useRPM
+                            ? "This Mac's fan range: \(range.min)–\(range.max) RPM"
+                            : "This Mac's fan range: \(range.min)–\(range.max) RPM (0% and 100% map to these)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("Waiting for fan data to show the RPM range…")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
 
                     ForEach(Array(points.enumerated()), id: \.element.id) { index, _ in
                         pointRow(index: index)
@@ -195,62 +222,58 @@ struct ProfileEditorView: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 520)
     }
 
     // MARK: - Point row
 
-    /// One curve point: sensor A's reading stacked above sensor B's, then fan % and
-    /// the move/delete controls — the "上下排" (stacked) layout, since a point is
-    /// two temperatures feeding one fan %, not naturally a single horizontal line.
+    /// One curve point, all on a single line: both readings, the fan % they produce,
+    /// and the move/delete controls.
     @ViewBuilder
     private func pointRow(index: Int) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 4) {
             sensorValueField(label: sensorA.displayName, value: clampedToPercentRange($points[index].sensorAValue))
-            // Fan % rides on the same line as the second reading, right after the
-            // arrow, instead of its own row — two lines per point, not three.
-            HStack(spacing: 4) {
-                sensorValueField(label: sensorB.displayName, value: clampedToPercentRange($points[index].sensorBValue))
-                Text("→")
-                    .foregroundStyle(.secondary)
-                Text("Fan")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                temperatureField(clampedToPercentRange($points[index].fanPercent))
-                Text("%")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    points.swapAt(index, index - 1)
-                } label: {
-                    Image(systemName: "chevron.up")
-                }
-                .disabled(index == 0)
-                Button {
-                    points.swapAt(index, index + 1)
-                } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .disabled(index == points.count - 1)
-                Button(role: .destructive) {
-                    points.remove(at: index)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .disabled(points.count <= 1)
+            sensorValueField(label: sensorB.displayName, value: clampedToPercentRange($points[index].sensorBValue))
+            Text("→")
+                .foregroundStyle(.secondary)
+            Text("Fan")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            fanField(fanValueBinding(index))
+            Text(useRPM ? "RPM" : "%")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                points.swapAt(index, index - 1)
+            } label: {
+                Image(systemName: "chevron.up")
             }
-            .buttonStyle(.plain)
+            .disabled(index == 0)
+            Button {
+                points.swapAt(index, index + 1)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .disabled(index == points.count - 1)
+            Button(role: .destructive) {
+                points.remove(at: index)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .disabled(points.count <= 1)
         }
+        .buttonStyle(.plain)
         .padding(.vertical, 2)
     }
 
     @ViewBuilder
     private func sensorValueField(label: String, value: Binding<Double>) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: 34, alignment: .leading)
+                .lineLimit(1)
             temperatureField(value)
             Text("°C")
                 .foregroundStyle(.secondary)
@@ -265,7 +288,16 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private func temperatureField(_ value: Binding<Double>) -> some View {
         TextField("", value: value, format: .number)
-            .frame(width: 40)
+            .frame(width: 32)
+            .multilineTextAlignment(.trailing)
+    }
+
+    /// Same as `temperatureField` but wider — RPM values run up to 4 digits
+    /// (e.g. 7826), unlike the 0-100 every other field holds.
+    @ViewBuilder
+    private func fanField(_ value: Binding<Double>) -> some View {
+        TextField("", value: value, format: .number)
+            .frame(width: useRPM ? 46 : 32)
             .multilineTextAlignment(.trailing)
     }
 
@@ -278,6 +310,34 @@ struct ProfileEditorView: View {
         Binding(
             get: { value.wrappedValue },
             set: { value.wrappedValue = min(max($0, 0), 100) }
+        )
+    }
+
+    /// This Mac's actual fan RPM range, read live from SMC via the menu bar's own
+    /// status poll — not guessed from an Apple Silicon generation (M1/M2/.../M5),
+    /// since even machines sharing a chip can have different fan hardware (MacBook
+    /// Air vs. Pro vs. Studio). nil only until the first status poll lands (~500ms
+    /// after launch), or if fan data couldn't be read at all.
+    private var fanRPMRange: (min: Int, max: Int)? {
+        guard let fan = appState.latestStatus?.fans.first else { return nil }
+        return (fan.minRPM, fan.maxRPM)
+    }
+
+    /// A curve point's fan value in whichever unit `useRPM` selects. Storage is
+    /// always `fanPercent`; this is a converting view onto it, clamped in RPM terms
+    /// first so it can never store outside 0...100% even via the RPM field.
+    private func fanValueBinding(_ index: Int) -> Binding<Double> {
+        guard useRPM, let range = fanRPMRange else {
+            return clampedToPercentRange($points[index].fanPercent)
+        }
+        let maxRPM = Double(range.max)
+        guard maxRPM > 0 else { return clampedToPercentRange($points[index].fanPercent) }
+        return Binding(
+            get: { (points[index].fanPercent / 100) * maxRPM },
+            set: { rpm in
+                let clampedRPM = min(max(rpm, 0), maxRPM)
+                points[index].fanPercent = (clampedRPM / maxRPM) * 100
+            }
         )
     }
 
