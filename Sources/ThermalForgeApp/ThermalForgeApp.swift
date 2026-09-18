@@ -98,6 +98,7 @@ struct MenuBarLabel: View {
                 let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
                 Text("\(Int(display))°")
                     .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(speedColor ?? .primary)
             }
         }
     }
@@ -110,10 +111,18 @@ struct MenuBarLabel: View {
         }
     }
 
+    /// Status-item glyphs are normally auto-templated by macOS — rendered in
+    /// whatever monochrome the menu bar expects, ignoring any color a `foregroundStyle`
+    /// asks for. `.renderingMode(.original)` opts the image out of that so a
+    /// `speedColor` actually shows; the temperature text above is the fallback signal
+    /// (plain text isn't subject to the same auto-templating) in case some macOS
+    /// version still overrides it.
     @ViewBuilder
     private var icon: some View {
         if let speedColor {
-            Image(systemName: iconName).foregroundStyle(speedColor)
+            Image(systemName: iconName)
+                .renderingMode(.original)
+                .foregroundStyle(speedColor)
         } else {
             Image(systemName: iconName)
         }
