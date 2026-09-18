@@ -159,6 +159,11 @@ struct MenuBarView: View {
                 )) {
                     Label("Smart", systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
+                        // The menu host can swallow the control-level `.tint`
+                        // on some system builds (the held fill then renders in
+                        // the accent color); pin the label color explicitly so
+                        // the intended orange comes through regardless.
+                        .foregroundStyle(.orange)
                 }
                 .toggleStyle(.button)
                 .tint(.orange)
