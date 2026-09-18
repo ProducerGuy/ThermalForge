@@ -382,6 +382,13 @@ extension FanProfile {
         try data.write(to: dir.appendingPathComponent("\(id).json"))
     }
 
+    /// Removes a saved Custom Profile. Throws (a standard "no such file" error) if
+    /// nothing was saved under `id` — including every built-in id, which never has a
+    /// file here unless something else deliberately overrode it via `save()`.
+    public static func delete(id: String) throws {
+        try FileManager.default.removeItem(at: profilesDirectory.appendingPathComponent("\(id).json"))
+    }
+
     public static func loadAll() -> [FanProfile] {
         let dir = profilesDirectory
         guard let files = try? FileManager.default.contentsOfDirectory(

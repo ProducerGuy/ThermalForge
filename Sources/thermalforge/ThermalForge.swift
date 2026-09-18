@@ -24,6 +24,7 @@ struct ThermalForge: ParsableCommand {
             Watch.self,
             Calibrate.self,
             Log.self,
+            ProfileCommand.self,
             Install.self,
             Uninstall.self,
             Daemon.self,

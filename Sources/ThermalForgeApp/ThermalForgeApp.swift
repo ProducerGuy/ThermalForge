@@ -55,6 +55,15 @@ struct ThermalForgeApp: App {
             )
         }
         .menuBarExtraStyle(.window)
+
+        // Custom Profile editor — a real window (not the menu bar popover) since
+        // it's a form, not a quick action. Opened via `openWindow(id: "profile-editor")`
+        // after setting `appState.profileEditorTarget`.
+        Window("Custom Profile", id: "profile-editor") {
+            ProfileEditorWindow()
+                .environmentObject(appState)
+        }
+        .windowResizability(.contentSize)
     }
 }
 

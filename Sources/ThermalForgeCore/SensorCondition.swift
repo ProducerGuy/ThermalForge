@@ -15,9 +15,18 @@ import Foundation
 /// Which peak temperature a `SensorCondition` reads. Mirrors the CPU (`TC`/`Tp`) and
 /// GPU (`TG`/`Tg`) key-prefix grouping already used by `ThermalStatus.safetyPeakTemp`
 /// and the menu bar's temperature rows.
-public enum Sensor: String, Codable, Equatable, CaseIterable {
+public enum Sensor: String, Codable, Equatable, Hashable, CaseIterable {
     case cpu
     case gpu
+
+    /// "CPU" / "GPU" — shared by the CLI's `profile show` and the menu bar editor so
+    /// the label can't drift between them.
+    public var displayName: String {
+        switch self {
+        case .cpu: return "CPU"
+        case .gpu: return "GPU"
+        }
+    }
 
     var prefixes: [String] {
         switch self {
@@ -36,7 +45,7 @@ public enum Sensor: String, Codable, Equatable, CaseIterable {
 
 // MARK: - Comparison
 
-public enum ComparisonOperator: String, Codable, Equatable {
+public enum ComparisonOperator: String, Codable, Equatable, Hashable {
     case greaterThan = ">"
     case greaterThanOrEqual = ">="
     case lessThan = "<"
@@ -76,7 +85,7 @@ public struct SensorCondition: Codable, Equatable {
 
 // MARK: - Condition Operator
 
-public enum ConditionOperator: String, Codable, Equatable {
+public enum ConditionOperator: String, Codable, Equatable, Hashable {
     case and
     case or
 }

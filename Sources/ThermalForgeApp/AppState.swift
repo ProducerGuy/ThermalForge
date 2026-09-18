@@ -9,6 +9,19 @@ import ServiceManagement
 import SwiftUI
 @preconcurrency import ThermalForgeCore
 
+/// Which Custom Profile the editor window should open to.
+enum ProfileEditorTarget: Equatable, Identifiable {
+    case new
+    case edit(String) // profile id
+
+    var id: String {
+        switch self {
+        case .new: return "new"
+        case .edit(let id): return "edit:\(id)"
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
@@ -46,6 +59,10 @@ final class AppState: ObservableObject {
     /// state on launch (so it shows without waiting for a network round-trip); a
     /// dismissed version is suppressed until a newer one ships.
     @Published var availableUpdate: AvailableUpdate?
+    /// What the Custom Profile editor window should open to — a blank new profile, or
+    /// an existing one to edit. Set right before `openWindow(id:)` is called; the
+    /// editor window reads this once (via `.id(...)`) to size its own @State.
+    @Published var profileEditorTarget: ProfileEditorTarget?
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()

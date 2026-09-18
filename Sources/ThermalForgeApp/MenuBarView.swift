@@ -10,6 +10,7 @@ import ThermalForgeCore
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -94,7 +95,7 @@ struct MenuBarView: View {
             Picker("Profile", selection: Binding(
                 get: { appState.activeProfile.id },
                 set: { id in
-                    if let profile = (FanProfile.builtIn + customProfiles).first(where: { $0.id == id }) {
+                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
                         appState.selectProfile(profile)
                     }
                 }
@@ -125,24 +126,51 @@ struct MenuBarView: View {
                     }
                     .tag(profile.id)
                 }
-
-                if !customProfiles.isEmpty {
-                    Divider()
-                    ForEach(customProfiles) { profile in
-                        HStack {
-                            Text(profile.name)
-                            Spacer()
-                            Text("Custom")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .tag(profile.id)
-                    }
-                }
             }
             .pickerStyle(.inline)
             .labelsHidden()
             .padding(.horizontal, 12)
+
+            // Custom Profiles — selecting one is a row tap; the pencil opens the
+            // editor (rq.md §16). Kept out of the Picker above: a Picker's row is
+            // one opaque tap target, with no room for a second "edit" action.
+            SectionHeader(title: "CUSTOM PROFILES")
+            ForEach(customProfiles) { profile in
+                HStack {
+                    Button {
+                        appState.selectProfile(profile)
+                    } label: {
+                        HStack {
+                            Image(systemName: "checkmark")
+                                .opacity(appState.activeProfile.id == profile.id ? 1 : 0)
+                            Text(profile.name)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        openProfileEditor(.edit(profile.id))
+                    } label: {
+                        Image(systemName: "pencil.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 1)
+            }
+            Button {
+                openProfileEditor(.new)
+            } label: {
+                Label("New Custom Profile…", systemImage: "plus.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 1)
 
             Divider().padding(.vertical, 4)
 
@@ -205,6 +233,16 @@ struct MenuBarView: View {
     /// editor) shows up without a relaunch.
     private var customProfiles: [FanProfile] {
         FanProfile.loadAll().filter { $0.customCurve != nil }
+    }
+
+    /// Opens the Custom Profile editor window to `target`. `NSApp.activate` is
+    /// needed because this is an accessory app (`LSUIElement` — no Dock icon): without
+    /// it, `openWindow` can create the window behind the frontmost app instead of
+    /// bringing it forward.
+    private func openProfileEditor(_ target: ProfileEditorTarget) {
+        appState.profileEditorTarget = target
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "profile-editor")
     }
 
     @ViewBuilder

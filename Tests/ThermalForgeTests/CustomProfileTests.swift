@@ -108,6 +108,24 @@ struct CustomProfileTests {
         try? FileManager.default.removeItem(at: path)
     }
 
+    @Test("delete removes a saved Custom Profile")
+    func delete() throws {
+        let curve = try Self.sampleCurve()
+        let custom = try FanProfile.custom(id: "test_delete_me", name: "Delete Me", customCurve: curve)
+        try custom.save()
+        #expect(FanProfile.loadAll().contains { $0.id == "test_delete_me" })
+
+        try FanProfile.delete(id: "test_delete_me")
+        #expect(!FanProfile.loadAll().contains { $0.id == "test_delete_me" })
+    }
+
+    @Test("delete throws for an id that was never saved")
+    func deleteMissing() {
+        #expect(throws: (any Error).self) {
+            try FanProfile.delete(id: "does-not-exist-\(UUID().uuidString)")
+        }
+    }
+
     // MARK: - Curve + Governor composition (rq.md §19 spirit). ThermalMonitor itself
     // needs real SMC hardware to instantiate, so — like the rest of this suite —
     // the governor math is exercised directly at the same entry point
