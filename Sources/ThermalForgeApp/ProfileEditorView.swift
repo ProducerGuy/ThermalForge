@@ -2,33 +2,26 @@
 //  ProfileEditorView.swift
 //  ThermalForge
 //
-//  In-app Custom Profile editor (rq.md §16): Temperature/Fan% curve points with
-//  Add/Edit/Move/Delete, 0-2 sensor conditions with AND/OR, and the governor knobs
-//  (ramp up/down, sustained trigger, max fan %). Saves through the same
-//  `FanProfile.custom(...)` + `.save()` path the CLI's `profile save` uses, so a
-//  profile created in either place is usable in the other.
+//  In-app Custom Profile editor (rq.md §16): dual-sensor curve points — each row is
+//  (CPU temp, GPU temp) → Fan %, jointly interpolated (see `CustomCurve2D`) — with
+//  Add/Edit/Move/Delete, plus the governor knobs (ramp up/down, sustained trigger,
+//  max fan %). Saves through the same `FanProfile.custom(customCurve2D:)` + `.save()`
+//  path the CLI's `profile save --curve2d` uses, so a profile created in either place
+//  is usable in the other.
 //
 
 import SwiftUI
 import ThermalForgeCore
 
-/// One curve point being edited. A local, `Identifiable` copy of `FanCurvePoint` —
+/// One curve point being edited. A local, `Identifiable` copy of `FanCurvePoint2D` —
 /// SwiftUI needs stable per-row identity while the user is mid-edit (e.g. has
-/// temporarily typed a duplicate temperature), which the validated `FanCurvePoint`
+/// temporarily typed a duplicate CPU/GPU pair), which the validated `FanCurvePoint2D`
 /// itself doesn't provide.
 private struct EditablePoint: Identifiable {
     let id = UUID()
-    var temperature: Double
+    var cpuTemp: Double
+    var gpuTemp: Double
     var fanPercent: Double
-}
-
-/// One sensor condition being edited — see `EditablePoint` for why this isn't just
-/// `SensorCondition` directly.
-private struct EditableCondition: Identifiable {
-    let id = UUID()
-    var sensor: Sensor
-    var comparison: ComparisonOperator
-    var threshold: Double
 }
 
 /// Window content: resolves `AppState.profileEditorTarget` to a profile (or a blank
@@ -56,8 +49,6 @@ struct ProfileEditorView: View {
     @State private var idText: String
     @State private var isNew: Bool
     @State private var points: [EditablePoint]
-    @State private var conditions: [EditableCondition]
-    @State private var conditionOperator: ConditionOperator
     @State private var rampUpPerSec: Double
     @State private var rampDownPerSec: Double
     @State private var sustainedTriggerSec: Double
@@ -74,20 +65,16 @@ struct ProfileEditorView: View {
         _isNew = State(initialValue: existing == nil)
         _name = State(initialValue: existing?.name ?? "")
         _idText = State(initialValue: existing?.id ?? "")
-        if let curvePoints = existing?.customCurve?.points, !curvePoints.isEmpty {
+        if let curvePoints = existing?.customCurve2D?.points, !curvePoints.isEmpty {
             _points = State(initialValue: curvePoints.map {
-                EditablePoint(temperature: Double($0.temperature), fanPercent: Double($0.fanPercent))
+                EditablePoint(cpuTemp: Double($0.cpuTemp), gpuTemp: Double($0.gpuTemp), fanPercent: Double($0.fanPercent))
             })
         } else {
             _points = State(initialValue: [
-                EditablePoint(temperature: 50, fanPercent: 0),
-                EditablePoint(temperature: 75, fanPercent: 100),
+                EditablePoint(cpuTemp: 50, gpuTemp: 45, fanPercent: 0),
+                EditablePoint(cpuTemp: 80, gpuTemp: 70, fanPercent: 100),
             ])
         }
-        _conditions = State(initialValue: (existing?.sensorConditions ?? []).map {
-            EditableCondition(sensor: $0.sensor, comparison: $0.comparison, threshold: Double($0.threshold))
-        })
-        _conditionOperator = State(initialValue: existing?.conditionOperator ?? .and)
         _rampUpPerSec = State(initialValue: Double(existing?.curve.rampUpPerSec ?? 0.05))
         _rampDownPerSec = State(initialValue: Double(existing?.curve.rampDownPerSec ?? 0.025))
         _sustainedTriggerSec = State(initialValue: Double(existing?.curve.sustainedTriggerSec ?? 8))
@@ -107,15 +94,24 @@ struct ProfileEditorView: View {
                         .help("Used as the filename and for --profile lookups. Can't be changed after creation — save as a new id instead.")
                 }
 
-                Section("Curve — Temperature → Fan %") {
+                Section("Curve — CPU °C, GPU °C → Fan %") {
+                    Text("Each point sets the fan % for that CPU/GPU pair; the curve blends between points by how close the current readings are to each one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     ForEach(Array(points.enumerated()), id: \.element.id) { index, _ in
-                        HStack {
-                            TextField("°C", value: $points[index].temperature, format: .number)
-                                .frame(width: 56)
+                        HStack(spacing: 4) {
+                            temperatureField(clampedToPercentRange($points[index].cpuTemp))
+                            Text("°C")
+                                .foregroundStyle(.secondary)
+                            Text("/")
+                                .foregroundStyle(.tertiary)
+                            temperatureField(clampedToPercentRange($points[index].gpuTemp))
+                            Text("°C")
+                                .foregroundStyle(.secondary)
                             Text("→")
                                 .foregroundStyle(.secondary)
-                            TextField("%", value: $points[index].fanPercent, format: .number)
-                                .frame(width: 56)
+                            temperatureField(clampedToPercentRange($points[index].fanPercent))
                             Text("%")
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -143,60 +139,12 @@ struct ProfileEditorView: View {
                     Button {
                         let last = points.last
                         points.append(EditablePoint(
-                            temperature: (last?.temperature ?? 50) + 5,
+                            cpuTemp: min((last?.cpuTemp ?? 50) + 5, 100),
+                            gpuTemp: min((last?.gpuTemp ?? 45) + 5, 100),
                             fanPercent: last?.fanPercent ?? 50
                         ))
                     } label: {
                         Label("Add Point", systemImage: "plus.circle")
-                    }
-                }
-
-                Section("Sensor Conditions — up to 2") {
-                    ForEach(Array(conditions.enumerated()), id: \.element.id) { index, _ in
-                        HStack {
-                            Picker("", selection: $conditions[index].sensor) {
-                                ForEach(Sensor.allCases, id: \.self) { sensor in
-                                    Text(sensor.displayName).tag(sensor)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 80)
-                            Picker("", selection: $conditions[index].comparison) {
-                                Text(">").tag(ComparisonOperator.greaterThan)
-                                Text(">=").tag(ComparisonOperator.greaterThanOrEqual)
-                                Text("<").tag(ComparisonOperator.lessThan)
-                                Text("<=").tag(ComparisonOperator.lessThanOrEqual)
-                            }
-                            .labelsHidden()
-                            .frame(width: 60)
-                            TextField("°C", value: $conditions[index].threshold, format: .number)
-                                .frame(width: 56)
-                            Spacer()
-                            Button(role: .destructive) {
-                                conditions.remove(at: index)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    if conditions.count == 2 {
-                        Picker("Combine with", selection: $conditionOperator) {
-                            Text("AND").tag(ConditionOperator.and)
-                            Text("OR").tag(ConditionOperator.or)
-                        }
-                        .pickerStyle(.segmented)
-                    }
-                    if conditions.count < 2 {
-                        Button {
-                            conditions.append(EditableCondition(sensor: .cpu, comparison: .greaterThanOrEqual, threshold: 70))
-                        } label: {
-                            Label("Add Condition", systemImage: "plus.circle")
-                        }
-                    } else {
-                        Text("Conditions gate the profile: fans follow the curve only while they're satisfied — otherwise fans stay off, same as the curve saying off.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -248,7 +196,31 @@ struct ProfileEditorView: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 460)
+    }
+
+    // MARK: - Helpers
+
+    /// A single curve-field text box: right-aligned, fixed-width, no placeholder unit
+    /// text (the unit is a separate `Text` beside it — see the row layout above) so
+    /// there's exactly one "°C"/"%" per field, never a duplicated one.
+    @ViewBuilder
+    private func temperatureField(_ value: Binding<Double>) -> some View {
+        TextField("", value: value, format: .number)
+            .frame(width: 40)
+            .multilineTextAlignment(.trailing)
+    }
+
+    /// Clamps a curve point field (CPU/GPU temp or fan %) to 0...100 as it's typed,
+    /// rather than only surfacing a validation error at Save. Curve points don't need
+    /// headroom above 100 — fan % is capped there by definition, and Custom Profiles
+    /// only govern normal operating temperatures (the 95°C emergency floor is a
+    /// separate, unconditional layer above any curve — rq.md §20).
+    private func clampedToPercentRange(_ value: Binding<Double>) -> Binding<Double> {
+        Binding(
+            get: { value.wrappedValue },
+            set: { value.wrappedValue = min(max($0, 0), 100) }
+        )
     }
 
     // MARK: - Actions
@@ -261,22 +233,13 @@ struct ProfileEditorView: View {
         }
 
         do {
-            // Sort by temperature before validating — reordering with the chevrons is
-            // a convenience, not a requirement the user must get exactly right by hand.
-            let sortedPoints = points.sorted { $0.temperature < $1.temperature }
-            let curvePoints = sortedPoints.map {
-                FanCurvePoint(temperature: Float($0.temperature), fanPercent: Float($0.fanPercent))
+            let curvePoints = points.map {
+                FanCurvePoint2D(cpuTemp: Float($0.cpuTemp), gpuTemp: Float($0.gpuTemp), fanPercent: Float($0.fanPercent))
             }
-            let customCurve = try CustomCurve(points: curvePoints)
+            let customCurve2D = try CustomCurve2D(points: curvePoints)
 
-            let sensorConditions = conditions.map {
-                SensorCondition(sensor: $0.sensor, comparison: $0.comparison, threshold: Float($0.threshold))
-            }
-            let op: ConditionOperator? = sensorConditions.count == 2 ? conditionOperator : nil
-
-            let profile = try FanProfile.custom(
-                id: id, name: name.isEmpty ? id : name, customCurve: customCurve,
-                sensorConditions: sensorConditions, conditionOperator: op,
+            let profile = FanProfile.custom(
+                id: id, name: name.isEmpty ? id : name, customCurve2D: customCurve2D,
                 rampUpPerSec: Float(rampUpPerSec), rampDownPerSec: Float(rampDownPerSec),
                 sustainedTriggerSec: Float(sustainedTriggerSec), maxRPMPercent: Float(maxPercent / 100)
             )

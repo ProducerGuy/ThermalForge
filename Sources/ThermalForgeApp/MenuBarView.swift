@@ -228,11 +228,12 @@ struct MenuBarView: View {
     // MARK: - Helpers
 
     /// Custom Profiles saved to disk (rq.md §15) — distinguished from a built-in
-    /// override by carrying a `customCurve`. Re-read each time the menu opens rather
-    /// than cached, so a profile added/edited outside the app (or a future in-app
-    /// editor) shows up without a relaunch.
+    /// override by carrying a `customCurve` (single-axis, e.g. from the CLI) or a
+    /// `customCurve2D` (dual-sensor, what the in-app editor creates). Re-read each
+    /// time the menu opens rather than cached, so a profile added/edited outside the
+    /// app shows up without a relaunch.
     private var customProfiles: [FanProfile] {
-        FanProfile.loadAll().filter { $0.customCurve != nil }
+        FanProfile.loadAll().filter { $0.customCurve != nil || $0.customCurve2D != nil }
     }
 
     /// Opens the Custom Profile editor window to `target`. `NSApp.activate` is

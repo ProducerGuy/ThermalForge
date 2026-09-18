@@ -2,9 +2,9 @@
 //  CustomProfileTests.swift
 //  ThermalForge
 //
-//  rq.md §13/§19/§24 — Custom Profile construction/validation, Custom Curve + Governor
-//  composition (ramp/hysteresis/safety-ceiling still apply), and a regression guard
-//  that built-in profiles are byte-for-byte unaffected by the new optional fields.
+//  rq.md §13/§19/§24 — Custom Profile construction, Custom Curve (1D and dual-sensor
+//  2D) + Governor composition (ramp/hysteresis/safety-ceiling still apply), and a
+//  regression guard that built-in profiles are byte-for-byte unaffected.
 //
 
 import Foundation
@@ -25,63 +25,51 @@ struct CustomProfileTests {
         ])
     }
 
-    @Test("rejects more than 2 sensor conditions")
-    func tooManyConditions() throws {
-        let curve = try Self.sampleCurve()
-        let conditions = [
-            SensorCondition(sensor: .cpu, comparison: .greaterThanOrEqual, threshold: 65),
-            SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60),
-            SensorCondition(sensor: .cpu, comparison: .greaterThan, threshold: 80),
-        ]
-        #expect(throws: FanProfile.CustomProfileError.tooManyConditions(3)) {
-            try FanProfile.custom(id: "dev", name: "Development", customCurve: curve, sensorConditions: conditions)
-        }
+    static func sampleCurve2D() throws -> CustomCurve2D {
+        try CustomCurve2D(points: [
+            FanCurvePoint2D(cpuTemp: 50, gpuTemp: 40, fanPercent: 0),
+            FanCurvePoint2D(cpuTemp: 65, gpuTemp: 55, fanPercent: 50),
+            FanCurvePoint2D(cpuTemp: 80, gpuTemp: 70, fanPercent: 100),
+        ])
     }
 
-    @Test("2 conditions require an operator")
-    func requiresOperator() throws {
-        let curve = try Self.sampleCurve()
-        let conditions = [
-            SensorCondition(sensor: .cpu, comparison: .greaterThanOrEqual, threshold: 65),
-            SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60),
-        ]
-        #expect(throws: FanProfile.CustomProfileError.missingConditionOperator) {
-            try FanProfile.custom(id: "dev", name: "Development", customCurve: curve, sensorConditions: conditions)
-        }
-    }
+    // MARK: - Construction (1D)
 
-    @Test("the rq.md §13 'Development' example builds and evaluates")
-    func developmentExample() throws {
+    @Test("a single-axis Custom Profile builds and its governor knobs derive from the curve")
+    func oneDimensionalExample() throws {
         let curve = try Self.sampleCurve()
-        let profile = try FanProfile.custom(
-            id: "dev", name: "Development", customCurve: curve,
-            sensorConditions: [
-                SensorCondition(sensor: .cpu, comparison: .greaterThanOrEqual, threshold: 65),
-                SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60),
-            ],
-            conditionOperator: .or
-        )
+        let profile = FanProfile.custom(id: "dev", name: "Development", customCurve: curve)
         #expect(profile.customCurve == curve)
-        #expect(profile.sensorConditions.count == 2)
-        #expect(profile.conditionOperator == .or)
-        // Governor knobs derived from the curve's own bounds.
+        #expect(profile.customCurve2D == nil)
         #expect(profile.curve.startTemp == 50)
         #expect(profile.curve.stopTemp == 45) // 5°C hysteresis, matching FanProfile.hysteresisDegrees
     }
 
-    @Test("Codable round-trips a Custom Profile, and decodes a pre-feature profile JSON")
-    func codableRoundTrip() throws {
+    // MARK: - Construction (2D)
+
+    @Test("a dual-sensor Custom Profile builds and its governor knobs derive from the curve")
+    func twoDimensionalExample() throws {
+        let curve = try Self.sampleCurve2D()
+        let profile = FanProfile.custom(id: "dual", name: "Dual", customCurve2D: curve)
+        #expect(profile.customCurve2D == curve)
+        #expect(profile.customCurve == nil)
+        // startTemp = min over points of max(cpuTemp, gpuTemp): 50, 65, 80 → 50.
+        #expect(profile.curve.startTemp == 50)
+        #expect(profile.curve.stopTemp == 45)
+    }
+
+    // MARK: - Codable / persistence
+
+    @Test("Codable round-trips a single-axis Custom Profile, and decodes a pre-feature profile JSON")
+    func codableRoundTripOneDimensional() throws {
         let curve = try Self.sampleCurve()
-        let profile = try FanProfile.custom(
-            id: "dev", name: "Development", customCurve: curve,
-            sensorConditions: [SensorCondition(sensor: .cpu, comparison: .greaterThanOrEqual, threshold: 65)]
-        )
+        let profile = FanProfile.custom(id: "dev", name: "Development", customCurve: curve)
         let data = try JSONEncoder().encode(profile)
         let decoded = try JSONDecoder().decode(FanProfile.self, from: data)
         #expect(decoded == profile)
 
         // Simulate a profile JSON saved before this feature existed (no customCurve/
-        // sensorConditions/conditionOperator keys) — must still decode, not fail.
+        // customCurve2D keys) — must still decode, not fail.
         let legacyJSON = """
             {"id":"legacy","name":"Legacy","curve":{"stopTemp":45,"startTemp":55,"ceilingTemp":65,\
             "maxRPMPercent":0.5,"handsOff":false,"alwaysOn":false,"curveShape":"linear",\
@@ -89,29 +77,54 @@ struct CustomProfileTests {
             """.data(using: .utf8)!
         let legacy = try JSONDecoder().decode(FanProfile.self, from: legacyJSON)
         #expect(legacy.customCurve == nil)
-        #expect(legacy.sensorConditions == [])
-        #expect(legacy.conditionOperator == nil)
+        #expect(legacy.customCurve2D == nil)
     }
 
-    @Test("Custom profiles save and load through the existing profile persistence")
+    @Test("Codable round-trips a dual-sensor Custom Profile, and ignores a pre-2D profile's leftover sensorConditions keys")
+    func codableRoundTripTwoDimensional() throws {
+        let curve = try Self.sampleCurve2D()
+        let profile = FanProfile.custom(id: "dual", name: "Dual", customCurve2D: curve)
+        let data = try JSONEncoder().encode(profile)
+        let decoded = try JSONDecoder().decode(FanProfile.self, from: data)
+        #expect(decoded == profile)
+
+        // Simulate a profile JSON saved by the earlier sensor-condition design (now
+        // removed) — the unknown extra keys must be ignored, not fail decoding.
+        let oldGateDesignJSON = """
+            {"id":"old","name":"Old","curve":{"stopTemp":45,"startTemp":50,"ceilingTemp":75,\
+            "maxRPMPercent":1,"handsOff":false,"alwaysOn":false,"curveShape":"linear",\
+            "rampUpPerSec":0.05,"rampDownPerSec":0.025,"sustainedTriggerSec":8,"instantEngage":false},\
+            "customCurve":{"points":[{"temperature":50,"fanPercent":0},{"temperature":75,"fanPercent":100}]},\
+            "sensorConditions":[{"sensor":"gpu","comparison":">=","threshold":60}],"conditionOperator":"or"}
+            """.data(using: .utf8)!
+        let old = try JSONDecoder().decode(FanProfile.self, from: oldGateDesignJSON)
+        #expect(old.customCurve?.points.count == 2)
+    }
+
+    @Test("Custom Profiles (1D and 2D) save and load through the existing profile persistence")
     func saveLoad() throws {
-        let curve = try Self.sampleCurve()
-        let custom = try FanProfile.custom(id: "test_custom_curve", name: "Test Custom Curve", customCurve: curve)
-        try custom.save()
+        let curve1D = try Self.sampleCurve()
+        let custom1D = FanProfile.custom(id: "test_custom_curve", name: "Test Custom Curve", customCurve: curve1D)
+        try custom1D.save()
+
+        let curve2D = try Self.sampleCurve2D()
+        let custom2D = FanProfile.custom(id: "test_custom_curve_2d", name: "Test Custom Curve 2D", customCurve2D: curve2D)
+        try custom2D.save()
 
         let loaded = FanProfile.loadAll()
-        let found = loaded.first { $0.id == "test_custom_curve" }
-        #expect(found?.customCurve == curve)
+        #expect(loaded.first { $0.id == "test_custom_curve" }?.customCurve == curve1D)
+        #expect(loaded.first { $0.id == "test_custom_curve_2d" }?.customCurve2D == curve2D)
 
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles/test_custom_curve.json")
-        try? FileManager.default.removeItem(at: path)
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ThermalForge/profiles")
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("test_custom_curve.json"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("test_custom_curve_2d.json"))
     }
 
     @Test("delete removes a saved Custom Profile")
     func delete() throws {
         let curve = try Self.sampleCurve()
-        let custom = try FanProfile.custom(id: "test_delete_me", name: "Delete Me", customCurve: curve)
+        let custom = FanProfile.custom(id: "test_delete_me", name: "Delete Me", customCurve: curve)
         try custom.save()
         #expect(FanProfile.loadAll().contains { $0.id == "test_delete_me" })
 
@@ -127,27 +140,39 @@ struct CustomProfileTests {
     }
 
     // MARK: - Curve + Governor composition (rq.md §19 spirit). ThermalMonitor itself
-    // needs real SMC hardware to instantiate, so — like the rest of this suite —
-    // the governor math is exercised directly at the same entry point
-    // ThermalMonitor.tickCurve() calls: `Curve.targetPercent(customCurve:)`.
+    // needs real SMC hardware to instantiate, so — like the rest of this suite — the
+    // governor math is exercised directly at the same entry point ThermalMonitor.
+    // tickCurve() calls: `Curve.targetPercent(customCurve:customCurve2D:)`.
 
-    @Test("a Custom Curve's target is capped by maxRPMPercent — the profile's safety ceiling")
+    @Test("a single-axis Custom Curve's target is capped by maxRPMPercent — the profile's safety ceiling")
     func maxRPMPercentCapsCustomCurve() throws {
         let curve = try CustomCurve(points: [
             FanCurvePoint(temperature: 50, fanPercent: 0),
             FanCurvePoint(temperature: 75, fanPercent: 100),
         ])
-        let profile = try FanProfile.custom(id: "capped", name: "Capped", customCurve: curve, maxRPMPercent: 0.5)
+        let profile = FanProfile.custom(id: "capped", name: "Capped", customCurve: curve, maxRPMPercent: 0.5)
         // At 75°C the curve wants 100%, but the profile's ceiling is 50% — the same
         // clamp every built-in profile's curve shape goes through.
         let target = profile.curve.targetPercent(at: 75, fansCurrentlyRunning: true, customCurve: profile.customCurve)
         #expect(target == 0.5)
     }
 
-    @Test("hysteresis still governs a Custom Curve's on/off transitions")
+    @Test("a dual-sensor Custom Curve's target is capped by maxRPMPercent too")
+    func maxRPMPercentCapsCustomCurve2D() throws {
+        let curve = try Self.sampleCurve2D()
+        let profile = FanProfile.custom(id: "capped2d", name: "Capped 2D", customCurve2D: curve, maxRPMPercent: 0.5)
+        // Exactly the hot point (80, 70) wants 100%, but the ceiling is 50%.
+        let target = profile.curve.targetPercent(
+            at: 80, fansCurrentlyRunning: true,
+            customCurve2D: (curve: curve, cpuTemp: 80, gpuTemp: 70)
+        )
+        #expect(target == 0.5)
+    }
+
+    @Test("hysteresis still governs a single-axis Custom Curve's on/off transitions")
     func hysteresisAppliesToCustomCurve() throws {
         let curve = try Self.sampleCurve()
-        let profile = try FanProfile.custom(id: "dev", name: "Development", customCurve: curve)
+        let profile = FanProfile.custom(id: "dev", name: "Development", customCurve: curve)
         // Below stopTemp (45), fans not running: stay off.
         #expect(profile.curve.targetPercent(at: 44, fansCurrentlyRunning: false, customCurve: curve) == nil)
         // Between stop (45) and start (50), fans already running: hold at minimum.
@@ -156,58 +181,55 @@ struct CustomProfileTests {
         #expect(profile.curve.targetPercent(at: 50, fansCurrentlyRunning: false, customCurve: curve) == 0)
     }
 
-    // A sensor condition is NOT a separate "is this profile active" switch — it only
-    // decides what temperature the curve sees (rq.md §9), then flows through the
-    // curve's own stopTemp/startTemp hysteresis exactly like every other profile.
-    // These mirror ThermalMonitor.tickCurve's exact composition — not-satisfied
-    // substitutes `curve.stopTemp` as the input, rather than a bespoke gate branch.
-    @Test("condition not satisfied → curveTemperature = stopTemp → curve's own hysteresis reports off")
-    func conditionNotSatisfiedActsLikeBelowStopTemp() throws {
-        let curve = try Self.sampleCurve()
-        let profile = try FanProfile.custom(
-            id: "gated", name: "Gated", customCurve: curve,
-            sensorConditions: [SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60)]
-        )
-        let notHot = ThermalStatus(fans: [], temperatures: ["TC0P": 90]) // CPU hot, but the only condition watches GPU
-        #expect(SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: notHot) == false)
-
-        // tickCurve's substitution, applied directly to the same targetPercent it calls.
-        #expect(profile.curve.targetPercent(at: profile.curve.stopTemp, fansCurrentlyRunning: true, customCurve: curve) == nil)
-        #expect(profile.curve.targetPercent(at: profile.curve.stopTemp, fansCurrentlyRunning: false, customCurve: curve) == nil)
+    @Test("hysteresis still governs a dual-sensor Custom Curve's on/off transitions — keyed on the peak temp, not the curve")
+    func hysteresisAppliesToCustomCurve2D() throws {
+        let curve = try Self.sampleCurve2D()
+        let profile = FanProfile.custom(id: "dual", name: "Dual", customCurve2D: curve)
+        let arg = (curve: curve, cpuTemp: Float(65), gpuTemp: Float(55))
+        // Below stopTemp (45): off, regardless of what the 2D curve would say at (65,55).
+        #expect(profile.curve.targetPercent(at: 44, fansCurrentlyRunning: false, customCurve2D: arg) == nil)
+        // Above start (50): the 2D curve evaluates normally.
+        #expect(profile.curve.targetPercent(at: 65, fansCurrentlyRunning: true, customCurve2D: arg) == 0.5)
     }
 
-    @Test("condition satisfied → curveTemperature = peak of configured sensors → curve evaluates normally")
-    func conditionSatisfiedFeedsSensorPeakToCurve() throws {
-        let curve = try Self.sampleCurve()
-        let profile = try FanProfile.custom(
-            id: "gated", name: "Gated", customCurve: curve,
-            sensorConditions: [SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60)]
+    @Test("a dual-sensor Custom Curve is genuinely shaped by both readings, not a single aggregate")
+    func dualSensorUsesBothReadings() throws {
+        let curve = try CustomCurve2D(points: [
+            FanCurvePoint2D(cpuTemp: 50, gpuTemp: 90, fanPercent: 10), // hot GPU, cool CPU
+            FanCurvePoint2D(cpuTemp: 90, gpuTemp: 50, fanPercent: 90), // hot CPU, cool GPU
+        ])
+        let profile = FanProfile.custom(id: "dual2", name: "Dual2", customCurve2D: curve)
+        // Same peak temp (90) either way, but the curve should favor whichever
+        // defined point the actual (CPU, GPU) reading is closer to — a single
+        // aggregated "peak" temperature could never tell these two cases apart.
+        let hotCPU = profile.curve.targetPercent(
+            at: 90, fansCurrentlyRunning: true,
+            customCurve2D: (curve: curve, cpuTemp: 90, gpuTemp: 50)
         )
-        let hot = ThermalStatus(fans: [], temperatures: ["TC0P": 90, "TG0P": 65]) // GPU clears its threshold
-        #expect(SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: hot) == true)
-
-        // GPU (65°C) is the only configured sensor, regardless of CPU's 90°C.
-        let target = profile.curve.targetPercent(at: 65, fansCurrentlyRunning: true, customCurve: curve)
-        #expect(target == 0.55) // curve's own 65°C → 55% point (rq.md §13 example)
+        let hotGPU = profile.curve.targetPercent(
+            at: 90, fansCurrentlyRunning: true,
+            customCurve2D: (curve: curve, cpuTemp: 50, gpuTemp: 90)
+        )
+        #expect(hotCPU == 0.9)
+        #expect(hotGPU == 0.1)
     }
 
     // MARK: - Built-in profiles unaffected (rq.md §12 regression guard)
 
-    @Test("a built-in profile's targetPercent is unchanged with the new optional param defaulted")
+    @Test("a built-in profile's targetPercent is unchanged with the new optional params defaulted")
     func builtInProfilesUnaffected() {
         let curve = FanProfile.balanced.curve
         let withoutCustom = curve.targetPercent(at: 62.5, fansCurrentlyRunning: true)
-        let explicitNil = curve.targetPercent(at: 62.5, fansCurrentlyRunning: true, customCurve: nil)
+        let explicitNil = curve.targetPercent(at: 62.5, fansCurrentlyRunning: true, customCurve: nil, customCurve2D: nil)
         #expect(withoutCustom == explicitNil)
         #expect(abs(withoutCustom! - 0.15) < 0.001) // easeIn midpoint, same as ProfileTests.balancedEaseIn
     }
 
-    @Test("no built-in profile has sensor conditions or a custom curve")
-    func builtInsHaveNoConditionsOrCustomCurve() {
+    @Test("no built-in profile has a custom curve of either kind")
+    func builtInsHaveNoCustomCurve() {
         for profile in FanProfile.builtIn + [FanProfile.smart] {
             #expect(profile.customCurve == nil)
-            #expect(profile.sensorConditions.isEmpty)
-            #expect(profile.conditionOperator == nil)
+            #expect(profile.customCurve2D == nil)
         }
     }
 }

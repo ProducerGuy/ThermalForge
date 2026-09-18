@@ -428,32 +428,21 @@ public final class ThermalMonitor {
             return
         }
 
-        // Curve temperature input. Sensor conditions are NOT a separate "is this
-        // profile active" switch — they only decide what temperature the curve below
-        // sees, and then flow through the exact same hysteresis/off logic every other
-        // profile already uses:
-        //   - no conditions: the same CPU+GPU peak every built-in profile uses
-        //     (unchanged for built-ins, which never set sensorConditions).
-        //   - conditions satisfied (both, for AND; either, for OR — rq.md §9): the
-        //     peak of the configured sensors.
-        //   - conditions not satisfied: `curve.stopTemp`, so `targetPercent` below
-        //     turns fans off (or lets them coast down) through its ordinary
-        //     stopTemp/startTemp hysteresis — no bespoke "gate" branch, and no
-        //     separate reset of ramp/hysteresis state beyond what "below stopTemp"
-        //     already does for every profile.
-        let curveTemperature: Float
-        if profile.sensorConditions.isEmpty {
-            curveTemperature = peakTemp
-        } else if SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: status) {
-            curveTemperature = profile.sensorConditions.compactMap { $0.sensor.temperature(in: status) }.max() ?? peakTemp
-        } else {
-            curveTemperature = curve.stopTemp
+        // On/off hysteresis always keys on the same CPU+GPU peak every profile uses —
+        // unchanged whether the profile has a plain curve, a single-axis Custom Curve,
+        // or a dual-sensor one. Only the IN-ZONE shape differs (below).
+        let customCurve2D = profile.customCurve2D.map {
+            (curve: $0,
+             cpuTemp: Sensor.cpu.temperature(in: status) ?? peakTemp,
+             gpuTemp: Sensor.gpu.temperature(in: status) ?? peakTemp)
         }
 
-        // Get target from curve — a Custom Curve's points (linear interpolation) when
-        // set, else the shape function (easeIn, linear, easeOut, sCurve).
+        // Get target from curve — a dual-sensor Custom Curve's (CPU, GPU) → fan%
+        // points when set, else a single-axis Custom Curve's points (both linear
+        // interpolation), else the shape function (easeIn, linear, easeOut, sCurve).
         guard let rawTarget = curve.targetPercent(
-            at: curveTemperature, fansCurrentlyRunning: fansCurrentlyRunning, customCurve: profile.customCurve
+            at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning,
+            customCurve: profile.customCurve, customCurve2D: customCurve2D
         ) else {
             // Curve says fans should be off
             if fansCurrentlyRunning {
@@ -461,7 +450,7 @@ public final class ThermalMonitor {
                 fansCurrentlyRunning = false
                 lastAppliedRPMPercent = 0
                 state = .idle
-                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", curveTemperature))°C below \(Int(curve.stopTemp))°C [\(profile.name)]")
+                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(profile.name)]")
             }
             return
         }

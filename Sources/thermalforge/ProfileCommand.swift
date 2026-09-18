@@ -2,7 +2,7 @@
 //  ProfileCommand.swift
 //  ThermalForge
 //
-//  CLI for Custom Profiles (Custom Fan Curve + Dual Sensor Condition, rq.md §16):
+//  CLI for Custom Profiles (Custom Fan Curve, single- or dual-sensor, rq.md §16):
 //  `thermalforge profile list|show|save|delete` — the "configuration API / file"
 //  first-stage path the spec allows ahead of a full in-app editor.
 //
@@ -14,7 +14,7 @@ import ThermalForgeCore
 struct ProfileCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "profile",
-        abstract: "Manage Custom Profiles (Custom Fan Curve + Dual Sensor Condition)",
+        abstract: "Manage Custom Profiles (single- or dual-sensor Custom Fan Curve)",
         subcommands: [
             ProfileListCommand.self,
             ProfileShowCommand.self,
@@ -26,7 +26,7 @@ struct ProfileCommand: ParsableCommand {
 
 // MARK: - Shared parsing
 
-/// Parses "temp:percent,temp:percent,..." into curve points, e.g.
+/// Parses "temp:percent,temp:percent,..." into single-axis curve points, e.g.
 /// "50:0,55:20,60:35,65:55,70:75,75:100". Validation (sorted, no duplicates, 0-100,
 /// finite) happens in `CustomCurve.init` — this only turns text into points.
 func parseCurvePoints(_ raw: String) throws -> [FanCurvePoint] {
@@ -42,43 +42,30 @@ func parseCurvePoints(_ raw: String) throws -> [FanCurvePoint] {
     }
 }
 
-/// Parses a single condition string like "cpu>=65" or "gpu < 60" into a
-/// `SensorCondition`. Checks the two-character operators (>=, <=) before the
-/// one-character ones so ">=" isn't misread as ">" followed by a stray "=".
-func parseCondition(_ raw: String) throws -> SensorCondition {
-    let trimmed = raw.trimmingCharacters(in: .whitespaces)
-    let operators: [(String, ComparisonOperator)] = [
-        (">=", .greaterThanOrEqual), ("<=", .lessThanOrEqual),
-        (">", .greaterThan), ("<", .lessThan),
-    ]
-    for (token, comparison) in operators {
-        guard let range = trimmed.range(of: token) else { continue }
-        let sensorText = trimmed[trimmed.startIndex..<range.lowerBound]
-            .trimmingCharacters(in: .whitespaces).lowercased()
-        let thresholdText = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
-        guard let sensor = Sensor(rawValue: sensorText) else {
-            throw ValidationError("Unknown sensor '\(sensorText)' in condition '\(raw)'. Options: cpu, gpu")
+/// Parses "cpu:gpu:percent,cpu:gpu:percent,..." into dual-sensor curve points, e.g.
+/// "50:40:0,60:50:30,70:60:60,80:70:100". Validation happens in `CustomCurve2D.init`.
+func parseCurvePoints2D(_ raw: String) throws -> [FanCurvePoint2D] {
+    try raw.split(separator: ",").map { triple in
+        let parts = triple.split(separator: ":")
+        guard parts.count == 3,
+              let cpuTemp = Float(parts[0].trimmingCharacters(in: .whitespaces)),
+              let gpuTemp = Float(parts[1].trimmingCharacters(in: .whitespaces)),
+              let fanPercent = Float(parts[2].trimmingCharacters(in: .whitespaces))
+        else {
+            throw ValidationError("Invalid curve point '\(triple)'. Expected cpu:gpu:percent, e.g. 50:40:0")
         }
-        guard let threshold = Float(thresholdText) else {
-            throw ValidationError("Invalid threshold in condition '\(raw)'")
-        }
-        return SensorCondition(sensor: sensor, comparison: comparison, threshold: threshold)
-    }
-    throw ValidationError("Invalid condition '\(raw)'. Expected e.g. cpu>=65")
-}
-
-func parseConditionOperator(_ raw: String?) throws -> ConditionOperator? {
-    switch raw?.lowercased() {
-    case nil: return nil
-    case "and": return .and
-    case "or": return .or
-    default: throw ValidationError("--condition-operator must be 'and' or 'or'")
+        return FanCurvePoint2D(cpuTemp: cpuTemp, gpuTemp: gpuTemp, fanPercent: fanPercent)
     }
 }
 
 func describe(_ profile: FanProfile) -> String {
     var lines = ["\(profile.name) (\(profile.id))"]
-    if let curve = profile.customCurve {
+    if let curve = profile.customCurve2D {
+        lines.append("Curve (dual-sensor — CPU, GPU → fan%):")
+        for point in curve.points {
+            lines.append("  CPU \(Int(point.cpuTemp))°C, GPU \(Int(point.gpuTemp))°C → \(Int(point.fanPercent))%")
+        }
+    } else if let curve = profile.customCurve {
         lines.append("Curve:")
         for point in curve.points {
             lines.append("  \(Int(point.temperature))°C → \(Int(point.fanPercent))%")
@@ -87,13 +74,6 @@ func describe(_ profile: FanProfile) -> String {
         let c = profile.curve
         lines.append("Built-in curve: \(Int(c.stopTemp))–\(Int(c.startTemp))–\(Int(c.ceilingTemp))°C, "
             + "\(Int(c.maxRPMPercent * 100))% max, \(c.curveShape)")
-    }
-    if !profile.sensorConditions.isEmpty {
-        let joiner = profile.conditionOperator.map { " \($0.rawValue.uppercased()) " } ?? ", "
-        let clauses = profile.sensorConditions.map {
-            "\($0.sensor.displayName) \($0.comparison.rawValue) \(Int($0.threshold))°C"
-        }
-        lines.append("Conditions: " + clauses.joined(separator: joiner))
     }
     lines.append("Ramp up/down: \(profile.curve.rampUpPerSec)/\(profile.curve.rampDownPerSec) per sec, "
         + "sustained trigger: \(Int(profile.curve.sustainedTriggerSec))s")
@@ -113,12 +93,15 @@ struct ProfileListCommand: ParsableCommand {
         for p in FanProfile.builtIn { print("  \(p.id) — \(p.name)") }
         print("  smart — Smart")
 
-        let custom = FanProfile.loadAll().filter { $0.customCurve != nil }
+        let custom = FanProfile.loadAll().filter { $0.customCurve != nil || $0.customCurve2D != nil }
         if custom.isEmpty {
             print("\nNo Custom Profiles saved. Create one with: thermalforge profile save <id> --curve ...")
         } else {
             print("\nCustom:")
-            for p in custom { print("  \(p.id) — \(p.name)") }
+            for p in custom {
+                let kind = p.customCurve2D != nil ? " (dual-sensor)" : ""
+                print("  \(p.id) — \(p.name)\(kind)")
+            }
         }
     }
 }
@@ -128,7 +111,7 @@ struct ProfileListCommand: ParsableCommand {
 struct ProfileShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "show",
-        abstract: "Print a profile's curve, conditions, and governor settings"
+        abstract: "Print a profile's curve and governor settings"
     )
 
     @Argument(help: "Profile id")
@@ -150,15 +133,17 @@ struct ProfileSaveCommand: ParsableCommand {
         commandName: "save",
         abstract: "Create or update a Custom Profile",
         discussion: """
-            Examples:
-              thermalforge profile save dev --name Development \\
-                --curve 50:0,55:20,60:35,65:55,70:75,75:100 \\
-                --condition "cpu>=65" --condition "gpu>=60" --condition-operator or
-
+            Single-sensor (one temperature axis):
               thermalforge profile save quiet --curve 45:0,80:40 --max-percent 0.4
 
-            Saving with an id that already exists overwrites it (this is how you edit
-            a Custom Profile from the CLI — there's no separate "edit" subcommand).
+            Dual-sensor (each point is CPU temp : GPU temp : fan%, jointly interpolated
+            by distance in that 2D space — not gated by a separate condition):
+              thermalforge profile save dev --name Development \\
+                --curve2d 50:40:0,60:50:30,70:60:60,80:70:100
+
+            Exactly one of --curve / --curve2d is required. Saving with an id that
+            already exists overwrites it (this is how you edit a Custom Profile from
+            the CLI — there's no separate "edit" subcommand).
             """
     )
 
@@ -168,14 +153,11 @@ struct ProfileSaveCommand: ParsableCommand {
     @Option(name: .long, help: "Display name (default: the id)")
     var name: String?
 
-    @Option(name: .long, help: "Curve points as temp:percent pairs, ascending, e.g. 50:0,55:20,75:100")
-    var curve: String
+    @Option(name: .long, help: "Single-axis curve points as temp:percent pairs, ascending, e.g. 50:0,55:20,75:100")
+    var curve: String?
 
-    @Option(name: .long, help: "Sensor condition, e.g. 'cpu>=65'. Repeat to add a second (max 2).")
-    var condition: [String] = []
-
-    @Option(name: .long, help: "How two conditions combine: and, or. Required iff there are 2 conditions.")
-    var conditionOperator: String?
+    @Option(name: .long, help: "Dual-sensor curve points as cpu:gpu:percent triples, e.g. 50:40:0,80:70:100")
+    var curve2d: String?
 
     @Option(name: .long, help: "Max fan speed as a fraction 0...1 — the profile's safety ceiling (default 1.0)")
     var maxPercent: Float = 1.0
@@ -190,17 +172,28 @@ struct ProfileSaveCommand: ParsableCommand {
     var sustained: Float = 8
 
     func run() throws {
-        let points = try parseCurvePoints(curve)
-        let customCurve = try CustomCurve(points: points)
-        let sensorConditions = try condition.map(parseCondition)
-        let op = try parseConditionOperator(conditionOperator)
+        let profile: FanProfile
+        switch (curve, curve2d) {
+        case (.some(let raw), nil):
+            let customCurve = try CustomCurve(points: try parseCurvePoints(raw))
+            profile = FanProfile.custom(
+                id: id, name: name ?? id, customCurve: customCurve,
+                rampUpPerSec: rampUp, rampDownPerSec: rampDown,
+                sustainedTriggerSec: sustained, maxRPMPercent: maxPercent
+            )
+        case (nil, .some(let raw)):
+            let customCurve2D = try CustomCurve2D(points: try parseCurvePoints2D(raw))
+            profile = FanProfile.custom(
+                id: id, name: name ?? id, customCurve2D: customCurve2D,
+                rampUpPerSec: rampUp, rampDownPerSec: rampDown,
+                sustainedTriggerSec: sustained, maxRPMPercent: maxPercent
+            )
+        case (nil, nil):
+            throw ValidationError("Provide either --curve (single-axis) or --curve2d (dual-sensor).")
+        case (.some, .some):
+            throw ValidationError("Provide only one of --curve / --curve2d, not both.")
+        }
 
-        let profile = try FanProfile.custom(
-            id: id, name: name ?? id, customCurve: customCurve,
-            sensorConditions: sensorConditions, conditionOperator: op,
-            rampUpPerSec: rampUp, rampDownPerSec: rampDown,
-            sustainedTriggerSec: sustained, maxRPMPercent: maxPercent
-        )
         try profile.save()
 
         print("Saved Custom Profile:\n")

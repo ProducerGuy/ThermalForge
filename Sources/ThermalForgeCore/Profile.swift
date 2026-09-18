@@ -42,16 +42,15 @@ public struct FanProfile: Identifiable, Equatable {
     /// `curve`'s shape function (linear/easeIn/easeOut/sCurve) above `curve.startTemp`;
     /// `curve`'s stopTemp/startTemp hysteresis, maxRPMPercent ceiling, ramp rates, and
     /// sustained trigger are reused unchanged — see `Curve.targetPercent(customCurve:)`.
-    /// nil for every built-in profile.
+    /// nil for every built-in profile. Mutually exclusive with `customCurve2D` — a
+    /// profile uses one or the other, never both (see `FanProfile.custom(...)`).
     public let customCurve: CustomCurve?
 
-    /// 0-2 sensor conditions gating a Custom Profile (rq.md §5/§11). Empty for every
-    /// built-in profile, which matches today's behavior: no extra gate beyond the curve.
-    public let sensorConditions: [SensorCondition]
-
-    /// How `sensorConditions` combine — required (and only meaningful) when there are
-    /// exactly 2; see `FanProfile.custom(...)` for the validation that enforces this.
-    public let conditionOperator: ConditionOperator?
+    /// When set, a Custom Profile's fan% is shaped by BOTH sensors' readings jointly —
+    /// each point is (CPU temp, GPU temp) → fan%, rather than one temperature axis.
+    /// Same hysteresis/ramp/ceiling reuse as `customCurve`; see
+    /// `Curve.targetPercent(customCurve2D:)`. nil for every built-in profile.
+    public let customCurve2D: CustomCurve2D?
 
     /// Defines how the profile maps temperature to fan speed.
     public struct Curve: Codable, Equatable {
@@ -115,13 +114,19 @@ public struct FanProfile: Identifiable, Equatable {
         /// Returns nil if fans should be off (Apple auto).
         /// Returns 0.001 as a signal to keep fans at minimum RPM (hysteresis band).
         ///
-        /// - customCurve: a Custom Profile's user-defined points. When set, they replace
-        ///   the shape function above `startTemp` — stopTemp/startTemp hysteresis and the
-        ///   maxRPMPercent ceiling still apply unchanged, so a Custom Curve can't bypass
-        ///   the existing governor (rq.md §20). nil for every built-in profile, which
-        ///   makes this identical to the original behavior.
+        /// `temp` still drives the stopTemp/startTemp on/off hysteresis below — that
+        /// stays a single scalar (the same CPU+GPU peak every profile uses) regardless
+        /// of curve type, so a Custom Curve (1D or 2D) can't bypass the existing
+        /// governor (rq.md §20). Only the in-zone shape changes:
+        /// - customCurve: a Custom Profile's user-defined temperature → fan% points,
+        ///   replacing the shape function above `startTemp`.
+        /// - customCurve2D: a dual-sensor Custom Profile's (CPU, GPU) → fan% points —
+        ///   takes priority over `customCurve` if somehow both are passed.
+        /// Both nil for every built-in profile, identical to the original behavior.
         public func targetPercent(
-            at temp: Float, fansCurrentlyRunning: Bool, customCurve: CustomCurve? = nil
+            at temp: Float, fansCurrentlyRunning: Bool,
+            customCurve: CustomCurve? = nil,
+            customCurve2D: (curve: CustomCurve2D, cpuTemp: Float, gpuTemp: Float)? = nil
         ) -> Float? {
             // Always-on profiles ignore temperature
             if alwaysOn { return maxRPMPercent }
@@ -142,9 +147,15 @@ public struct FanProfile: Identifiable, Equatable {
 
             // Above start: apply curve shape
             if temp >= startTemp {
-                // Custom Curve: linear interpolation over user points, still capped by
-                // maxRPMPercent (the profile's safety ceiling) — ceilingTemp/instantEngage/
-                // curveShape don't apply, since the custom points define the whole shape.
+                // Custom Curves are still capped by maxRPMPercent (the profile's safety
+                // ceiling) — ceilingTemp/instantEngage/curveShape don't apply, since the
+                // custom points define the whole shape.
+                if let customCurve2D {
+                    let percent = customCurve2D.curve.evaluate(
+                        cpuTemp: customCurve2D.cpuTemp, gpuTemp: customCurve2D.gpuTemp
+                    ) / 100.0
+                    return min(percent, maxRPMPercent)
+                }
                 if let customCurve {
                     let percent = customCurve.evaluate(at: temp) / 100.0
                     return min(percent, maxRPMPercent)
@@ -175,15 +186,14 @@ public struct FanProfile: Identifiable, Equatable {
     }
 
     public init(
-        id: String, name: String, curve: Curve, customCurve: CustomCurve? = nil,
-        sensorConditions: [SensorCondition] = [], conditionOperator: ConditionOperator? = nil
+        id: String, name: String, curve: Curve,
+        customCurve: CustomCurve? = nil, customCurve2D: CustomCurve2D? = nil
     ) {
         self.id = id
         self.name = name
         self.curve = curve
         self.customCurve = customCurve
-        self.sensorConditions = sensorConditions
-        self.conditionOperator = conditionOperator
+        self.customCurve2D = customCurve2D
     }
 
     // Legacy support — old profiles used triggers/fanBehavior
@@ -207,20 +217,21 @@ public struct FanProfile: Identifiable, Equatable {
 
 extension FanProfile: Codable {
     private enum CodingKeys: String, CodingKey {
-        case id, name, curve, customCurve, sensorConditions, conditionOperator
+        case id, name, curve, customCurve, customCurve2D
     }
 
     /// Manual (not synthesized) so a profile JSON saved before `customCurve`/
-    /// `sensorConditions`/`conditionOperator` existed still decodes — missing keys
-    /// fall back to "no Custom Curve, no conditions" instead of failing `loadAll()`.
+    /// `customCurve2D` existed still decodes — missing keys fall back to "no Custom
+    /// Curve" instead of failing `loadAll()`. Also tolerates a profile JSON saved by
+    /// the earlier sensor-condition design (extra `sensorConditions`/
+    /// `conditionOperator` keys are simply ignored, not an error).
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         curve = try container.decode(Curve.self, forKey: .curve)
         customCurve = try container.decodeIfPresent(CustomCurve.self, forKey: .customCurve)
-        sensorConditions = try container.decodeIfPresent([SensorCondition].self, forKey: .sensorConditions) ?? []
-        conditionOperator = try container.decodeIfPresent(ConditionOperator.self, forKey: .conditionOperator)
+        customCurve2D = try container.decodeIfPresent(CustomCurve2D.self, forKey: .customCurve2D)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -229,8 +240,7 @@ extension FanProfile: Codable {
         try container.encode(name, forKey: .name)
         try container.encode(curve, forKey: .curve)
         try container.encodeIfPresent(customCurve, forKey: .customCurve)
-        try container.encode(sensorConditions, forKey: .sensorConditions)
-        try container.encodeIfPresent(conditionOperator, forKey: .conditionOperator)
+        try container.encodeIfPresent(customCurve2D, forKey: .customCurve2D)
     }
 }
 
@@ -308,47 +318,22 @@ extension FanProfile {
 // MARK: - Custom Profile
 
 extension FanProfile {
-    public enum CustomProfileError: Error, CustomStringConvertible, Equatable {
-        /// Custom profiles support at most 2 sensor conditions (rq.md §11).
-        case tooManyConditions(Int)
-        /// 2 sensor conditions must be combined with an explicit AND/OR.
-        case missingConditionOperator
-
-        public var description: String {
-            switch self {
-            case .tooManyConditions(let count):
-                return "Custom profiles support at most 2 sensor conditions, got \(count)"
-            case .missingConditionOperator:
-                return "Two sensor conditions require a conditionOperator (AND/OR)"
-            }
-        }
-    }
-
-    /// Builds a validated Custom Profile: a `CustomCurve` shape plus 0-2 sensor
-    /// conditions. The underlying `Curve` — stop/start hysteresis, ramp rates,
-    /// sustained trigger, and the maxRPMPercent safety ceiling — is derived from the
-    /// custom curve's own temperature bounds, so the existing governor and hysteresis
-    /// keep working unchanged; tune them via the trailing parameters like any other
-    /// profile. `ceilingTemp`/`instantEngage`/`curveShape` are unused once a custom
-    /// curve is set (see `Curve.targetPercent(customCurve:)`).
+    /// Builds a Custom Profile from a single-axis `CustomCurve`. The underlying
+    /// `Curve` — stop/start hysteresis, ramp rates, sustained trigger, and the
+    /// maxRPMPercent safety ceiling — is derived from the custom curve's own
+    /// temperature bounds, so the existing governor and hysteresis keep working
+    /// unchanged; tune them via the trailing parameters like any other profile.
+    /// `ceilingTemp`/`instantEngage`/`curveShape` are unused once a custom curve is
+    /// set (see `Curve.targetPercent(customCurve:)`).
     public static func custom(
         id: String,
         name: String,
         customCurve: CustomCurve,
-        sensorConditions: [SensorCondition] = [],
-        conditionOperator: ConditionOperator? = nil,
         rampUpPerSec: Float = 0.05,
         rampDownPerSec: Float = 0.025,
         sustainedTriggerSec: Float = 8,
         maxRPMPercent: Float = 1.0
-    ) throws -> FanProfile {
-        guard sensorConditions.count <= 2 else {
-            throw CustomProfileError.tooManyConditions(sensorConditions.count)
-        }
-        guard sensorConditions.count != 2 || conditionOperator != nil else {
-            throw CustomProfileError.missingConditionOperator
-        }
-
+    ) -> FanProfile {
         let startTemp = customCurve.points[0].temperature
         let curve = Curve(
             stopTemp: startTemp - hysteresisDegrees,
@@ -359,11 +344,38 @@ extension FanProfile {
             rampDownPerSec: rampDownPerSec,
             sustainedTriggerSec: sustainedTriggerSec
         )
+        return FanProfile(id: id, name: name, curve: curve, customCurve: customCurve)
+    }
 
-        return FanProfile(
-            id: id, name: name, curve: curve, customCurve: customCurve,
-            sensorConditions: sensorConditions, conditionOperator: conditionOperator
+    /// Builds a dual-sensor Custom Profile from a `CustomCurve2D` — each point is
+    /// (CPU temp, GPU temp) → fan%, jointly shaped by both sensors rather than one
+    /// temperature axis. `startTemp` (and so `stopTemp`, 5°C below it) defaults to the
+    /// lowest "peak" among the curve's own points — `max(cpuTemp, gpuTemp)` per point,
+    /// then the minimum of those — so hysteresis engages roughly where the curve's
+    /// own data begins, without the caller having to repeat that number. Everything
+    /// else mirrors the single-axis `custom(customCurve:)` overload above.
+    public static func custom(
+        id: String,
+        name: String,
+        customCurve2D: CustomCurve2D,
+        rampUpPerSec: Float = 0.05,
+        rampDownPerSec: Float = 0.025,
+        sustainedTriggerSec: Float = 8,
+        maxRPMPercent: Float = 1.0
+    ) -> FanProfile {
+        // Swift.max: unqualified `max` here would resolve to the `FanProfile.max`
+        // static property (the built-in "Max" profile) instead of the global function.
+        let startTemp = customCurve2D.points.map { Swift.max($0.cpuTemp, $0.gpuTemp) }.min() ?? 50
+        let curve = Curve(
+            stopTemp: startTemp - hysteresisDegrees,
+            startTemp: startTemp,
+            ceilingTemp: startTemp + 1, // unused once customCurve2D is set
+            maxRPMPercent: maxRPMPercent,
+            rampUpPerSec: rampUpPerSec,
+            rampDownPerSec: rampDownPerSec,
+            sustainedTriggerSec: sustainedTriggerSec
         )
+        return FanProfile(id: id, name: name, curve: curve, customCurve2D: customCurve2D)
     }
 }
 
