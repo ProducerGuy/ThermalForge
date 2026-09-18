@@ -86,11 +86,12 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 
 ## Overheat Protection
 
-Fans are the first line of defense. But on a machine where fan speed alone can't hold the temperature (sustained renders, training jobs, a struggling cooling system), the chip simply cannot take the load. Overheat protection is the second line: when the hottest sensor stays above your threshold, ThermalForge switches the whole system into **reduced performance** — the same setting as System Settings → Battery → Power mode — and switches back when the machine cools.
+Fans are the first line of defense. But on a machine where fan speed alone can't hold the temperature (sustained renders, training jobs, a struggling cooling system), the chip simply cannot take the load. Overheat protection is the second line: when the hottest sensor stays above your threshold, ThermalForge switches the whole system into **reduced performance** — the same setting as System Settings → Battery → Power mode — and switches back to full performance when the machine cools, while you're on AC (on battery it stays capped until you plug back in; see the battery FAQ below).
 
 - **Reduce at ≥ 88 °C** (default) — performance drops. Tune between 50–100 °C in the dropdown.
 - **Restore at ≤ 70 °C** (default) — full performance returns. Tune between 30–95 °C; the app keeps at least a 2 °C gap so you can't configure away the hysteresis.
 - Decisions run on the 100 ms thermal tick; the setting is confirmed by re-reading it, and the current mode (🐢 reduced / 🐇 high) is shown in the dropdown at all times.
+- **On battery:** the guard can only ever *lower* the mode — it asserts reduced when hot, but never restores high while you're on battery; high comes back once you plug in and the machine is cool.
 
 The guard and the fan profile **coexist**: the fans do their normal job, and protection only kicks in if the temperature gets past them anyway. It's a deliberate trade — reduced performance is *safe*, full performance at an uncontrolled temperature is not.
 
@@ -182,7 +183,10 @@ Protection stops with them — and the system falls back to Apple's stock therma
 Turn the guard off in the dropdown — then set the mode in System Settings. Off = the app never touches the mode (it won't force it back in either direction). One known quirk, by design: while the guard is *on*, it can't tell "you pinned reduced" from "I set reduced" — so if the machine cools, it releases back to high. Want it to stick? Guard off.
 
 **Does it work on battery?**
-Yes — the power-mode setting applies regardless of power source. (There are no user-controllable fans on battery, so the guard is the main lever in that state.)
+Partially, and by design: on battery the guard can assert *reduced* — it applies the setting to the domain the machine is drawing from, so it takes effect either way — but it never restores *high* while you're on battery; high returns once you plug back in and the machine is cool. Since there are no user-controllable fans on battery, the reduced cap is the only protection there, so that stays the direction the guard keeps full control of.
+
+**My charger is weak — can I run reduced permanently?**
+High performance on a low-wattage adapter (say a 30 W charger on a machine that wants 90 W) can't be sustained from the wall — the difference is drawn from the battery, which stresses and drains it fast. The clean way to run capped anyway: turn the guard off in the dropdown and set *reduced* in System Settings (Battery → Power mode) — with the guard off it never touches the mode in either direction. (Detecting a weak adapter automatically isn't a thing yet; the backlog tracks it.)
 
 **Why did the mode flap between reduced and high a few times during a big build?**
 The hysteresis band is narrow relative to how fast your temperature moves, so the guard follows the curve. That's the mechanism doing its job — tune the thresholds to sit where *your* workloads actually plateau (the dropdown values are deliberately easy to change; they persist).
