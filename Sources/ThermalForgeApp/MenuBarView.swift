@@ -150,6 +150,12 @@ struct MenuBarView: View {
                         Image(systemName: "checkmark")
                             .opacity(smartSelected ? 1 : 0)
                         Label("Smart", systemImage: "fan.fill")
+                            // The menu's rendering can swallow `.tint` on the
+                            // bordered style, leaving the selected state
+                            // invisible except for the checkmark — pin the
+                            // label color explicitly so the orange selected
+                            // look (0.3.1) survives.
+                            .foregroundStyle(smartSelected ? Color.orange : Color.secondary)
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -239,6 +245,12 @@ private struct PowerProtectionView: View {
             HStack {
                 Text("System mode")
                     .foregroundStyle(.secondary)
+                if state.powerSource == .battery {
+                    Image(systemName: "battery.100")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Running on battery — protection will not restore high performance until AC returns")
+                }
                 Spacer()
                 modeLabel(state)
             }

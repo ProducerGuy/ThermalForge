@@ -26,8 +26,10 @@ final class StubPowerModeBackend: PowerModeBackend, @unchecked Sendable {
     private var _readResult: PowerModeReadResult
 
     private(set) var setCalls: [PowerMode] = []
+    private(set) var setDomains: [PowerDomain] = []
     var compliant: Bool
     var setFailure: String?
+    var lastPowerSource: PowerSourceState = .unknown
 
     init(reading: PowerModeReadResult = .mode(.high), compliant: Bool = true) {
         self._readResult = reading
@@ -47,9 +49,10 @@ final class StubPowerModeBackend: PowerModeBackend, @unchecked Sendable {
 
     func readResult() -> PowerModeReadResult { readResultToReturn }
 
-    func setMode(_ mode: PowerMode) throws {
+    func setMode(_ mode: PowerMode, in domain: PowerDomain) throws {
         lock.lock()
         setCalls.append(mode)   // record the attempt even when it fails
+        setDomains.append(domain)
         if let failure = setFailure {
             lock.unlock()
             throw PowerModeError.setFailed(failure)
@@ -150,6 +153,20 @@ struct PowerModeDecisionTests {
         #expect(PowerModeController.requiredMode(peakTemp: 80, current: .high, config: c) == .reduced)
         #expect(PowerModeController.requiredMode(peakTemp: 60, current: .reduced, config: c) == .high)
         #expect(PowerModeController.requiredMode(peakTemp: 70, current: .high, config: c) == nil)
+    }
+
+    @Test("on battery: never restores high, never forces reduced either")
+    func batteryRule() {
+        // User safety floor: on battery the guard only ever asserts reduced;
+        // cool + reduced stays reduced until the system is back on AC.
+        #expect(PowerModeController.requiredMode(peakTemp: 60, current: .reduced, config: config, powerSource: .battery) == nil)
+        #expect(PowerModeController.requiredMode(peakTemp: 60, current: .reduced, config: config, powerSource: .ac) == .high)
+        #expect(PowerModeController.requiredMode(peakTemp: 60, current: .reduced, config: config, powerSource: .unknown) == .high)
+        // A manually-set high on battery is left alone (no forced reduced).
+        #expect(PowerModeController.requiredMode(peakTemp: 60, current: .high, config: config, powerSource: .battery) == nil)
+        // Hot is hot: the safe direction is identical on battery and AC.
+        #expect(PowerModeController.requiredMode(peakTemp: 92, current: .high, config: config, powerSource: .battery) == .reduced)
+        #expect(PowerModeController.requiredMode(peakTemp: 92, current: .high, config: config, powerSource: .ac) == .reduced)
     }
 }
 
@@ -319,6 +336,121 @@ struct PowerModeControllerTests {
         try await Task.sleep(for: .milliseconds(50))
         #expect(stub.setCalls.isEmpty)
         #expect(controller.state.currentMode == .reduced)
+    }
+
+    @Test("sets target the domain the system is drawing from")
+    func domainTargeting() async throws {
+        let stub = StubPowerModeBackend(reading: .mode(.high))
+        let controller = PowerModeController(backend: stub, minSetInterval: 0)
+
+        // On battery: reduced goes to the battery domain (-b), not AC (-c).
+        stub.lastPowerSource = .battery
+        controller.evaluate(peakTemp: 92)
+        try await stub.waitForSetCount(1)
+        #expect(stub.setCalls == [.reduced])
+        #expect(stub.setDomains == [.battery])
+
+        // Back on AC and cool: high goes to the AC domain (-c).
+        stub.lastPowerSource = .ac
+        stub.readResultToReturn = .mode(.reduced)
+        controller.evaluate(peakTemp: 60)
+        try await stub.waitForSetCount(2)
+        #expect(stub.setDomains == [.battery, .ac])
+    }
+
+    @Test("cool machine on battery stays reduced — no set, no warning")
+    func batteryNoRestore() async throws {
+        let stub = StubPowerModeBackend(reading: .mode(.reduced))
+        stub.lastPowerSource = .battery
+        let controller = PowerModeController(backend: stub, minSetInterval: 0)
+
+        controller.refreshMode()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.currentMode == .reduced)
+        #expect(controller.state.powerSource == .battery)
+
+        // Cool while on battery: the pre-fix bug set "high" into the AC domain
+        // and warned for an hour. Now: nothing happens, no warning.
+        controller.evaluate(peakTemp: 40)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(stub.setCalls.isEmpty)
+        #expect(controller.state.warning == nil)
+    }
+
+    @Test("mismatch warning clears when the system settles on the requested mode")
+    func warningClearsOnSettle() async throws {
+        // Field 2026-09-17: a mismatch warning must clear as soon as the
+        // system settles on the requested mode — previously the banner stuck
+        // around until the next verified set (seen for over an hour during
+        // the battery false-state incident).
+        let stub = StubPowerModeBackend(reading: .mode(.high), compliant: false)
+        // Long retry delay: the clearing must come from the 2s refresh path,
+        // not the retry — this pins the refresh-side lifecycle.
+        let controller = PowerModeController(backend: stub, minSetInterval: 0, verifyRetryDelay: 10)
+
+        controller.evaluate(peakTemp: 90)
+        try await stub.waitForSetCount(1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.warning != nil)
+
+        // The system eventually complies (re-plugged / apply lag passed).
+        stub.readResultToReturn = .mode(.reduced)
+        controller.refreshMode()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.warning == nil)
+        #expect(controller.state.currentMode == .reduced)
+    }
+
+    @Test("a stale read-back that settles within the retry window self-clears")
+    func retrySelfResolves() async throws {
+        // The 16:58 race: the set applied, the read-back was a moment stale.
+        let stub = StubPowerModeBackend(reading: .mode(.high), compliant: false)
+        let controller = PowerModeController(backend: stub, minSetInterval: 0, verifyRetryDelay: 0.2)
+
+        controller.evaluate(peakTemp: 90)
+        try await stub.waitForSetCount(1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.warning != nil)   // stale read-back
+
+        // pmset applies a moment later — the retry must see it and clear.
+        stub.readResultToReturn = .mode(.reduced)
+        try await Task.sleep(for: .milliseconds(300))   // > verifyRetryDelay
+        #expect(controller.state.warning == nil)
+        #expect(controller.state.currentMode == .reduced)
+    }
+
+    @Test("unplug clears a stale warning; on battery no more high sets")
+    func sourceSwitchClearsStaleWarning() async throws {
+        // Field 2026-09-18: requested High on a non-compliant (or weak-AC)
+        // system → warning; user unplugs → the warning is stale (on battery
+        // the active value is the battery domain) and must clear on refresh,
+        // and cool ticks on battery must set NOTHING (the battery rule).
+        let stub = StubPowerModeBackend(reading: .mode(.reduced), compliant: false)
+        stub.lastPowerSource = .ac
+        let controller = PowerModeController(backend: stub, minSetInterval: 0, verifyRetryDelay: 10)
+
+        controller.refreshMode()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.powerSource == .ac)
+
+        // Cool on AC: requests high; the system keeps reporting reduced → warning.
+        controller.evaluate(peakTemp: 60)
+        try await stub.waitForSetCount(1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.warning != nil)
+
+        // The user unplugs.
+        stub.lastPowerSource = .battery
+        controller.refreshMode()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(controller.state.powerSource == .battery)
+        #expect(controller.state.warning == nil)
+
+        // Cool on battery: nothing is set — not the stale AC request, not high.
+        controller.evaluate(peakTemp: 55)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(stub.setCalls == [.high])
+        #expect(stub.setDomains == [.ac])
     }
 }
 

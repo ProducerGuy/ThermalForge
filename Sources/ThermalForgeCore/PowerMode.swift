@@ -8,12 +8,14 @@
 //      1 = reduced performance   (power/clock capped — cannot overheat)
 //      2 = high performance
 //
-//  Set with `sudo pmset -c powermode N` (AC domain, privileged). The
-//  *effective* value is readable without privilege from the `powermode` line
-//  of `pmset -g` (there is no `pmset -g powermode` query — the key only
-//  appears in the full dump). The key is visible in pmset output but not
-//  documented in pmset(1), so every set is verified by read-back and every
-//  failure degrades to a warning — never a crash, never a hang.
+//  Set with `sudo pmset -c|-b powermode N` — the domain flag must match where
+//  the system is drawing power from (AC vs battery), because the *effective*
+//  value, readable without privilege from the `powermode` line of `pmset -g`
+//  (there is no `pmset -g powermode` query — the key only appears in the full
+//  dump), is always taken from the *active* domain. The key is visible in
+//  pmset output but not documented in pmset(1), so every set is verified by
+//  read-back and every failure degrades to a warning — never a crash, never
+//  a hang.
 //
 
 import Foundation
@@ -31,6 +33,42 @@ public enum PowerMode: Int, Equatable, Sendable, CustomStringConvertible {
     }
 
     public var description: String { displayName }
+}
+
+/// The `pmset` power domain a mode is written to: `-c` = AC, `-b` = battery.
+///
+/// A `powermode` set only affects the saved value of the *target* domain,
+/// while the value reported by `pmset -g` ("Currently in use") always comes
+/// from the *active* domain. The two only agree while the system is on AC —
+/// on battery, an AC-only set applies nowhere visible and the verify
+/// read-back mismatches forever (field bug 2026-09-17: ~1 hour of false
+/// "requested High, system reports Reduced" warnings on a cool machine,
+/// ending only when the user re-plugged). Sets therefore always target the
+/// domain the system is currently drawing from.
+public enum PowerDomain: Sendable {
+    case ac
+    case battery
+}
+
+/// Where the system is drawing power from, as reported by IOKit
+/// (`IOPSGetProvidingPowerSourceType`; see `PowerSourceMonitor`) and tracked
+/// notification-driven — no polling, no pmset. Feeds the set-domain choice
+/// and the rule "on battery: protection only ever asserts reduced, never
+/// restores high".
+public enum PowerSourceState: Sendable {
+    case ac
+    case battery
+    case unknown
+
+    public var isBattery: Bool { self == .battery }
+
+    public var label: String {
+        switch self {
+        case .ac: return "on AC"
+        case .battery: return "on battery"
+        case .unknown: return "power source unknown"
+        }
+    }
 }
 
 /// What a `pmset -g` read told us about the effective power mode.
@@ -65,8 +103,13 @@ public protocol PowerModeBackend: Sendable {
     /// Read the effective mode. Never throws — failures are reported as
     /// `.failed` so a broken read can't take down the control loop.
     func readResult() -> PowerModeReadResult
-    /// Set the AC-power domain mode (`-c`). Throws on failure.
-    func setMode(_ mode: PowerMode) throws
+    /// Current power source, maintained by an IOKit notification monitor —
+    /// thread-safe to read from anywhere.
+    var lastPowerSource: PowerSourceState { get }
+    /// Set the mode in the given power domain (`-c` for AC, `-b` for battery).
+    /// The domain must match where the system is drawing power, otherwise the
+    /// set is invisible to the effective (active-domain) read. Throws on failure.
+    func setMode(_ mode: PowerMode, in domain: PowerDomain) throws
 }
 
 /// `pmset`-backed power mode access.
@@ -80,12 +123,39 @@ public final class PmsetPowerModeBackend: PowerModeBackend, @unchecked Sendable 
     private let pmsetPath: String
     private let sudoPath: String
 
+    /// Power source observed by the most recent `readResult()`. Mutated only
+    /// Power source, tracked notification-driven by the IOKit monitor (one
+    /// initial query, then change notifications — no polling, no pmset).
+    /// The monitor callback fires on the main thread while the controller
+    /// reads from its own queue, hence the lock; `@unchecked Sendable` rests
+    /// on it.
+    private let sourceLock = NSLock()
+    private var sourceState: PowerSourceState = .unknown
+    private let sourceMonitor: PowerSourceMonitor
+
+    public var lastPowerSource: PowerSourceState {
+        sourceLock.lock()
+        defer { sourceLock.unlock() }
+        return sourceState
+    }
+
     /// - pmsetPath: the pmset binary (reads run directly, no privilege).
     /// - sudoPath: the sudo binary (sets are `sudo pmset ...`, exactly the
     ///   invocation the v1 script proved works on the developer's machine).
     public init(pmsetPath: String = "/usr/bin/pmset", sudoPath: String = "/usr/bin/sudo") {
         self.pmsetPath = pmsetPath
         self.sudoPath = sudoPath
+        self.sourceMonitor = PowerSourceMonitor()
+        sourceMonitor.onChange = { [weak self] source in
+            self?.setSourceState(source)
+        }
+        sourceMonitor.start()
+    }
+
+    private func setSourceState(_ source: PowerSourceState) {
+        sourceLock.lock()
+        defer { sourceLock.unlock() }
+        sourceState = source
     }
 
     public func readResult() -> PowerModeReadResult {
@@ -95,12 +165,17 @@ public final class PmsetPowerModeBackend: PowerModeBackend, @unchecked Sendable 
         return Self.parseEffectiveMode(output)
     }
 
-    public func setMode(_ mode: PowerMode) throws {
+    public func setMode(_ mode: PowerMode, in domain: PowerDomain) throws {
+        // The domain flag must match where the system is drawing power from —
+        // the effective value pmset reports is always taken from the *active*
+        // domain, so a set into the inactive domain is invisible to the
+        // read-back (see PowerDomain).
+        let flag = domain == .battery ? "-b" : "-c"
         do {
             try Self.runOrThrow(
                 executable: sudoPath,
-                arguments: ["pmset", "-c", "powermode", "\(mode.rawValue)"],
-                intent: "power mode \(mode.displayName)"
+                arguments: ["pmset", flag, "powermode", "\(mode.rawValue)"],
+                intent: "power mode \(mode.displayName) (\(domain == .battery ? "battery" : "AC") domain)"
             )
         } catch let error as PowerModeError {
             throw error   // already carries the full diagnostic
