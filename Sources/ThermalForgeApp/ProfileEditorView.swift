@@ -27,6 +27,21 @@ private struct EditablePoint: Identifiable {
     var sensorAValue: Double
     var sensorBValue: Double
     var fanPercent: Double
+    /// Menu bar icon color once the fan's actual speed reaches `fanPercent`. nil
+    /// (the default) sets no color, which is the common case.
+    var color: Color?
+}
+
+private extension Color {
+    /// This color's sRGB components as a `PointColor`, for persistence. `NSColor`
+    /// resolves against the CURRENT appearance — a one-time conversion at Save, not
+    /// something that needs to track light/dark mode afterward. nil only for a color
+    /// that can't be resolved to RGB at all (e.g. a pattern/catalog color, which the
+    /// system `ColorPicker` never actually produces).
+    var pointColor: PointColor? {
+        guard let rgb = NSColor(self).usingColorSpace(.deviceRGB) else { return nil }
+        return PointColor(red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent))
+    }
 }
 
 /// Window content: resolves `AppState.profileEditorTarget` to a profile (or a blank
@@ -81,7 +96,10 @@ struct ProfileEditorView: View {
         _sensorB = State(initialValue: existing?.customCurve2D?.sensorB ?? .gpu)
         if let curvePoints = existing?.customCurve2D?.points, !curvePoints.isEmpty {
             _points = State(initialValue: curvePoints.map {
-                EditablePoint(sensorAValue: Double($0.sensorAValue), sensorBValue: Double($0.sensorBValue), fanPercent: Double($0.fanPercent))
+                EditablePoint(
+                    sensorAValue: Double($0.sensorAValue), sensorBValue: Double($0.sensorBValue), fanPercent: Double($0.fanPercent),
+                    color: $0.color.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
+                )
             })
         } else {
             _points = State(initialValue: [
@@ -133,7 +151,7 @@ struct ProfileEditorView: View {
                 }
 
                 Section("Curve — \(sensorA.displayName) °C / \(sensorB.displayName) °C → Fan") {
-                    Text("Each point sets the fan speed for that \(sensorA.displayName)/\(sensorB.displayName) pair; the curve blends between points by how close the current readings are to each one.")
+                    Text("Each point sets the fan speed for that \(sensorA.displayName)/\(sensorB.displayName) pair; the curve blends between points by how close the current readings are to each one. Optionally color a point — the menu bar icon switches to it once the fan's actual speed reaches that point.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -222,13 +240,14 @@ struct ProfileEditorView: View {
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 560)
     }
 
     // MARK: - Point row
 
     /// One curve point, all on a single line: both readings, the fan % they produce,
-    /// and the move/delete controls.
+    /// an optional menu bar icon color for when the fan's actual speed reaches this
+    /// point, and the move/delete controls.
     @ViewBuilder
     private func pointRow(index: Int) -> some View {
         HStack(spacing: 4) {
@@ -242,6 +261,21 @@ struct ProfileEditorView: View {
             fanField(fanValueBinding(index))
             Text(useRPM ? "RPM" : "%")
                 .foregroundStyle(.secondary)
+            ColorPicker("", selection: colorBinding(index), supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 20)
+                .help("Menu bar icon color once the fan's actual speed reaches this point")
+            if points[index].color != nil {
+                Button {
+                    points[index].color = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove this point's color")
+            }
             Spacer()
             Button {
                 points.swapAt(index, index - 1)
@@ -341,6 +375,20 @@ struct ProfileEditorView: View {
         )
     }
 
+    /// Placeholder swatch color while a point has no color set — a light neutral
+    /// tint, visually distinct from any real (more saturated) color choice.
+    private static let noColorSwatch = Color.gray.opacity(0.25)
+
+    /// A curve point's color as a non-optional `Color` for `ColorPicker`, which has
+    /// no "unset" state of its own. Reads back `noColorSwatch` when nil; picking any
+    /// color sets it (the "x" button next to the swatch is what clears it back out).
+    private func colorBinding(_ index: Int) -> Binding<Color> {
+        Binding(
+            get: { points[index].color ?? Self.noColorSwatch },
+            set: { points[index].color = $0 }
+        )
+    }
+
     // MARK: - Actions
 
     private func save() {
@@ -351,8 +399,11 @@ struct ProfileEditorView: View {
         }
 
         do {
-            let curvePoints = points.map {
-                FanCurvePoint2D(sensorAValue: Float($0.sensorAValue), sensorBValue: Float($0.sensorBValue), fanPercent: Float($0.fanPercent))
+            let curvePoints = points.map { point in
+                FanCurvePoint2D(
+                    sensorAValue: Float(point.sensorAValue), sensorBValue: Float(point.sensorBValue), fanPercent: Float(point.fanPercent),
+                    color: point.color.flatMap(\.pointColor)
+                )
             }
             let customCurve2D = try CustomCurve2D(sensorA: sensorA, sensorB: sensorB, points: curvePoints)
 

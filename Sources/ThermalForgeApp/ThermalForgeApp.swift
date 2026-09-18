@@ -51,7 +51,8 @@ struct ThermalForgeApp: App {
                 state: appState.monitorState,
                 maxTemp: appState.maxTemp,
                 fahrenheit: appState.useFahrenheit,
-                needsDaemonUpdate: appState.daemonVersionMismatch != nil
+                needsDaemonUpdate: appState.daemonVersionMismatch != nil,
+                speedColor: appState.fanSpeedColor
             )
         }
         .menuBarExtraStyle(.window)
@@ -74,10 +75,15 @@ struct MenuBarLabel: View {
     let maxTemp: Float?
     var fahrenheit: Bool = false
     var needsDaemonUpdate: Bool = false
+    /// A Custom Profile curve point's color, once the fan's actual speed reaches it
+    /// (rq.md-adjacent feature — see `AppState.fanSpeedColor`). nil keeps the icon's
+    /// default template appearance (no `.foregroundStyle` applied at all), so this
+    /// can never regress how every existing profile's icon already looks.
+    var speedColor: Color?
 
     var body: some View {
         HStack(spacing: 3) {
-            Image(systemName: iconName)
+            icon
                 .overlay(alignment: .topTrailing) {
                     // Small dot when the daemon is out of sync — visible without
                     // opening the menu, for users who never touch the CLI.
@@ -101,6 +107,15 @@ struct MenuBarLabel: View {
         case .safetyOverride: return "exclamationmark.triangle.fill"
         case .active: return "fan.fill"
         case .idle: return "fan"
+        }
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let speedColor {
+            Image(systemName: iconName).foregroundStyle(speedColor)
+        } else {
+            Image(systemName: iconName)
         }
     }
 }

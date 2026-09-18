@@ -15,18 +15,22 @@ import Foundation
 /// One (sensorA reading, sensorB reading) → Fan % point in a `CustomCurve2D`. Which
 /// physical sensors A and B are is the curve's own `sensorA`/`sensorB`, not stored
 /// per point — every point in a curve shares the same pair.
-public struct FanCurvePoint2D: Codable, Equatable {
+public struct FanCurvePoint2D: Codable, Equatable, ColorZonePoint {
     /// Degrees Celsius, read from the curve's `sensorA`.
     public let sensorAValue: Float
     /// Degrees Celsius, read from the curve's `sensorB`.
     public let sensorBValue: Float
     /// Fan speed as a percentage, 0...100.
     public let fanPercent: Float
+    /// Menu bar icon color once the fan's actual speed reaches `fanPercent` — see
+    /// `FanProfile.color(forActualFanPercent:)`. nil (the default) sets no color.
+    public let color: PointColor?
 
-    public init(sensorAValue: Float, sensorBValue: Float, fanPercent: Float) {
+    public init(sensorAValue: Float, sensorBValue: Float, fanPercent: Float, color: PointColor? = nil) {
         self.sensorAValue = sensorAValue
         self.sensorBValue = sensorBValue
         self.fanPercent = fanPercent
+        self.color = color
     }
 }
 

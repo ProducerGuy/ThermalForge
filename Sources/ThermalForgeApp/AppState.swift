@@ -64,6 +64,18 @@ final class AppState: ObservableObject {
     /// editor window reads this once (via `.id(...)`) to size its own @State.
     @Published var profileEditorTarget: ProfileEditorTarget?
 
+    /// The menu bar icon's color, from whichever colored curve point the fan's
+    /// ACTUAL speed (not its target) has reached — see
+    /// `FanProfile.color(forActualFanPercent:)`. nil for every built-in profile and
+    /// for any Custom Profile with no colored points, which is the common case; the
+    /// icon then keeps its default template appearance.
+    var fanSpeedColor: Color? {
+        guard let fan = latestStatus?.fans.first, fan.maxRPM > 0 else { return nil }
+        let actualPercent = Float(fan.actualRPM) / Float(fan.maxRPM) * 100
+        guard let point = activeProfile.color(forActualFanPercent: actualPercent) else { return nil }
+        return Color(red: point.red, green: point.green, blue: point.blue)
+    }
+
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: DispatchSourceTimer?

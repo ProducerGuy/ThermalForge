@@ -13,15 +13,19 @@ import Foundation
 // MARK: - Curve Point
 
 /// One Temperature → Fan Speed point in a `CustomCurve`.
-public struct FanCurvePoint: Codable, Equatable {
+public struct FanCurvePoint: Codable, Equatable, ColorZonePoint {
     /// Degrees Celsius.
     public let temperature: Float
     /// Fan speed as a percentage, 0...100.
     public let fanPercent: Float
+    /// Menu bar icon color once the fan's actual speed reaches `fanPercent` — see
+    /// `FanProfile.color(forActualFanPercent:)`. nil (the default) sets no color.
+    public let color: PointColor?
 
-    public init(temperature: Float, fanPercent: Float) {
+    public init(temperature: Float, fanPercent: Float, color: PointColor? = nil) {
         self.temperature = temperature
         self.fanPercent = fanPercent
+        self.color = color
     }
 }
 
