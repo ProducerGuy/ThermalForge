@@ -428,28 +428,27 @@ public final class ThermalMonitor {
             return
         }
 
-        // Dual sensor condition gate (Custom Profile only — empty for every built-in
-        // profile, so this is always satisfied and built-in behavior is unchanged).
-        // Not satisfied → same "fans off" handling as the curve saying off below.
-        guard SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: status) else {
-            if fansCurrentlyRunning {
-                applyCommand(.resetAuto)
-                fansCurrentlyRunning = false
-                lastAppliedRPMPercent = 0
-                state = .idle
-                TFLogger.shared.fan("Fans off: sensor condition not satisfied [\(profile.name)]")
-            }
-            return
+        // Curve temperature input. Sensor conditions are NOT a separate "is this
+        // profile active" switch — they only decide what temperature the curve below
+        // sees, and then flow through the exact same hysteresis/off logic every other
+        // profile already uses:
+        //   - no conditions: the same CPU+GPU peak every built-in profile uses
+        //     (unchanged for built-ins, which never set sensorConditions).
+        //   - conditions satisfied (both, for AND; either, for OR — rq.md §9): the
+        //     peak of the configured sensors.
+        //   - conditions not satisfied: `curve.stopTemp`, so `targetPercent` below
+        //     turns fans off (or lets them coast down) through its ordinary
+        //     stopTemp/startTemp hysteresis — no bespoke "gate" branch, and no
+        //     separate reset of ramp/hysteresis state beyond what "below stopTemp"
+        //     already does for every profile.
+        let curveTemperature: Float
+        if profile.sensorConditions.isEmpty {
+            curveTemperature = peakTemp
+        } else if SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: status) {
+            curveTemperature = profile.sensorConditions.compactMap { $0.sensor.temperature(in: status) }.max() ?? peakTemp
+        } else {
+            curveTemperature = curve.stopTemp
         }
-
-        // Curve temperature input: the peak of the configured sensors (rq.md §9 — AND
-        // and OR both use max(sensor readings)) when conditions are set, otherwise the
-        // same CPU+GPU peak every other profile uses (unchanged for built-ins). At
-        // least one configured sensor is available here — the gate above already
-        // failed otherwise — so `?? peakTemp` is just a defensive fallback.
-        let curveTemperature = profile.sensorConditions.isEmpty
-            ? peakTemp
-            : profile.sensorConditions.compactMap { $0.sensor.temperature(in: status) }.max() ?? peakTemp
 
         // Get target from curve — a Custom Curve's points (linear interpolation) when
         // set, else the shape function (easeIn, linear, easeOut, sCurve).

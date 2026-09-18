@@ -156,20 +156,39 @@ struct CustomProfileTests {
         #expect(profile.curve.targetPercent(at: 50, fansCurrentlyRunning: false, customCurve: curve) == 0)
     }
 
-    @Test("a not-satisfied sensor condition gate reports no target, same as the curve saying off")
-    func conditionGateActsLikeCurveOff() throws {
+    // A sensor condition is NOT a separate "is this profile active" switch — it only
+    // decides what temperature the curve sees (rq.md §9), then flows through the
+    // curve's own stopTemp/startTemp hysteresis exactly like every other profile.
+    // These mirror ThermalMonitor.tickCurve's exact composition — not-satisfied
+    // substitutes `curve.stopTemp` as the input, rather than a bespoke gate branch.
+    @Test("condition not satisfied → curveTemperature = stopTemp → curve's own hysteresis reports off")
+    func conditionNotSatisfiedActsLikeBelowStopTemp() throws {
         let curve = try Self.sampleCurve()
         let profile = try FanProfile.custom(
             id: "gated", name: "Gated", customCurve: curve,
             sensorConditions: [SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60)]
         )
-        var temps: [String: Float] = ["TC0P": 90] // CPU hot, but the only condition watches GPU
-        let notHot = ThermalStatus(fans: [], temperatures: temps)
+        let notHot = ThermalStatus(fans: [], temperatures: ["TC0P": 90]) // CPU hot, but the only condition watches GPU
         #expect(SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: notHot) == false)
 
-        temps["TG0P"] = 65 // now GPU clears its threshold too
-        let hot = ThermalStatus(fans: [], temperatures: temps)
+        // tickCurve's substitution, applied directly to the same targetPercent it calls.
+        #expect(profile.curve.targetPercent(at: profile.curve.stopTemp, fansCurrentlyRunning: true, customCurve: curve) == nil)
+        #expect(profile.curve.targetPercent(at: profile.curve.stopTemp, fansCurrentlyRunning: false, customCurve: curve) == nil)
+    }
+
+    @Test("condition satisfied → curveTemperature = peak of configured sensors → curve evaluates normally")
+    func conditionSatisfiedFeedsSensorPeakToCurve() throws {
+        let curve = try Self.sampleCurve()
+        let profile = try FanProfile.custom(
+            id: "gated", name: "Gated", customCurve: curve,
+            sensorConditions: [SensorCondition(sensor: .gpu, comparison: .greaterThanOrEqual, threshold: 60)]
+        )
+        let hot = ThermalStatus(fans: [], temperatures: ["TC0P": 90, "TG0P": 65]) // GPU clears its threshold
         #expect(SensorConditionEvaluator.isSatisfied(profile.sensorConditions, operator: profile.conditionOperator, in: hot) == true)
+
+        // GPU (65°C) is the only configured sensor, regardless of CPU's 90°C.
+        let target = profile.curve.targetPercent(at: 65, fansCurrentlyRunning: true, customCurve: curve)
+        #expect(target == 0.55) // curve's own 65°C → 55% point (rq.md §13 example)
     }
 
     // MARK: - Built-in profiles unaffected (rq.md §12 regression guard)
