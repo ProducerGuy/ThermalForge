@@ -46,10 +46,12 @@ public struct FanProfile: Identifiable, Equatable {
     /// profile uses one or the other, never both (see `FanProfile.custom(...)`).
     public let customCurve: CustomCurve?
 
-    /// When set, a Custom Profile's fan% is shaped by BOTH sensors' readings jointly —
-    /// each point is (CPU temp, GPU temp) → fan%, rather than one temperature axis.
-    /// Same hysteresis/ramp/ceiling reuse as `customCurve`; see
-    /// `Curve.targetPercent(customCurve2D:)`. nil for every built-in profile.
+    /// When set, a Custom Profile's fan% is shaped by two sensors' readings jointly —
+    /// each point is (sensorA reading, sensorB reading) → fan%, rather than one
+    /// temperature axis. The two sensors are the curve's own `sensorA`/`sensorB` (any
+    /// of `Sensor`'s cases, not just CPU/GPU). Same hysteresis/ramp/ceiling reuse as
+    /// `customCurve`; see `Curve.targetPercent(customCurve2D:)`. nil for every
+    /// built-in profile.
     public let customCurve2D: CustomCurve2D?
 
     /// Defines how the profile maps temperature to fan speed.
@@ -120,13 +122,13 @@ public struct FanProfile: Identifiable, Equatable {
         /// governor (rq.md §20). Only the in-zone shape changes:
         /// - customCurve: a Custom Profile's user-defined temperature → fan% points,
         ///   replacing the shape function above `startTemp`.
-        /// - customCurve2D: a dual-sensor Custom Profile's (CPU, GPU) → fan% points —
-        ///   takes priority over `customCurve` if somehow both are passed.
+        /// - customCurve2D: a dual-sensor Custom Profile's (sensorA, sensorB) → fan%
+        ///   points — takes priority over `customCurve` if somehow both are passed.
         /// Both nil for every built-in profile, identical to the original behavior.
         public func targetPercent(
             at temp: Float, fansCurrentlyRunning: Bool,
             customCurve: CustomCurve? = nil,
-            customCurve2D: (curve: CustomCurve2D, cpuTemp: Float, gpuTemp: Float)? = nil
+            customCurve2D: (curve: CustomCurve2D, sensorAValue: Float, sensorBValue: Float)? = nil
         ) -> Float? {
             // Always-on profiles ignore temperature
             if alwaysOn { return maxRPMPercent }
@@ -152,7 +154,7 @@ public struct FanProfile: Identifiable, Equatable {
                 // custom points define the whole shape.
                 if let customCurve2D {
                     let percent = customCurve2D.curve.evaluate(
-                        cpuTemp: customCurve2D.cpuTemp, gpuTemp: customCurve2D.gpuTemp
+                        sensorAValue: customCurve2D.sensorAValue, sensorBValue: customCurve2D.sensorBValue
                     ) / 100.0
                     return min(percent, maxRPMPercent)
                 }
@@ -348,12 +350,13 @@ extension FanProfile {
     }
 
     /// Builds a dual-sensor Custom Profile from a `CustomCurve2D` — each point is
-    /// (CPU temp, GPU temp) → fan%, jointly shaped by both sensors rather than one
-    /// temperature axis. `startTemp` (and so `stopTemp`, 5°C below it) defaults to the
-    /// lowest "peak" among the curve's own points — `max(cpuTemp, gpuTemp)` per point,
-    /// then the minimum of those — so hysteresis engages roughly where the curve's
-    /// own data begins, without the caller having to repeat that number. Everything
-    /// else mirrors the single-axis `custom(customCurve:)` overload above.
+    /// (sensorA reading, sensorB reading) → fan%, jointly shaped by both of the
+    /// curve's chosen sensors rather than one temperature axis. `startTemp` (and so
+    /// `stopTemp`, 5°C below it) defaults to the lowest "peak" among the curve's own
+    /// points — `max(sensorAValue, sensorBValue)` per point, then the minimum of
+    /// those — so hysteresis engages roughly where the curve's own data begins,
+    /// without the caller having to repeat that number. Everything else mirrors the
+    /// single-axis `custom(customCurve:)` overload above.
     public static func custom(
         id: String,
         name: String,
@@ -365,7 +368,7 @@ extension FanProfile {
     ) -> FanProfile {
         // Swift.max: unqualified `max` here would resolve to the `FanProfile.max`
         // static property (the built-in "Max" profile) instead of the global function.
-        let startTemp = customCurve2D.points.map { Swift.max($0.cpuTemp, $0.gpuTemp) }.min() ?? 50
+        let startTemp = customCurve2D.points.map { Swift.max($0.sensorAValue, $0.sensorBValue) }.min() ?? 50
         let curve = Curve(
             stopTemp: startTemp - hysteresisDegrees,
             startTemp: startTemp,

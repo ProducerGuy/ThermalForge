@@ -75,13 +75,12 @@ struct MenuBarView: View {
 
                 Divider().padding(.vertical, 4)
 
-                // Temperatures
+                // Temperatures — one row per `Sensor` case, so this can't drift from
+                // the same categories the Custom Curve editor lets you pick between.
                 SectionHeader(title: "TEMPERATURES")
-                TemperatureRow(label: "CPU", value: peakTemp(prefixes: ["TC", "Tp"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "GPU", value: peakTemp(prefixes: ["TG", "Tg"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "RAM", value: peakTemp(prefixes: ["TR", "Tm", "TM"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "SSD", value: peakTemp(prefixes: ["TH"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "Ambient", value: peakTemp(prefixes: ["TA"]), fahrenheit: appState.useFahrenheit)
+                ForEach(Sensor.allCases, id: \.self) { sensor in
+                    TemperatureRow(label: sensor.displayName, value: peakTemp(sensor), fahrenheit: appState.useFahrenheit)
+                }
             } else {
                 Text("Reading sensors...")
                     .foregroundStyle(.secondary)
@@ -264,10 +263,8 @@ struct MenuBarView: View {
         }
     }
 
-    private func peakTemp(prefixes: [String]) -> Float? {
-        guard let temps = appState.latestStatus?.temperatures else { return nil }
-        let values = temps.filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }.values
-        return values.max()
+    private func peakTemp(_ sensor: Sensor) -> Float? {
+        appState.latestStatus.flatMap { sensor.temperature(in: $0) }
     }
 }
 

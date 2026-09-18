@@ -430,15 +430,18 @@ public final class ThermalMonitor {
 
         // On/off hysteresis always keys on the same CPU+GPU peak every profile uses —
         // unchanged whether the profile has a plain curve, a single-axis Custom Curve,
-        // or a dual-sensor one. Only the IN-ZONE shape differs (below).
-        let customCurve2D = profile.customCurve2D.map {
-            (curve: $0,
-             cpuTemp: Sensor.cpu.temperature(in: status) ?? peakTemp,
-             gpuTemp: Sensor.gpu.temperature(in: status) ?? peakTemp)
+        // or a dual-sensor one. Only the IN-ZONE shape differs (below). A missing
+        // reading for the curve's chosen sensor falls back to peakTemp — never 0°C
+        // (rq.md §10) — since some category (RAM/SSD/Ambient) may be absent on a
+        // given machine even when CPU/GPU aren't.
+        let customCurve2D = profile.customCurve2D.map { curve in
+            (curve: curve,
+             sensorAValue: curve.sensorA.temperature(in: status) ?? peakTemp,
+             sensorBValue: curve.sensorB.temperature(in: status) ?? peakTemp)
         }
 
-        // Get target from curve — a dual-sensor Custom Curve's (CPU, GPU) → fan%
-        // points when set, else a single-axis Custom Curve's points (both linear
+        // Get target from curve — a dual-sensor Custom Curve's (sensorA, sensorB) →
+        // fan% points when set, else a single-axis Custom Curve's points (both linear
         // interpolation), else the shape function (easeIn, linear, easeOut, sCurve).
         guard let rawTarget = curve.targetPercent(
             at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning,

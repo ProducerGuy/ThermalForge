@@ -42,28 +42,40 @@ func parseCurvePoints(_ raw: String) throws -> [FanCurvePoint] {
     }
 }
 
-/// Parses "cpu:gpu:percent,cpu:gpu:percent,..." into dual-sensor curve points, e.g.
-/// "50:40:0,60:50:30,70:60:60,80:70:100". Validation happens in `CustomCurve2D.init`.
+/// Parses "sensorA:sensorB:percent,..." into dual-sensor curve points, e.g.
+/// "50:40:0,60:50:30,70:60:60,80:70:100" — the two readings are in `sensorA`/
+/// `sensorB` order, e.g. --sensor-a cpu --sensor-b ambient means "cpu:ambient:percent".
+/// Validation happens in `CustomCurve2D.init`.
 func parseCurvePoints2D(_ raw: String) throws -> [FanCurvePoint2D] {
     try raw.split(separator: ",").map { triple in
         let parts = triple.split(separator: ":")
         guard parts.count == 3,
-              let cpuTemp = Float(parts[0].trimmingCharacters(in: .whitespaces)),
-              let gpuTemp = Float(parts[1].trimmingCharacters(in: .whitespaces)),
+              let sensorAValue = Float(parts[0].trimmingCharacters(in: .whitespaces)),
+              let sensorBValue = Float(parts[1].trimmingCharacters(in: .whitespaces)),
               let fanPercent = Float(parts[2].trimmingCharacters(in: .whitespaces))
         else {
-            throw ValidationError("Invalid curve point '\(triple)'. Expected cpu:gpu:percent, e.g. 50:40:0")
+            throw ValidationError("Invalid curve point '\(triple)'. Expected sensorA:sensorB:percent, e.g. 50:40:0")
         }
-        return FanCurvePoint2D(cpuTemp: cpuTemp, gpuTemp: gpuTemp, fanPercent: fanPercent)
+        return FanCurvePoint2D(sensorAValue: sensorAValue, sensorBValue: sensorBValue, fanPercent: fanPercent)
     }
+}
+
+/// Parses a `--sensor-a`/`--sensor-b` value ("cpu", "gpu", "ram", "ssd", "ambient").
+func parseSensor(_ raw: String, option: String) throws -> Sensor {
+    guard let sensor = Sensor(rawValue: raw.lowercased()) else {
+        let options = Sensor.allCases.map(\.rawValue).joined(separator: ", ")
+        throw ValidationError("Unknown sensor '\(raw)' for \(option). Options: \(options)")
+    }
+    return sensor
 }
 
 func describe(_ profile: FanProfile) -> String {
     var lines = ["\(profile.name) (\(profile.id))"]
     if let curve = profile.customCurve2D {
-        lines.append("Curve (dual-sensor — CPU, GPU → fan%):")
+        lines.append("Curve (dual-sensor — \(curve.sensorA.displayName), \(curve.sensorB.displayName) → fan%):")
         for point in curve.points {
-            lines.append("  CPU \(Int(point.cpuTemp))°C, GPU \(Int(point.gpuTemp))°C → \(Int(point.fanPercent))%")
+            lines.append("  \(curve.sensorA.displayName) \(Int(point.sensorAValue))°C, "
+                + "\(curve.sensorB.displayName) \(Int(point.sensorBValue))°C → \(Int(point.fanPercent))%")
         }
     } else if let curve = profile.customCurve {
         lines.append("Curve:")
@@ -136,9 +148,11 @@ struct ProfileSaveCommand: ParsableCommand {
             Single-sensor (one temperature axis):
               thermalforge profile save quiet --curve 45:0,80:40 --max-percent 0.4
 
-            Dual-sensor (each point is CPU temp : GPU temp : fan%, jointly interpolated
-            by distance in that 2D space — not gated by a separate condition):
+            Dual-sensor (each point is sensorA:sensorB:fan%, jointly interpolated by
+            distance in that 2D space — not gated by a separate condition). Choose any
+            two of: cpu, gpu, ram, ssd, ambient (default cpu/gpu):
               thermalforge profile save dev --name Development \\
+                --sensor-a cpu --sensor-b gpu \\
                 --curve2d 50:40:0,60:50:30,70:60:60,80:70:100
 
             Exactly one of --curve / --curve2d is required. Saving with an id that
@@ -156,8 +170,14 @@ struct ProfileSaveCommand: ParsableCommand {
     @Option(name: .long, help: "Single-axis curve points as temp:percent pairs, ascending, e.g. 50:0,55:20,75:100")
     var curve: String?
 
-    @Option(name: .long, help: "Dual-sensor curve points as cpu:gpu:percent triples, e.g. 50:40:0,80:70:100")
+    @Option(name: .long, help: "Dual-sensor curve points as sensorA:sensorB:percent triples, e.g. 50:40:0,80:70:100")
     var curve2d: String?
+
+    @Option(name: .long, help: "First --curve2d sensor: cpu, gpu, ram, ssd, or ambient (default cpu)")
+    var sensorA: String = "cpu"
+
+    @Option(name: .long, help: "Second --curve2d sensor: cpu, gpu, ram, ssd, or ambient (default gpu)")
+    var sensorB: String = "gpu"
 
     @Option(name: .long, help: "Max fan speed as a fraction 0...1 — the profile's safety ceiling (default 1.0)")
     var maxPercent: Float = 1.0
@@ -182,7 +202,9 @@ struct ProfileSaveCommand: ParsableCommand {
                 sustainedTriggerSec: sustained, maxRPMPercent: maxPercent
             )
         case (nil, .some(let raw)):
-            let customCurve2D = try CustomCurve2D(points: try parseCurvePoints2D(raw))
+            let a = try parseSensor(sensorA, option: "--sensor-a")
+            let b = try parseSensor(sensorB, option: "--sensor-b")
+            let customCurve2D = try CustomCurve2D(sensorA: a, sensorB: b, points: try parseCurvePoints2D(raw))
             profile = FanProfile.custom(
                 id: id, name: name ?? id, customCurve2D: customCurve2D,
                 rampUpPerSec: rampUp, rampDownPerSec: rampDown,

@@ -26,10 +26,10 @@ struct CustomProfileTests {
     }
 
     static func sampleCurve2D() throws -> CustomCurve2D {
-        try CustomCurve2D(points: [
-            FanCurvePoint2D(cpuTemp: 50, gpuTemp: 40, fanPercent: 0),
-            FanCurvePoint2D(cpuTemp: 65, gpuTemp: 55, fanPercent: 50),
-            FanCurvePoint2D(cpuTemp: 80, gpuTemp: 70, fanPercent: 100),
+        try CustomCurve2D(sensorA: .cpu, sensorB: .gpu, points: [
+            FanCurvePoint2D(sensorAValue: 50, sensorBValue: 40, fanPercent: 0),
+            FanCurvePoint2D(sensorAValue: 65, sensorBValue: 55, fanPercent: 50),
+            FanCurvePoint2D(sensorAValue: 80, sensorBValue: 70, fanPercent: 100),
         ])
     }
 
@@ -53,9 +53,20 @@ struct CustomProfileTests {
         let profile = FanProfile.custom(id: "dual", name: "Dual", customCurve2D: curve)
         #expect(profile.customCurve2D == curve)
         #expect(profile.customCurve == nil)
-        // startTemp = min over points of max(cpuTemp, gpuTemp): 50, 65, 80 → 50.
+        // startTemp = min over points of max(sensorAValue, sensorBValue): 50, 65, 80 → 50.
         #expect(profile.curve.startTemp == 50)
         #expect(profile.curve.stopTemp == 45)
+    }
+
+    @Test("a dual-sensor Custom Profile can be built from any pair, not just CPU/GPU")
+    func arbitrarySensorPairProfile() throws {
+        let curve = try CustomCurve2D(sensorA: .ram, sensorB: .ssd, points: [
+            FanCurvePoint2D(sensorAValue: 40, sensorBValue: 35, fanPercent: 0),
+            FanCurvePoint2D(sensorAValue: 60, sensorBValue: 55, fanPercent: 100),
+        ])
+        let profile = FanProfile.custom(id: "ramssd", name: "RAM+SSD", customCurve2D: curve)
+        #expect(profile.customCurve2D?.sensorA == .ram)
+        #expect(profile.customCurve2D?.sensorB == .ssd)
     }
 
     // MARK: - Codable / persistence
@@ -164,7 +175,7 @@ struct CustomProfileTests {
         // Exactly the hot point (80, 70) wants 100%, but the ceiling is 50%.
         let target = profile.curve.targetPercent(
             at: 80, fansCurrentlyRunning: true,
-            customCurve2D: (curve: curve, cpuTemp: 80, gpuTemp: 70)
+            customCurve2D: (curve: curve, sensorAValue: 80, sensorBValue: 70)
         )
         #expect(target == 0.5)
     }
@@ -185,7 +196,7 @@ struct CustomProfileTests {
     func hysteresisAppliesToCustomCurve2D() throws {
         let curve = try Self.sampleCurve2D()
         let profile = FanProfile.custom(id: "dual", name: "Dual", customCurve2D: curve)
-        let arg = (curve: curve, cpuTemp: Float(65), gpuTemp: Float(55))
+        let arg = (curve: curve, sensorAValue: Float(65), sensorBValue: Float(55))
         // Below stopTemp (45): off, regardless of what the 2D curve would say at (65,55).
         #expect(profile.curve.targetPercent(at: 44, fansCurrentlyRunning: false, customCurve2D: arg) == nil)
         // Above start (50): the 2D curve evaluates normally.
@@ -194,9 +205,9 @@ struct CustomProfileTests {
 
     @Test("a dual-sensor Custom Curve is genuinely shaped by both readings, not a single aggregate")
     func dualSensorUsesBothReadings() throws {
-        let curve = try CustomCurve2D(points: [
-            FanCurvePoint2D(cpuTemp: 50, gpuTemp: 90, fanPercent: 10), // hot GPU, cool CPU
-            FanCurvePoint2D(cpuTemp: 90, gpuTemp: 50, fanPercent: 90), // hot CPU, cool GPU
+        let curve = try CustomCurve2D(sensorA: .cpu, sensorB: .gpu, points: [
+            FanCurvePoint2D(sensorAValue: 50, sensorBValue: 90, fanPercent: 10), // hot GPU, cool CPU
+            FanCurvePoint2D(sensorAValue: 90, sensorBValue: 50, fanPercent: 90), // hot CPU, cool GPU
         ])
         let profile = FanProfile.custom(id: "dual2", name: "Dual2", customCurve2D: curve)
         // Same peak temp (90) either way, but the curve should favor whichever
@@ -204,11 +215,11 @@ struct CustomProfileTests {
         // aggregated "peak" temperature could never tell these two cases apart.
         let hotCPU = profile.curve.targetPercent(
             at: 90, fansCurrentlyRunning: true,
-            customCurve2D: (curve: curve, cpuTemp: 90, gpuTemp: 50)
+            customCurve2D: (curve: curve, sensorAValue: 90, sensorBValue: 50)
         )
         let hotGPU = profile.curve.targetPercent(
             at: 90, fansCurrentlyRunning: true,
-            customCurve2D: (curve: curve, cpuTemp: 50, gpuTemp: 90)
+            customCurve2D: (curve: curve, sensorAValue: 50, sensorBValue: 90)
         )
         #expect(hotCPU == 0.9)
         #expect(hotGPU == 0.1)

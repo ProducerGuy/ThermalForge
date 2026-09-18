@@ -2,12 +2,14 @@
 //  ProfileEditorView.swift
 //  ThermalForge
 //
-//  In-app Custom Profile editor (rq.md §16): dual-sensor curve points — each row is
-//  (CPU temp, GPU temp) → Fan %, jointly interpolated (see `CustomCurve2D`) — with
-//  Add/Edit/Move/Delete, plus the governor knobs (ramp up/down, sustained trigger,
-//  max fan %). Saves through the same `FanProfile.custom(customCurve2D:)` + `.save()`
-//  path the CLI's `profile save --curve2d` uses, so a profile created in either place
-//  is usable in the other.
+//  In-app Custom Profile editor (rq.md §16): a dual-sensor curve. The two sensors are
+//  chosen ONCE at the top (any of `Sensor`'s cases — CPU/GPU/RAM/SSD/Ambient, not
+//  fixed to CPU/GPU) and apply to every point; each point row then shows just its two
+//  readings, stacked vertically under those sensors' labels, then the fan %.
+//  Add/Edit/Move/Delete on points, plus the governor knobs (ramp up/down, sustained
+//  trigger, max fan %). Saves through the same `FanProfile.custom(customCurve2D:)` +
+//  `.save()` path the CLI's `profile save --curve2d` uses, so a profile created in
+//  either place is usable in the other.
 //
 
 import SwiftUI
@@ -15,12 +17,12 @@ import ThermalForgeCore
 
 /// One curve point being edited. A local, `Identifiable` copy of `FanCurvePoint2D` —
 /// SwiftUI needs stable per-row identity while the user is mid-edit (e.g. has
-/// temporarily typed a duplicate CPU/GPU pair), which the validated `FanCurvePoint2D`
-/// itself doesn't provide.
+/// temporarily typed a duplicate pair), which the validated `FanCurvePoint2D` itself
+/// doesn't provide.
 private struct EditablePoint: Identifiable {
     let id = UUID()
-    var cpuTemp: Double
-    var gpuTemp: Double
+    var sensorAValue: Double
+    var sensorBValue: Double
     var fanPercent: Double
 }
 
@@ -48,6 +50,8 @@ struct ProfileEditorView: View {
     @State private var name: String
     @State private var idText: String
     @State private var isNew: Bool
+    @State private var sensorA: Sensor
+    @State private var sensorB: Sensor
     @State private var points: [EditablePoint]
     @State private var rampUpPerSec: Double
     @State private var rampDownPerSec: Double
@@ -65,14 +69,16 @@ struct ProfileEditorView: View {
         _isNew = State(initialValue: existing == nil)
         _name = State(initialValue: existing?.name ?? "")
         _idText = State(initialValue: existing?.id ?? "")
+        _sensorA = State(initialValue: existing?.customCurve2D?.sensorA ?? .cpu)
+        _sensorB = State(initialValue: existing?.customCurve2D?.sensorB ?? .gpu)
         if let curvePoints = existing?.customCurve2D?.points, !curvePoints.isEmpty {
             _points = State(initialValue: curvePoints.map {
-                EditablePoint(cpuTemp: Double($0.cpuTemp), gpuTemp: Double($0.gpuTemp), fanPercent: Double($0.fanPercent))
+                EditablePoint(sensorAValue: Double($0.sensorAValue), sensorBValue: Double($0.sensorBValue), fanPercent: Double($0.fanPercent))
             })
         } else {
             _points = State(initialValue: [
-                EditablePoint(cpuTemp: 50, gpuTemp: 45, fanPercent: 0),
-                EditablePoint(cpuTemp: 80, gpuTemp: 70, fanPercent: 100),
+                EditablePoint(sensorAValue: 50, sensorBValue: 45, fanPercent: 0),
+                EditablePoint(sensorAValue: 80, sensorBValue: 70, fanPercent: 100),
             ])
         }
         _rampUpPerSec = State(initialValue: Double(existing?.curve.rampUpPerSec ?? 0.05))
@@ -94,53 +100,46 @@ struct ProfileEditorView: View {
                         .help("Used as the filename and for --profile lookups. Can't be changed after creation — save as a new id instead.")
                 }
 
-                Section("Curve — CPU °C, GPU °C → Fan %") {
-                    Text("Each point sets the fan % for that CPU/GPU pair; the curve blends between points by how close the current readings are to each one.")
+                Section("Sensors") {
+                    Text("Choose the two readings each curve point is defined by. Every point uses the same pair.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("Sensor A", selection: $sensorA) {
+                        ForEach(Sensor.allCases, id: \.self) { sensor in
+                            Text(sensor.displayName).tag(sensor)
+                        }
+                    }
+                    Picker("Sensor B", selection: $sensorB) {
+                        ForEach(Sensor.allCases.filter { $0 != sensorA }, id: \.self) { sensor in
+                            Text(sensor.displayName).tag(sensor)
+                        }
+                    }
+                    .onChange(of: sensorA) { _, newValue in
+                        // Sensor B's list above already excludes A; if the change made
+                        // them collide, bump B to whatever's now first instead of
+                        // leaving it pointing at a choice that's no longer offered.
+                        if sensorB == newValue {
+                            sensorB = Sensor.allCases.first { $0 != newValue } ?? sensorB
+                        }
+                    }
+                }
+
+                Section("Curve — \(sensorA.displayName) °C / \(sensorB.displayName) °C → Fan %") {
+                    Text("Each point sets the fan % for that \(sensorA.displayName)/\(sensorB.displayName) pair; the curve blends between points by how close the current readings are to each one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     ForEach(Array(points.enumerated()), id: \.element.id) { index, _ in
-                        HStack(spacing: 4) {
-                            temperatureField(clampedToPercentRange($points[index].cpuTemp))
-                            Text("°C")
-                                .foregroundStyle(.secondary)
-                            Text("/")
-                                .foregroundStyle(.tertiary)
-                            temperatureField(clampedToPercentRange($points[index].gpuTemp))
-                            Text("°C")
-                                .foregroundStyle(.secondary)
-                            Text("→")
-                                .foregroundStyle(.secondary)
-                            temperatureField(clampedToPercentRange($points[index].fanPercent))
-                            Text("%")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button {
-                                points.swapAt(index, index - 1)
-                            } label: {
-                                Image(systemName: "chevron.up")
-                            }
-                            .disabled(index == 0)
-                            Button {
-                                points.swapAt(index, index + 1)
-                            } label: {
-                                Image(systemName: "chevron.down")
-                            }
-                            .disabled(index == points.count - 1)
-                            Button(role: .destructive) {
-                                points.remove(at: index)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .disabled(points.count <= 1)
+                        pointRow(index: index)
+                        if index < points.count - 1 {
+                            Divider()
                         }
-                        .buttonStyle(.plain)
                     }
                     Button {
                         let last = points.last
                         points.append(EditablePoint(
-                            cpuTemp: min((last?.cpuTemp ?? 50) + 5, 100),
-                            gpuTemp: min((last?.gpuTemp ?? 45) + 5, 100),
+                            sensorAValue: min((last?.sensorAValue ?? 50) + 5, 100),
+                            sensorBValue: min((last?.sensorBValue ?? 45) + 5, 100),
                             fanPercent: last?.fanPercent ?? 50
                         ))
                     } label: {
@@ -199,11 +198,67 @@ struct ProfileEditorView: View {
         .frame(width: 460)
     }
 
+    // MARK: - Point row
+
+    /// One curve point: sensor A's reading stacked above sensor B's, then fan % and
+    /// the move/delete controls — the "上下排" (stacked) layout, since a point is
+    /// two temperatures feeding one fan %, not naturally a single horizontal line.
+    @ViewBuilder
+    private func pointRow(index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            sensorValueField(label: sensorA.displayName, value: clampedToPercentRange($points[index].sensorAValue))
+            sensorValueField(label: sensorB.displayName, value: clampedToPercentRange($points[index].sensorBValue))
+            HStack(spacing: 4) {
+                Text("Fan")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                temperatureField(clampedToPercentRange($points[index].fanPercent))
+                Text("%")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    points.swapAt(index, index - 1)
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .disabled(index == 0)
+                Button {
+                    points.swapAt(index, index + 1)
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .disabled(index == points.count - 1)
+                Button(role: .destructive) {
+                    points.remove(at: index)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(points.count <= 1)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func sensorValueField(label: String, value: Binding<Double>) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            temperatureField(value)
+            Text("°C")
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Helpers
 
     /// A single curve-field text box: right-aligned, fixed-width, no placeholder unit
-    /// text (the unit is a separate `Text` beside it — see the row layout above) so
-    /// there's exactly one "°C"/"%" per field, never a duplicated one.
+    /// text (the unit is a separate `Text` beside it) so there's exactly one "°C"/"%"
+    /// per field, never a duplicated one.
     @ViewBuilder
     private func temperatureField(_ value: Binding<Double>) -> some View {
         TextField("", value: value, format: .number)
@@ -211,11 +266,11 @@ struct ProfileEditorView: View {
             .multilineTextAlignment(.trailing)
     }
 
-    /// Clamps a curve point field (CPU/GPU temp or fan %) to 0...100 as it's typed,
-    /// rather than only surfacing a validation error at Save. Curve points don't need
-    /// headroom above 100 — fan % is capped there by definition, and Custom Profiles
-    /// only govern normal operating temperatures (the 95°C emergency floor is a
-    /// separate, unconditional layer above any curve — rq.md §20).
+    /// Clamps a curve point field (a sensor reading or fan %) to 0...100 as it's
+    /// typed, rather than only surfacing a validation error at Save. Curve points
+    /// don't need headroom above 100 — fan % is capped there by definition, and
+    /// Custom Profiles only govern normal operating temperatures (the 95°C emergency
+    /// floor is a separate, unconditional layer above any curve — rq.md §20).
     private func clampedToPercentRange(_ value: Binding<Double>) -> Binding<Double> {
         Binding(
             get: { value.wrappedValue },
@@ -234,9 +289,9 @@ struct ProfileEditorView: View {
 
         do {
             let curvePoints = points.map {
-                FanCurvePoint2D(cpuTemp: Float($0.cpuTemp), gpuTemp: Float($0.gpuTemp), fanPercent: Float($0.fanPercent))
+                FanCurvePoint2D(sensorAValue: Float($0.sensorAValue), sensorBValue: Float($0.sensorBValue), fanPercent: Float($0.fanPercent))
             }
-            let customCurve2D = try CustomCurve2D(points: curvePoints)
+            let customCurve2D = try CustomCurve2D(sensorA: sensorA, sensorB: sensorB, points: curvePoints)
 
             let profile = FanProfile.custom(
                 id: id, name: name.isEmpty ? id : name, customCurve2D: customCurve2D,
