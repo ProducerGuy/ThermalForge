@@ -10,7 +10,7 @@ how the app is designed to work — fast polling, per-process spike logging, a s
 read — then that is the finding, and we document *why* it is inherent. We do not
 change the design to chase a number that buys nothing for the product.
 
-All numbers here are from our own runs on our own machine — an Apple Silicon MacBook,
+All numbers here are from our own runs on our own machine — a Mac Studio (Apple Silicon),
 macOS (Darwin 25.0), shipped build **0.2.3**, menu bar app idle with the dropdown
 closed. Absolute percentages are machine-specific; the **method** is what transfers.
 Reproduce it to get *your* number.
@@ -155,8 +155,32 @@ unaffected (it runs off a separate callback).
 
 | Condition | Total CPU | User / System | Storm |
 |---|---|---|---|
-| **Baseline** (publish ON, shipped 0.2.3) | **3.8% of one core** | ~44% user / ~56% system | low |
-| **Publish OFF** (this experiment) | **2.70% of one core** | ~22% user / ~78% system | 0 in window |
+| **Baseline** (publish ON, shipped 0.2.3) | **3.8% of one core** | ~44% user / ~56% system | 0.74 spikes/min |
+| **Publish OFF** (this experiment) | **2.70% of one core** | ~22% user / ~78% system | 0 spikes in window |
+
+Both windows were low-storm (0.74/min vs 0). Per our own convention a CPU number is only
+comparable alongside its storm rate; these two are close but not identical, so a fraction
+of the drop could be the ~0.74/min of spike-dump logging that the baseline window carried
+and the publish-off window did not. That fraction is small — a sub-1/min dump rate is a
+handful of log writes over 120 s — and it lands in the same direction as, and is dwarfed
+by, the ~1.1pp user-side signal. It does not change the conclusion, but it is why the
+system-time comparison (flat, 2.13% → 2.11%) is the load-bearing result: system time is
+storm-insensitive here, so it is the cleaner of the two numbers.
+
+**One more comparability caveat: the two runs used different bundles.** The baseline was
+the installed `/Applications` app; the publish-off run was the `/tmp` bundle with a distinct
+identifier — which means a **fresh `UserDefaults` domain** with no saved profile (it boots
+to Silent) and no persisted update-check state. We treat that difference as negligible for
+an idle CPU measurement, and here is why: at idle the machine sits well below every
+profile's fan-start threshold, so the monitor does the **same** sensor-read, logging, and
+tick work regardless of which profile is selected — profile choice changes what happens
+under load, not at rest; and the once-daily update check rides the heartbeat and performs no
+network I/O within a settled window unless it is actually due. The residual is smaller than
+the storm difference above and far smaller than the ~1.1pp signal. For a *strict* comparison
+the honest move is to re-measure the baseline on an equivalently built `/tmp` bundle so both
+runs share a bundle identity and a fresh defaults domain; we judge that unnecessary to
+support this experiment's conclusion, and note it here so the assumption is on the record
+rather than hidden.
 
 Cross-check, publish OFF: `ps` reported **2.70%** at **78% system**; `powermetrics`
 reported **2.69%** (26.87 ms/s mean of 24 samples) at **78% system**. The two
