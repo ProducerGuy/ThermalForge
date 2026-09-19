@@ -24,6 +24,7 @@ struct ThermalForge: ParsableCommand {
             Watch.self,
             Calibrate.self,
             Log.self,
+            ProfileCommand.self,
             Install.self,
             Uninstall.self,
             Daemon.self,
@@ -343,7 +344,7 @@ struct Watch: ParsableCommand {
         abstract: "Monitor temps and auto-adjust fans based on a profile"
     )
 
-    @Option(name: .shortAndLong, help: "Profile: silent, balanced, performance, max")
+    @Option(name: .shortAndLong, help: "Profile: silent, balanced, performance, max, smart, or a saved Custom Profile id")
     var profile: String = "balanced"
 
     @Option(name: .shortAndLong, help: "Poll interval in seconds (default 0.1 = 100ms)")
@@ -354,10 +355,14 @@ struct Watch: ParsableCommand {
 
     func run() throws {
         warnIfDaemonVersionMismatch()
-        let profiles = FanProfile.builtIn
+        // loadAll() already returns the built-ins overlaid with any persisted Custom
+        // Profile; Smart is added separately since it's surfaced outside `builtIn`
+        // (rq.md §16 — the CLI is the first-stage way to use a Custom Profile before a
+        // full editor UI exists).
+        let profiles = FanProfile.loadAll() + [FanProfile.smart]
         guard let selectedProfile = profiles.first(where: { $0.id == profile }) else {
             throw ValidationError(
-                "Unknown profile '\(profile)'. Options: \(profiles.map(\.id).joined(separator: ", "))"
+                "Unknown profile '\(profile)'. Options: \(Set(profiles.map(\.id)).sorted().joined(separator: ", "))"
             )
         }
 

@@ -9,6 +9,19 @@ import ServiceManagement
 import SwiftUI
 @preconcurrency import ThermalForgeCore
 
+/// Which Custom Profile the editor window should open to.
+enum ProfileEditorTarget: Equatable, Identifiable {
+    case new
+    case edit(String) // profile id
+
+    var id: String {
+        switch self {
+        case .new: return "new"
+        case .edit(let id): return "edit:\(id)"
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
@@ -17,6 +30,17 @@ final class AppState: ObservableObject {
     @Published var maxTemp: Float?
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
+    }
+    /// On by default (so existing Custom Profiles with colored points keep working).
+    /// Off, the menu bar icon ignores per-point colors and stays the plain default glyph.
+    @Published var colorizeMenuBarIcon: Bool = (UserDefaults.standard.object(forKey: "colorizeMenuBarIcon") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(colorizeMenuBarIcon, forKey: "colorizeMenuBarIcon") }
+    }
+    /// Off by default — with it off, the menu bar label is unchanged (single-line
+    /// temperature only). On, it adds a second line showing the first fan's actual
+    /// RPM below the temperature.
+    @Published var showRPMInMenuBar: Bool = UserDefaults.standard.bool(forKey: "showRPMInMenuBar") {
+        didSet { UserDefaults.standard.set(showRPMInMenuBar, forKey: "showRPMInMenuBar") }
     }
     /// Reflects the current SMAppService login-item status so the menu toggle shows the
     /// right state. Initialized from that status as the property's DEFAULT (not reassigned
@@ -46,6 +70,22 @@ final class AppState: ObservableObject {
     /// state on launch (so it shows without waiting for a network round-trip); a
     /// dismissed version is suppressed until a newer one ships.
     @Published var availableUpdate: AvailableUpdate?
+    /// What the Custom Profile editor window should open to — a blank new profile, or
+    /// an existing one to edit. Set right before `openWindow(id:)` is called; the
+    /// editor window reads this once (via `.id(...)`) to size its own @State.
+    @Published var profileEditorTarget: ProfileEditorTarget?
+
+    /// The menu bar icon's color, from whichever colored curve point the fan's
+    /// ACTUAL speed (not its target) has reached — see
+    /// `FanProfile.color(forActualFanPercent:)`. nil for every built-in profile and
+    /// for any Custom Profile with no colored points, which is the common case; the
+    /// icon then keeps its default template appearance.
+    var fanSpeedColor: Color? {
+        guard let fan = latestStatus?.fans.first, fan.maxRPM > 0 else { return nil }
+        let actualPercent = Float(fan.actualRPM) / Float(fan.maxRPM) * 100
+        guard let point = activeProfile.color(forActualFanPercent: actualPercent) else { return nil }
+        return Color(red: point.red, green: point.green, blue: point.blue)
+    }
 
     private var monitor: ThermalMonitor?
     private let executor = PrivilegedExecutor()
