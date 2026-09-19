@@ -264,6 +264,7 @@ struct ProfileEditorView: View {
             ColorPicker("", selection: colorBinding(index), supportsOpacity: false)
                 .labelsHidden()
                 .frame(width: 20)
+                .padding(.leading, 8)
                 .help("Menu bar icon color once the fan's actual speed reaches this point")
             if points[index].color != nil {
                 Button {
@@ -414,6 +415,13 @@ struct ProfileEditorView: View {
             )
             try profile.save()
             TFLogger.shared.profile("Custom Profile saved: \(profile.name) (\(profile.id))")
+            // `appState.activeProfile` is a value-type snapshot — saving to disk alone
+            // doesn't update it. If this is the profile currently in effect, re-select
+            // it so the live curve (and any new/changed point colors) actually applies
+            // instead of waiting for the next app launch or a profile switch away and back.
+            if appState.activeProfile.id == profile.id {
+                appState.selectProfile(profile)
+            }
             dismiss()
         } catch {
             errorMessage = "\(error)"

@@ -209,6 +209,10 @@ struct MenuBarView: View {
             // Footer
             Toggle("°F / °C", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
+            Toggle("Show RPM in Menu Bar", isOn: $appState.showRPMInMenuBar)
+                .padding(.horizontal, 12)
+            Toggle("Color Icon by Fan Speed", isOn: $appState.colorizeMenuBarIcon)
+                .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)
                 .padding(.horizontal, 12)
 

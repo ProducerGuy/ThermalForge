@@ -31,6 +31,17 @@ final class AppState: ObservableObject {
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
         didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
     }
+    /// On by default (so existing Custom Profiles with colored points keep working).
+    /// Off, the menu bar icon ignores per-point colors and stays the plain default glyph.
+    @Published var colorizeMenuBarIcon: Bool = (UserDefaults.standard.object(forKey: "colorizeMenuBarIcon") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(colorizeMenuBarIcon, forKey: "colorizeMenuBarIcon") }
+    }
+    /// Off by default — with it off, the menu bar label is unchanged (single-line
+    /// temperature only). On, it adds a second line showing the first fan's actual
+    /// RPM below the temperature.
+    @Published var showRPMInMenuBar: Bool = UserDefaults.standard.bool(forKey: "showRPMInMenuBar") {
+        didSet { UserDefaults.standard.set(showRPMInMenuBar, forKey: "showRPMInMenuBar") }
+    }
     /// Reflects the current SMAppService login-item status so the menu toggle shows the
     /// right state. Initialized from that status as the property's DEFAULT (not reassigned
     /// in init), so `didSet` does NOT fire on launch — reading the state must never
