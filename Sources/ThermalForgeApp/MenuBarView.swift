@@ -91,43 +91,49 @@ struct MenuBarView: View {
 
             // Profile picker
             SectionHeader(title: "PROFILE")
-            Picker("Profile", selection: Binding(
-                get: { appState.activeProfile.id },
-                set: { id in
-                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
-                        appState.selectProfile(profile)
-                    }
-                }
-            )) {
+            // Buttons, not a Picker: an inline Picker's binding is written by
+            // SwiftUI on re-render, not only on a click. Every re-render writes the
+            // first row (Silent) before re-asserting the real profile, logged as a
+            // same-second "Selected: Silent" / "Selected: Performance" pair. One such
+            // pair fired at 01:21:27 with no user present -- pmset puts that inside
+            // DarkWake (01:21:03), six seconds before DarkWake to FullWake (01:21:33).
+            // Silent is handsOff, so the echo hands fans back to Apple auto and zeroes
+            // the ramp governor. A Button action can only come from a gesture.
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(FanProfile.builtIn) { profile in
-                    HStack {
-                        Text(profile.name)
-                        Spacer()
-                        if !profile.curve.handsOff {
-                            let unit = appState.useFahrenheit ? "F" : "C"
-                            if profile.curve.instantEngage {
-                                // Max: show instant trigger temp
-                                let startC = profile.curve.startTemp
-                                let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
-                                Text("\(Int(startDisp))°\(unit) instant")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                let startC = profile.curve.startTemp
-                                let ceilC = profile.curve.ceilingTemp
-                                let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
-                                let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
-                                Text("\(Int(startDisp))→\(Int(ceilDisp))°\(unit)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                    Button(action: { appState.selectProfile(profile) }) {
+                        HStack {
+                            Image(systemName: "checkmark")
+                                .font(.caption)
+                                .opacity(appState.activeProfile.id == profile.id ? 1 : 0)
+                            Text(profile.name)
+                            Spacer()
+                            if !profile.curve.handsOff {
+                                let unit = appState.useFahrenheit ? "F" : "C"
+                                if profile.curve.instantEngage {
+                                    // Max: show instant trigger temp
+                                    let startC = profile.curve.startTemp
+                                    let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
+                                    Text("\(Int(startDisp))°\(unit) instant")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    let startC = profile.curve.startTemp
+                                    let ceilC = profile.curve.ceilingTemp
+                                    let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
+                                    let ceilDisp = appState.useFahrenheit ? ceilC * 9 / 5 + 32 : ceilC
+                                    Text("\(Int(startDisp))→\(Int(ceilDisp))°\(unit)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .contentShape(Rectangle())
                     }
-                    .tag(profile.id)
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 3)
                 }
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
             .padding(.horizontal, 12)
 
             Divider().padding(.vertical, 4)
