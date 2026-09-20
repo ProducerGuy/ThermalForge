@@ -24,7 +24,9 @@ public enum DaemonProtocol {
     public enum FrameError: Error, Equatable {
         case oversized    // declared length exceeds the cap (genuine over-cap / hostile binary)
         case legacyPeer   // the peer is speaking the pre-Phase-2 string protocol
-        case closed       // EOF / read error / timeout before the frame completed
+        case closed       // peer EOF before the frame completed
+        case timeout      // SO_RCVTIMEO / SO_SNDTIMEO expired
+        case read(Int32)   // preserve errno for a genuine read failure
         case write        // write error / timeout
     }
 
@@ -86,7 +88,9 @@ public enum DaemonProtocol {
             let n = bytes.withUnsafeBytes { p in
                 Darwin.write(fd, p.baseAddress!.advanced(by: sent), bytes.count - sent)
             }
-            guard n > 0 else { throw FrameError.write }   // 0 or -1 (incl. SO_SNDTIMEO)
+            if n < 0 && errno == EINTR { continue }
+            if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { throw FrameError.timeout }
+            guard n > 0 else { throw FrameError.write }
             sent += n
         }
     }
@@ -96,8 +100,8 @@ public enum DaemonProtocol {
         try JSONDecoder().decode(type, from: data)
     }
 
-    /// Read exactly `count` bytes, looping on partial reads; throws `.closed` if the
-    /// peer closes or the bounded read times out (SO_RCVTIMEO) before they all arrive.
+    /// Read exactly `count` bytes. Distinguish peer EOF, timeout and other errno
+    /// failures; retry interrupted syscalls without losing partial frame bytes.
     private static func readFully(_ fd: Int32, _ count: Int) throws -> [UInt8] {
         var buf = [UInt8](repeating: 0, count: count)
         var got = 0
@@ -105,7 +109,10 @@ public enum DaemonProtocol {
             let n = buf.withUnsafeMutableBytes { p in
                 Darwin.read(fd, p.baseAddress!.advanced(by: got), count - got)
             }
-            guard n > 0 else { throw FrameError.closed }   // 0 = EOF, -1 = error/timeout
+            if n < 0 && errno == EINTR { continue }
+            if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { throw FrameError.timeout }
+            if n < 0 { throw FrameError.read(errno) }
+            guard n > 0 else { throw FrameError.closed }
             got += n
         }
         return buf
