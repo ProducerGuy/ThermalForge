@@ -98,6 +98,9 @@ struct ProfileTests {
 
     @Test("Custom profile saves and loads")
     func saveLoad() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ThermalForgeTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
         let custom = FanProfile(
             id: "test_custom",
             name: "Test Custom",
@@ -106,9 +109,9 @@ struct ProfileTests {
                                     rampUpPerSec: 0.08, sustainedTriggerSec: 3)
         )
 
-        try custom.save()
+        try custom.save(to: directory)
 
-        let loaded = FanProfile.loadAll()
+        let loaded = FanProfile.loadAll(from: directory)
         let found = loaded.first { $0.id == "test_custom" }
         #expect(found != nil)
         #expect(found?.curve.startTemp == 55)
@@ -116,11 +119,6 @@ struct ProfileTests {
         #expect(found?.curve.curveShape == .easeOut)
         #expect(found?.curve.rampUpPerSec == 0.08)
         #expect(found?.curve.sustainedTriggerSec == 3)
-
-        // Clean up
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles/test_custom.json")
-        try? FileManager.default.removeItem(at: path)
     }
 
     @Test("Safety threshold is 95°C")
