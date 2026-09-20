@@ -16,7 +16,10 @@ final class AppState: ObservableObject {
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
-        didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") }
+        didSet {
+            UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit")
+            publishMenuBarTemperature(force: true)
+        }
     }
     /// Reflects the current SMAppService login-item status so the menu toggle shows the
     /// right state. Initialized from that status as the property's DEFAULT (not reassigned
@@ -48,6 +51,10 @@ final class AppState: ObservableObject {
     @Published var availableUpdate: AvailableUpdate?
 
     private var monitor: ThermalMonitor?
+    /// The freshest sensor value, kept separate from `maxTemp` so the menu-bar
+    /// publisher can avoid updates that do not change its whole-degree display.
+    private var latestMenuBarTemperature: Float?
+    private var publishedMenuBarTemperature: Int?
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: DispatchSourceTimer?
     /// Consecutive failed heartbeats, for debouncing `daemonUnreachable`.
@@ -351,9 +358,10 @@ final class AppState: ObservableObject {
                 // Max of only the displayed sensors
                 // Peak across all CPU and GPU sensors for menu bar display
                 let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
-                self?.maxTemp = status.temperatures
+                self?.latestMenuBarTemperature = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
+                self?.publishMenuBarTemperature()
             }
         }
         monitor.onFanCommand = { [weak self] command in
@@ -372,6 +380,23 @@ final class AppState: ObservableObject {
         }
         monitor.start()
         self.monitor = monitor
+    }
+
+    /// Publish only when the title rendered in the menu bar changes. The detailed
+    /// status remains live in `latestStatus` for the open popover.
+    private func publishMenuBarTemperature(force: Bool = false) {
+        guard let temperature = latestMenuBarTemperature else {
+            guard force || maxTemp != nil else { return }
+            maxTemp = nil
+            publishedMenuBarTemperature = nil
+            return
+        }
+
+        let display = useFahrenheit ? temperature * 9 / 5 + 32 : temperature
+        let wholeDegrees = Int(display)
+        guard force || wholeDegrees != publishedMenuBarTemperature else { return }
+        publishedMenuBarTemperature = wholeDegrees
+        maxTemp = temperature
     }
 
     // MARK: - Actions
