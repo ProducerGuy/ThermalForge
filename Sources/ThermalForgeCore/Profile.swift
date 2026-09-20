@@ -96,9 +96,63 @@ public struct FanProfile: Codable, Identifiable, Equatable {
             self.instantEngage = instantEngage
         }
 
+        /// Why this curve can't be used, or nil when it's sane. Applied to profiles loaded
+        /// from disk so a hand-edited file can't drive the fans nonsensically.
+        public var validationError: String? {
+            if handsOff { return nil } // Silent controls nothing; its thresholds are inert
+
+            // alwaysOn ignores temperature entirely and never hands the fans back to auto.
+            // A built-in may choose that; a file on disk may not.
+            if alwaysOn {
+                return "alwaysOn holds the fans at a fixed speed regardless of temperature"
+            }
+
+            if stopTemp < 20 || stopTemp > 90 {
+                return "stopTemp \(stopTemp)°C is out of range (20–90°C)"
+            }
+            // The project's stated rule: at least 5°C between stop and start, because
+            // start/stop cycling is the #1 fan bearing wear factor.
+            if startTemp - stopTemp < FanProfile.hysteresisDegrees {
+                return "startTemp \(startTemp)°C needs at least "
+                    + "\(Int(FanProfile.hysteresisDegrees))°C above stopTemp \(stopTemp)°C"
+            }
+            if startTemp >= FanProfile.safetyTempThreshold {
+                return "startTemp \(startTemp)°C is at or above the "
+                    + "\(Int(FanProfile.safetyTempThreshold))°C safety threshold"
+            }
+            // Instant-engage profiles have no proportional zone, so ceiling == start is the
+            // shape they declare. For anything else it collapses the curve to a step.
+            if instantEngage ? ceilingTemp < startTemp : ceilingTemp <= startTemp {
+                return "ceilingTemp \(ceilingTemp)°C leaves no proportional zone above "
+                    + "startTemp \(startTemp)°C"
+            }
+            // A ceiling past the safety threshold is unreachable — the 95°C override fires
+            // first, so the profile would never reach its own cap.
+            if ceilingTemp > FanProfile.safetyTempThreshold {
+                return "ceilingTemp \(ceilingTemp)°C is above the "
+                    + "\(Int(FanProfile.safetyTempThreshold))°C safety threshold"
+            }
+            if maxRPMPercent <= 0 || maxRPMPercent > 1 {
+                return "maxRPMPercent \(maxRPMPercent) is out of range (0–1)"
+            }
+            if rampUpPerSec <= 0 || rampDownPerSec <= 0 {
+                return "ramp rates must be positive"
+            }
+            // Generous upper bound: a long trigger is a legitimate choice for sustained
+            // workloads where you want the fans to stay out of the way through a warm-up.
+            if sustainedTriggerSec < 0 || sustainedTriggerSec > 300 {
+                return "sustainedTriggerSec \(sustainedTriggerSec) is out of range (0–300s)"
+            }
+            return nil
+        }
+
         /// Calculate the target fan speed percentage (0.0–1.0) for a given temperature.
         /// Returns nil if fans should be off (Apple auto).
         /// Returns 0.001 as a signal to keep fans at minimum RPM (hysteresis band).
+        ///
+        /// The curve runs from 0, so on hardware whose minimum RPM is a large fraction of
+        /// its maximum the lower part of the band sits below what the fan can turn and the
+        /// caller clamps it to minimum. See `ThermalMonitor.commandedPercent`.
         public func targetPercent(at temp: Float, fansCurrentlyRunning: Bool) -> Float? {
             // Always-on profiles ignore temperature
             if alwaysOn { return maxRPMPercent }
@@ -230,47 +284,106 @@ extension FanProfile {
     /// `builtIn`). Returns Silent when the id is nil (nothing saved) or unrecognized (a
     /// profile removed or renamed in a later version), so a stale saved id never crashes.
     public static func selectable(id: String?) -> FanProfile {
+        selectable(id: id, from: builtIn + [smart])
+    }
+
+    /// Resolve a persisted profile id against a caller-supplied list, so a custom profile
+    /// the user selected is restored rather than silently falling back to Silent.
+    public static func selectable(id: String?, from candidates: [FanProfile]) -> FanProfile {
         guard let id else { return .silent }
-        return (builtIn + [smart]).first { $0.id == id } ?? .silent
+        return candidates.first { $0.id == id } ?? .silent
     }
 }
 
 // MARK: - Persistence
 
 extension FanProfile {
-    private static var profilesDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles")
+    /// Ids that a file on disk may not claim, because the code branches on them by id.
+    ///
+    /// Smart is dispatched to its own adaptive path in ThermalMonitor, which reads only the
+    /// ramp rates and sustained trigger — a custom `smart.json` would have most of its curve
+    /// silently ignored, and would double up with Smart's own menu bar button. Silent is the
+    /// app's initial and reset-to state, held as a static, so overriding it would leave the
+    /// picker showing one profile while the monitor runs another.
+    static let reservedProfileIDs: Set<String> = ["smart", "silent"]
+
+    /// Where custom profiles live. Under `sudo` the effective user is root, whose home is
+    /// `/var/root` — the CLI has to resolve the invoking user's home or it would look in
+    /// the wrong place and find nothing, so SUDO_UID wins when it's set (same approach as
+    /// `thermalforge install`).
+    public static var defaultProfilesDirectory: URL {
+        var home = FileManager.default.homeDirectoryForCurrentUser
+        if geteuid() == 0,
+           let sudoUID = ProcessInfo.processInfo.environment["SUDO_UID"],
+           let uid = uid_t(sudoUID), uid != 0,
+           let pw = getpwuid(uid),
+           pw.pointee.pw_uid == uid, // the account must be the one SUDO_UID names
+           let dir = pw.pointee.pw_dir
+        {
+            home = URL(fileURLWithPath: String(cString: dir))
+        }
+        return home.appendingPathComponent("Library/Application Support/ThermalForge/profiles")
     }
 
-    public func save() throws {
-        let dir = Self.profilesDirectory
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    public func save(to directory: URL = FanProfile.defaultProfilesDirectory) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(self)
-        try data.write(to: dir.appendingPathComponent("\(id).json"))
+        try data.write(to: directory.appendingPathComponent("\(id).json"))
     }
 
-    public static func loadAll() -> [FanProfile] {
-        let dir = profilesDirectory
+    /// Built-in profiles merged with any custom ones on disk. A file whose id matches a
+    /// built-in replaces it; anything else is appended. Files that can't be read, can't be
+    /// decoded, claim a reserved id, or describe an unusable curve are skipped and logged —
+    /// a bad file must not take the fans with it.
+    public static func loadAll(from directory: URL = FanProfile.defaultProfilesDirectory) -> [FanProfile] {
         guard let files = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
+            at: directory, includingPropertiesForKeys: nil
         ) else {
             return builtIn
         }
 
         var profiles = builtIn
-        for file in files where file.pathExtension == "json" {
-            if let data = try? Data(contentsOf: file),
-               let profile = try? JSONDecoder().decode(FanProfile.self, from: data)
-            {
-                if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
-                    profiles[idx] = profile
-                } else {
-                    profiles.append(profile)
-                }
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where file.pathExtension == "json" {
+            let profile: FanProfile
+            do {
+                profile = try JSONDecoder().decode(FanProfile.self, from: Data(contentsOf: file))
+            } catch {
+                TFLogger.shared.error("Profile file \(file.lastPathComponent) unreadable: \(error)")
+                continue
+            }
+
+            if reservedProfileIDs.contains(profile.id) {
+                TFLogger.shared.error("Profile '\(profile.id)' rejected: that id is reserved")
+                continue
+            }
+            // A hand-edited file that would drive the fans nonsensically is skipped
+            // rather than offered, the same way calibration data is screened on load.
+            if let error = profile.curve.validationError {
+                TFLogger.shared.error("Profile '\(profile.id)' rejected: \(error)")
+                continue
+            }
+
+            if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[idx] = profile
+            } else {
+                profiles.append(profile)
             }
         }
-        return profiles
+        return orderedByCeiling(profiles)
+    }
+
+    /// Order profiles by how loud each is willing to get, so the picker escalates from
+    /// quietest to loudest and a custom profile lands where a reader expects rather than
+    /// tacked on after Max. The built-ins are already in this order (0, 0.60, 0.85, 1.0),
+    /// so a machine with no custom profiles sees exactly the list it saw before.
+    /// Ties keep insertion order, which puts a built-in ahead of a custom profile.
+    static func orderedByCeiling(_ profiles: [FanProfile]) -> [FanProfile] {
+        profiles.enumerated().sorted { lhs, rhs in
+            let a = lhs.element.curve.maxRPMPercent
+            let b = rhs.element.curve.maxRPMPercent
+            return a == b ? lhs.offset < rhs.offset : a < b
+        }.map(\.element)
     }
 }
 

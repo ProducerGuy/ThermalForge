@@ -94,12 +94,12 @@ struct MenuBarView: View {
             Picker("Profile", selection: Binding(
                 get: { appState.activeProfile.id },
                 set: { id in
-                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
+                    if let profile = appState.availableProfiles.first(where: { $0.id == id }) {
                         appState.selectProfile(profile)
                     }
                 }
             )) {
-                ForEach(FanProfile.builtIn) { profile in
+                ForEach(appState.availableProfiles) { profile in
                     HStack {
                         Text(profile.name)
                         Spacer()
