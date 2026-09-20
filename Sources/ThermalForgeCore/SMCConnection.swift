@@ -76,8 +76,15 @@ struct SMCParamStruct {
 public final class SMCConnection {
 
     private let connection: io_connect_t
+    private let injectedCall: ((inout SMCParamStruct, inout SMCParamStruct) -> kern_return_t)?
+
+    init(call: @escaping (inout SMCParamStruct, inout SMCParamStruct) -> kern_return_t) {
+        connection = 0
+        injectedCall = call
+    }
 
     public init?() {
+        injectedCall = nil
         var iterator: io_iterator_t = 0
         defer { IOObjectRelease(iterator) }
 
@@ -101,7 +108,7 @@ public final class SMCConnection {
     }
 
     deinit {
-        IOServiceClose(connection)
+        if injectedCall == nil { IOServiceClose(connection) }
     }
 
     // MARK: - Public API
@@ -111,20 +118,18 @@ public final class SMCConnection {
         var input = SMCParamStruct()
         var output = SMCParamStruct()
 
-        // Get key info (data size)
         input.key = fourCharCode(key)
         input.data8 = SMCCommand.readKeyInfo.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
+        guard callSMC(&input, &output) == kIOReturnSuccess, output.result == 0 else {
             return (false, [], 0)
         }
-
         let dataSize = output.keyInfo.dataSize
-        guard dataSize > 0 else { return (false, [], 0) }
+        guard dataSize > 0, dataSize <= 32 else { return (false, [], 0) }
 
         // Read value
         input.keyInfo.dataSize = dataSize
         input.data8 = SMCCommand.readBytes.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
+        guard callSMC(&input, &output) == kIOReturnSuccess, output.result == 0 else {
             return (false, [], 0)
         }
 
@@ -201,6 +206,7 @@ public final class SMCConnection {
     // MARK: - Private
 
     private func callSMC(_ input: inout SMCParamStruct, _ output: inout SMCParamStruct) -> kern_return_t {
+        if let injectedCall { return injectedCall(&input, &output) }
         var outputSize = MemoryLayout<SMCParamStruct>.stride
         return IOConnectCallStructMethod(
             connection,
