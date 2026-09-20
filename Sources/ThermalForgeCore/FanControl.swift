@@ -167,7 +167,7 @@ public final class FanControl {
             modeKey: { SMCFanKey.key(self.modeKeyTemplate, fan: $0) },
             readMode: { index in
                 let result = self.smc.readKey(SMCFanKey.key(self.modeKeyTemplate, fan: index))
-                return result.success ? result.bytes.first : nil
+                return result.success && result.size == 1 ? result.bytes.first : nil
             },
             write: { self.smc.writeKey($0, bytes: $1) }
         )
