@@ -61,6 +61,10 @@ public final class TFLogger {
         write("DAEMON", message)
     }
 
+    public func power(_ message: String) {
+        write("POWER", message)
+    }
+
     public func error(_ message: String) {
         write("ERROR", message)
     }

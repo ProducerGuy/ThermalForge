@@ -89,6 +89,14 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 4)
 
+            Divider().padding(.vertical, 4)
+
+            // Power protection — overheat guard (independent of the fan profile)
+            SectionHeader(title: "POWER PROTECTION")
+            PowerProtectionView()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 2)
+
             // Profile picker
             SectionHeader(title: "PROFILE")
             Picker("Profile", selection: Binding(
@@ -151,9 +159,15 @@ struct MenuBarView: View {
                 )) {
                     Label("Smart", systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
+                        // The menu host can swallow the control-level `.tint`
+                        // on some system builds (the held fill then renders in
+                        // the accent color); pin the label color explicitly so
+                        // the intended orange comes through regardless.
+                        .foregroundStyle(.orange)
                 }
                 .toggleStyle(.button)
                 .tint(.orange)
+                .help(appState.activeProfile.id == "smart" ? "Smart is the active profile" : "Switch to the Smart profile")
 
                 Button(action: { appState.resetAuto() }) {
                     Label("Default", systemImage: "arrow.counterclockwise")
@@ -211,6 +225,156 @@ struct MenuBarView: View {
 }
 
 // MARK: - Subviews
+/// The overheat-protection section: toggle, current system-mode indicator,
+/// the two thresholds (shown in the user's unit, stored in °C), and any
+/// active warning (e.g. sudo refusing without a passwordless entry).
+private struct PowerProtectionView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        let state = appState.powerProtection
+
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Overheat protection", isOn: Binding(
+                get: { appState.powerProtection.enabled },
+                set: { appState.setPowerProtectionEnabled($0) }
+            ))
+
+            HStack {
+                Text("System mode")
+                    .foregroundStyle(.secondary)
+                if state.powerSource == .battery {
+                    Image(systemName: "battery.100")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Running on battery — protection will not restore high performance until AC returns")
+                }
+                Spacer()
+                modeLabel(state)
+            }
+
+            if state.enabled {
+                PowerThresholdField(
+                    label: "Reduce at ≥",
+                    celsius: state.highTemp,
+                    fahrenheit: appState.useFahrenheit,
+                    onCommit: { appState.setReduceThreshold($0) }
+                )
+                PowerThresholdField(
+                    label: "Restore at ≤",
+                    celsius: state.lowTemp,
+                    fahrenheit: appState.useFahrenheit,
+                    onCommit: { appState.setRestoreThreshold($0) }
+                )
+
+                Text("Performance drops when a sensor hits the upper value and returns when cooled to the lower one.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let warning = state.warning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // The protection rides the daemon-backed monitor for temperatures:
+            // with the daemon down it cannot act, even though the toggle is on.
+            // Say so — otherwise a disabled-by-silence guard looks armed.
+            if state.enabled && appState.daemonUnreachable {
+                Label("Inactive — no temperature source (daemon unreachable)",
+                      systemImage: "wifi.exclamationmark")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modeLabel(_ state: PowerModeControllerState) -> some View {
+        switch state.currentMode {
+        case .reduced:
+            // Throttling is ACTIVE — the machine is hot enough to be protected.
+            Label("Reduced performance", systemImage: "tortoise.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        case .high:
+            // The label can't carry more detail (the menu truncates it), so
+            // the *orange* color is the "protection off, chip uncapped" flag.
+            Label("High performance", systemImage: "hare.fill")
+                .font(.caption)
+                .foregroundStyle(state.enabled ? Color.secondary : Color.orange)
+        case nil:
+            Label("Unknown", systemImage: "questionmark")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+/// One editable threshold. Edited into a draft, committed on Return (never
+/// mid-keystroke — an intermediate "8" while typing "88" must not re-arm
+/// protection at 8°). Displayed in the user's unit; stored in °C.
+private struct PowerThresholdField: View {
+    let label: String
+    let celsius: Float
+    let fahrenheit: Bool
+    let onCommit: (Float) -> Void
+
+    @State private var draft: Double?
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer()
+            TextField("", value: Binding(
+                get: { draft ?? displayValue },
+                set: { draft = $0 }
+            ), format: .number.precision(.fractionLength(0)))
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 48)
+            .focused($fieldFocused)
+            .onSubmit(commit)
+            Text(fahrenheit ? "°F" : "°C")
+                .foregroundStyle(.secondary)
+            if isPending {
+                Image(systemName: "return.up.forward")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .help("Not applied yet — the running value stays until this changes")
+            }
+        }
+        // The 2026-08-22 “55 trap”: a typed-but-never-returned value sat in the
+        // field looking applied while the controller ran on the old one. Apply on
+        // focus loss and on menu close so the field can never silently disagree
+        // with the running value once the user moves on.
+        .onChange(of: fieldFocused) { _, focused in
+            if !focused { commit() }
+        }
+        .onDisappear(perform: commit)
+    }
+
+    private var displayValue: Double {
+        fahrenheit ? Double(celsius) * 9 / 5 + 32 : Double(celsius)
+    }
+
+    /// A value was typed but not yet applied, and differs from the running one.
+    private var isPending: Bool {
+        guard let draft else { return false }
+        return draft != displayValue
+    }
+
+    private func commit() {
+        guard let draft else { return }
+        let committed = fahrenheit ? Float((draft - 32) * 5 / 9) : Float(draft)
+        self.draft = nil
+        onCommit(committed)
+    }
+}
 
 /// Banner shown when a hold was set from the CLI. Explains what's pinned and how
 /// to release it without needing to know any terminal commands.

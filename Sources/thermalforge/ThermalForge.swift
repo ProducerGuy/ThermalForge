@@ -611,6 +611,116 @@ struct Log: ParsableCommand {
     }
 }
 
+private enum PmsetSudoers {
+    static let path = "/etc/sudoers.d/thermalforge"
+    static let marker = "# ThermalForge: passwordless pmset powermode for overheat protection"
+
+    static func content(username: String) -> String {
+        """
+        \(marker)
+        # Installed by: sudo thermalforge install   |   Removed by: sudo thermalforge uninstall
+        \(username) ALL=(root) NOPASSWD: /usr/bin/pmset -c powermode *, /usr/bin/pmset -b powermode *
+        """
+    }
+
+    /// Resolve a uid to its account name (thread-safe `getpwuid_r`).
+    static func username(forUID uid: uid_t) -> String? {
+        var entry = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        let capacity = 16_384
+        let buffer = UnsafeMutablePointer<Int8>.allocate(capacity: capacity)
+        defer { buffer.deallocate() }
+        guard getpwuid_r(uid, &entry, buffer, capacity, &result) == 0, let result else { return nil }
+        return String(cString: result.pointee.pw_name)
+    }
+
+    /// Install (or re-assert) the entry, then verify sudo honours it.
+    /// Never throws: a sudoers failure must not fail an otherwise-complete
+    /// install — the user gets a loud, manual fallback instead.
+    static func install(ownerUID: Int) -> String {
+        guard let uid = UInt32(exactly: ownerUID) else {
+            return "Invalid owner UID \(ownerUID) - skipped the pmset powermode sudoers entry."
+        }
+        guard let username = username(forUID: uid) else {
+            return "Couldn't resolve your username — skipped the pmset powermode sudoers entry."
+        }
+        let wanted = content(username: username)
+        let fm = FileManager.default
+        do {
+            try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+
+            // Never clobber a file we don't own: a foreign /etc/sudoers.d/
+            // thermalforge without our marker belongs to something else.
+            if let existing = try? String(contentsOfFile: path) {
+                guard existing.contains(marker) else {
+                    return "\(path) exists but isn't ours (missing the ThermalForge marker) — left untouched."
+                }
+                if existing == wanted { return "pmset powermode exception already in place." }
+            }
+
+            // Staged write: temp file, 0440 root:wheel, then rename (same
+            // directory → atomic; sudoers refuses to act on a world/group-writable file).
+            let staged = path + ".new"
+            try wanted.write(toFile: staged, atomically: true, encoding: .utf8)
+            try fm.setAttributes(
+                [.ownerAccountID: 0, .groupOwnerAccountID: 0, .posixPermissions: 0o440],
+                ofItemAtPath: staged
+            )
+            guard rename(staged, path) == 0 else {
+                try? fm.removeItem(atPath: staged)
+                return "Couldn't write \(path). The app will ask for a password on power mode switches." +
+                    "\nManual: sudo tee \(path) with this line:\n  \(wanted)"
+            }
+        } catch {
+            return "Couldn't write \(path): \(error.localizedDescription). The app will ask for a password on power mode switches." +
+                "\nManual: sudo tee \(path) with this line:\n  \(wanted)"
+        }
+
+        // Verify sudo actually parses it and matches the user (exercises the
+        // real permission path without touching power mode).
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        probe.arguments = ["-n", "-u", username, "-l", "/usr/bin/pmset", "-c", "powermode"]
+        let pipe = Pipe()
+        probe.standardOutput = pipe
+        probe.standardError = pipe
+        do {
+            try probe.run()
+            probe.waitUntilExit()
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A sudoers parse warning is visible on every sudo call, even when the
+            // entry still works — never let a file with a syntax error "pass".
+            if output.contains("syntax error") {
+                return "Wrote \(path) but sudo reports a syntax error: \(detail) — check the file."
+            }
+            if probe.terminationReason == .exit, probe.terminationStatus == 0, output.contains("powermode") {
+                return "pmset powermode exception installed at \(path) (verified passwordless)."
+            }
+            return "Wrote \(path) but the sudo verification failed: \(detail) — check the file."
+        } catch {
+            return "Wrote \(path) but couldn't run the sudo verification: \(error.localizedDescription)."
+        }
+    }
+
+    /// Remove the entry during `uninstall` — only ever OUR file.
+    static func remove() -> String {
+        let fm = FileManager.default
+        guard let existing = try? String(contentsOfFile: path) else {
+            return "No pmset powermode sudoers entry — nothing to remove."
+        }
+        guard existing.contains(marker) else {
+            return "\(path) exists but isn't ours (missing the ThermalForge marker) — left untouched."
+        }
+        do {
+            try fm.removeItem(atPath: path)
+            return "Removed the pmset powermode exception (\(path))."
+        } catch {
+            return "Couldn't remove \(path): \(error.localizedDescription)"
+        }
+    }
+}
+
 // MARK: - Install
 
 struct Install: ParsableCommand {
@@ -642,6 +752,16 @@ struct Install: ParsableCommand {
                 would lock every non-root account out of fan control.
                 """)
         }
+
+        // The menu bar app's overheat protection switches the system's power
+        // mode from the app's (non-root) user via `sudo -n pmset ...` — a
+        // passwordless sudoers entry for THAT user. The fan daemon needs none:
+        // it runs as root and calls pmset directly. Written here because this
+        // is the one place that's root, runs for the user, and runs on every
+        // (re)install so the entry can't be lost. Never fails the install —
+        // it prints the manual fallback instead (the guard then shows a
+        // warning in the app).
+        print(PmsetSudoers.install(ownerUID: ownerUID))
 
         // Non-destructively capture whether the controlling user's app is running
         // NOW — before this install kills anything — as the signal for whether to
@@ -1102,6 +1222,10 @@ struct Uninstall: ParsableCommand {
 
         // Remove app bundle
         try? fm.removeItem(atPath: "/Applications/ThermalForge.app")
+
+        // Remove the passwordless pmset exception the install created (only
+        // ever our own file — the marker check refuses to touch anything else).
+        print(PmsetSudoers.remove())
 
         print("ThermalForge fully uninstalled.")
         print("Removed: daemon, binary, app, calibration data, logs.")
