@@ -633,9 +633,25 @@ public final class DaemonServer {
 
     private func handleWake() {
         stateLock.lock()
-        let heldCommand = hold.command
+        let currentHold = hold
         stateLock.unlock()
-        guard let command = heldCommand else {
+
+        // CLI holds are deliberate and unsupervised, so the daemon must restore
+        // them across sleep. App holds are dynamic profile output: replaying the
+        // last RPM after wake can overwrite a reset or a fresh cooldown decision
+        // from the app and leave fans pinned until the user presses Default. The
+        // app monitor resumes and recalculates its target; if it never resumes,
+        // the supervised watchdog clears the hold and resets to auto.
+        guard case .unsupervised(let command) = currentHold else {
+            if case .supervised = currentHold {
+                NSLog("ThermalForge daemon: woke — waiting for app to re-establish its profile")
+            } else {
+                NSLog("ThermalForge daemon: woke — no profile to re-apply")
+            }
+            return
+        }
+
+        guard !command.isEmpty else {
             NSLog("ThermalForge daemon: woke — no profile to re-apply")
             return
         }
