@@ -8,6 +8,7 @@
 import ArgumentParser
 import Foundation
 import ThermalForgeCore
+import ThermalForgeLocalization
 
 @main
 struct ThermalForge: ParsableCommand {
@@ -1130,6 +1131,9 @@ struct BuildApp: ParsableCommand {
     @Option(name: .long, help: "Destination .app bundle path (created or replaced)")
     var dest: String
 
+    @Option(name: .long, help: "Localization resource bundle (defaults to beside the app executable)")
+    var localizationResources: String?
+
     func run() throws {
         let fm = FileManager.default
 
@@ -1138,6 +1142,14 @@ struct BuildApp: ParsableCommand {
         }
         guard fm.fileExists(atPath: icon) else {
             throw ValidationError("Icon not found: \(icon)")
+        }
+
+        let resourceSource = localizationResources.map { URL(fileURLWithPath: $0) }
+            ?? URL(fileURLWithPath: binary).deletingLastPathComponent()
+                .appendingPathComponent(LocalizationCatalog.resourceBundleName)
+        guard let localizationBundle = Bundle(url: resourceSource),
+              (try? LocalizationCatalog(bundle: localizationBundle)) != nil else {
+            throw ValidationError("Localization resources missing or invalid: \(resourceSource.path)")
         }
 
         let contents = "\(dest)/Contents"
@@ -1153,6 +1165,8 @@ struct BuildApp: ParsableCommand {
 
         try fm.copyItem(atPath: binary, toPath: "\(macOSDir)/ThermalForgeApp")
         try fm.copyItem(atPath: icon, toPath: "\(resources)/AppIcon.icns")
+        try fm.copyItem(at: resourceSource,
+                        to: URL(fileURLWithPath: resources).appendingPathComponent(LocalizationCatalog.resourceBundleName))
 
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -1166,6 +1180,10 @@ struct BuildApp: ParsableCommand {
                 <string>ThermalForge</string>
                 <key>CFBundleIdentifier</key>
                 <string>com.thermalforge.app</string>
+                <key>CFBundleDevelopmentRegion</key>
+                <string>en</string>
+                <key>CFBundleLocalizations</key>
+                <array><string>en</string><string>zh-Hans</string><string>zh-Hant</string></array>
                 <key>CFBundleVersion</key>
                 <string>\(ThermalForgeVersion.current)</string>
                 <key>CFBundleShortVersionString</key>
