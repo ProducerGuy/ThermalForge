@@ -289,21 +289,37 @@ public final class FanControl {
 
     // MARK: - Reset
 
-    /// Reset all fans to Apple defaults (auto mode, thermalmonitord resumes)
+    /// Reset all fans to Apple defaults (auto mode, thermalmonitord resumes).
+    ///
+    /// Throws `writeFailed` if a mode or Ftst write is rejected (e.g. when run
+    /// without root). Those writes are what hand control back to macOS; a
+    /// rejected one leaves a fan latched in manual with the auto curve
+    /// suppressed, so it must never be reported as success. Every fan is
+    /// attempted before throwing, so a partial reset still resets what it can.
     public func resetAuto() throws {
         let count = try fanCount()
+        var failedKey: String?
 
         for i in 0..<count {
+            // The mode write returns the fan to macOS auto; a rejected one
+            // leaves it stuck in manual, so record it as a failure.
             let modeKey = SMCFanKey.key(modeKeyTemplate, fan: i)
-            _ = smc.writeKey(modeKey, bytes: [0])
+            if !smc.writeKey(modeKey, bytes: [0]) {
+                failedKey = failedKey ?? modeKey
+            }
 
+            // Target is advisory once mode is auto; clear it best-effort.
             let targetKey = SMCFanKey.key(SMCFanKey.target, fan: i)
             _ = smc.writeKey(targetKey, bytes: floatToSMCBytes(0))
         }
 
-        // Reset Ftst if it exists — thermalmonitord reclaims control
-        if hasFtst {
-            _ = smc.writeKey(SMCFanKey.forceTest, bytes: [0])
+        // Reset Ftst if it exists — thermalmonitord reclaims control (M1-M4).
+        if hasFtst, !smc.writeKey(SMCFanKey.forceTest, bytes: [0]) {
+            failedKey = failedKey ?? SMCFanKey.forceTest
+        }
+
+        if let key = failedKey {
+            throw ThermalForgeError.writeFailed(key)
         }
         log("Reset to Apple defaults")
     }
