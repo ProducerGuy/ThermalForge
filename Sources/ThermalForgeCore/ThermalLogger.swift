@@ -51,16 +51,24 @@ public final class ThermalLogger {
     private var metadata: LogSessionMetadata
     private var sampleCount = 0
     private var running = true
+    private let condition = NSCondition()
+    private let retention: LogSessionRetention
+    private let writer: CaptureLogWriter
     private let isoFormatter = ISO8601DateFormatter()
 
     public var onSample: ((String) -> Void)?
 
     public init(fanControl: FanControl, rateHz: Double = 1.0, duration: TimeInterval? = nil,
                 outputDir: URL? = nil, noExpire: Bool = false) throws {
+        guard rateHz.isFinite, rateHz > 0 else {
+            throw NSError(domain: "ThermalLogger", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Sample rate must be finite and positive."])
+        }
         self.fanControl = fanControl
         self.sampleInterval = 1.0 / rateHz
         self.duration = duration
-        self.noExpire = noExpire
+        self.noExpire = noExpire || outputDir != nil
+        writer = CaptureLogWriter(limit: self.noExpire ? nil : 100 * 1024 * 1024)
 
         // Machine info
         var sysSize = 0
@@ -74,17 +82,16 @@ public final class ThermalLogger {
         let fan0 = try? fanControl.fanInfo(0)
 
         let timestamp = isoFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let dirName = "thermalforge_log_\(timestamp)"
+        let dirName = "thermalforge_log_\(timestamp)-\(UUID().uuidString)"
 
         if let custom = outputDir {
             self.outputDir = custom.appendingPathComponent(dirName)
         } else {
-            let defaultDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/ThermalForge/logs")
+            let defaultDir = LogSessionRetention.defaultDirectory
             self.outputDir = defaultDir.appendingPathComponent(dirName)
         }
 
-        try FileManager.default.createDirectory(at: self.outputDir, withIntermediateDirectories: true)
+        retention = try LogSessionRetention(directory: self.outputDir, permanent: self.noExpire)
 
         self.metadata = LogSessionMetadata(
             machine: machine,
@@ -99,29 +106,53 @@ public final class ThermalLogger {
     }
 
     public func stop() {
-        running = false
+        condition.lock(); running = false; condition.broadcast(); condition.unlock()
+    }
+
+    private var isRunning: Bool {
+        condition.lock(); defer { condition.unlock() }; return running
+    }
+    private func waitForSample(since start: Date) {
+        let remaining = duration.map { max(0, $0 - Date().timeIntervalSince(start)) } ?? sampleInterval
+        condition.lock()
+        if running { _ = condition.wait(until: Date().addingTimeInterval(min(sampleInterval, remaining))) }
+        condition.unlock()
     }
 
     /// Run the logging loop. Blocks until duration expires, stop() is called, or interrupted.
     public func run() throws {
+        defer { retention.release() }
         // Create CSV
         let csvPath = outputDir.appendingPathComponent("thermal.csv")
         FileManager.default.createFile(atPath: csvPath.path, contents: nil)
         csvHandle = try FileHandle(forWritingTo: csvPath)
+        defer { try? csvHandle?.close() }
 
         // Create processes CSV
         let procPath = outputDir.appendingPathComponent("processes.csv")
         FileManager.default.createFile(atPath: procPath.path, contents: nil)
         let procHandle = try FileHandle(forWritingTo: procPath)
-        write(to: procHandle, "timestamp,pid,name,cpu_pct\n")
+        defer { try? procHandle.close() }
+        do {
+            try write(to: procHandle, "timestamp,pid,name,cpu_pct\n")
+            try recordSamples(processHandle: procHandle)
+            try finishSession()
+        } catch {
+            // Preserve metadata for partial recordings; the initial expiry survives
+            // even when a full disk prevents this final write.
+            try? finishSession()
+            throw error
+        }
+    }
 
+    private func recordSamples(processHandle procHandle: FileHandle) throws {
         // Write thermal CSV header after first sample (to capture actual sensor keys)
         var headerWritten = false
         var sensorKeys: [String] = []
 
         let startTime = Date()
 
-        while running {
+        while isRunning {
             // Check duration
             if let dur = duration, Date().timeIntervalSince(startTime) >= dur {
                 break
@@ -131,7 +162,7 @@ public final class ThermalLogger {
 
             // Read thermal status
             guard let status = try? fanControl.status() else {
-                Thread.sleep(forTimeInterval: sampleInterval)
+                waitForSample(since: startTime)
                 continue
             }
 
@@ -147,7 +178,7 @@ public final class ThermalLogger {
                 for key in sensorKeys {
                     header += ",\(key)"
                 }
-                write(to: csvHandle, header + "\n")
+                try write(to: csvHandle, header + "\n")
                 headerWritten = true
             }
 
@@ -163,12 +194,12 @@ public final class ThermalLogger {
                     row += ","
                 }
             }
-            write(to: csvHandle, row + "\n")
+            try write(to: csvHandle, row + "\n")
 
             // Process snapshot
             let procs = topProcesses(limit: 5)
             for proc in procs {
-                write(to: procHandle, "\(timestamp),\(proc.pid),\(proc.name),\(String(format: "%.1f", proc.cpuPct))\n")
+                try write(to: procHandle, "\(timestamp),\(proc.pid),\(proc.name),\(String(format: "%.1f", proc.cpuPct))\n")
             }
 
             sampleCount += 1
@@ -180,13 +211,12 @@ public final class ThermalLogger {
             let fan0 = status.fans.first.map { $0.actualRPM } ?? 0
             onSample?("[\(timestamp)] CPU: \(String(format: "%.0f", cpuTemp))°C  Fan: \(fan0) RPM  Samples: \(sampleCount)")
 
-            Thread.sleep(forTimeInterval: sampleInterval)
+            waitForSample(since: startTime)
         }
 
-        // Finalize
-        csvHandle?.closeFile()
-        procHandle.closeFile()
+    }
 
+    private func finishSession() throws {
         metadata.endedAt = isoFormatter.string(from: Date())
         metadata.totalSamples = sampleCount
 
@@ -197,10 +227,7 @@ public final class ThermalLogger {
         let metaData = try encoder.encode(metadata)
         try metaData.write(to: metaPath)
 
-        // Schedule auto-delete if not --no-expire
-        if !noExpire {
-            scheduleCleanup()
-        }
+        try retention.finish()
     }
 
     /// Output directory path
@@ -259,39 +286,15 @@ public final class ThermalLogger {
 
     // MARK: - Cleanup
 
-    private func scheduleCleanup() {
-        // Write a marker file so we know when to clean up
-        let marker = outputDir.appendingPathComponent(".expires")
-        let expiry = Date().addingTimeInterval(24 * 60 * 60) // 24 hours
-        try? isoFormatter.string(from: expiry).write(to: marker, atomically: true, encoding: .utf8)
-    }
-
-    /// Clean up expired log sessions
+    /// Runtime log maintenance also invokes this hourly while the app is running.
     public static func cleanExpired() {
-        let logsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/logs")
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: logsDir, includingPropertiesForKeys: nil
-        ) else { return }
-
-        let now = Date()
-        let isoFormatter = ISO8601DateFormatter()
-
-        for dir in contents {
-            let marker = dir.appendingPathComponent(".expires")
-            guard let expiryStr = try? String(contentsOf: marker, encoding: .utf8),
-                  let expiry = isoFormatter.date(from: expiryStr.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  now > expiry
-            else { continue }
-            try? FileManager.default.removeItem(at: dir)
-        }
+        LogSessionRetention.cleanExpired()
     }
 
     // MARK: - Helpers
 
-    private func write(to handle: FileHandle?, _ string: String) {
-        if let data = string.data(using: .utf8) {
-            handle?.write(data)
-        }
+    private func write(to handle: FileHandle?, _ string: String) throws {
+        guard let handle else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EBADF)) }
+        try writer.write(Data(string.utf8), to: handle)
     }
 }
