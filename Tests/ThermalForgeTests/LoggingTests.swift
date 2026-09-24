@@ -148,6 +148,26 @@ struct LoggingTests {
         #expect(a.snapshot.failures == 0 && b.snapshot.failures == 0)
     }
 
+    @Test("A directory filled by an earlier version stays bounded as the current file grows")
+    func boundedAfterUpgrade() throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        // Earlier versions pruned only for the next line, so other files could fill nearly
+        // the whole budget. Writes that only stat the current file must still stay bounded.
+        let today = RuntimeLogStore.name(for: Date())
+        let stem = String(today.dropLast(".log".count))
+        for n in 1...3 { try Data(count: 400).write(to: root.appendingPathComponent("\(stem).\(n).log")) }
+        try Data(count: 100).write(to: root.appendingPathComponent(today))
+        let logger = TFLogger(directory: root, policy: policy())
+        for n in 0..<40 {
+            logger.info("record-\(n) " + String(repeating: "x", count: 60)); #expect(logger.flush())
+            let data = try logs(in: root).map { try Data(contentsOf: $0) }
+            #expect(data.allSatisfy { $0.count <= 512 })
+            #expect(data.reduce(0) { $0 + $1.count } <= 1536)
+        }
+        #expect(try String(contentsOf: logger.path, encoding: .utf8).contains("record-39"))
+        #expect(logger.snapshot.failures == 0)
+    }
+
     @Test("Huge messages are bounded without producing invalid UTF-8")
     func boundedMessage() throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }

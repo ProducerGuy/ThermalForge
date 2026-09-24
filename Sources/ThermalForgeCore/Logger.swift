@@ -136,6 +136,8 @@ final class RuntimeLogStore {
     private let writer: (Data, URL) throws -> Void
     private let fm = FileManager.default
     private struct File { let url: URL; let day: Date; let index: Int; let bytes: Int }
+    /// Whether this process has pruned since it started. Touched only on the logger's queue.
+    private var prunedSinceStart = false
 
     init(directory: URL, policy: TFLogger.Policy, append: @escaping (Data, URL) throws -> Void) {
         self.directory = directory; self.policy = policy; writer = append
@@ -148,10 +150,13 @@ final class RuntimeLogStore {
         f.isLenient = false
         return f
     }
-    static func name(for date: Date) -> String { "thermalforge-\(dateFormatter().string(from: date)).log" }
+    // Formatting through a shared, never-mutated formatter is thread-safe, and building a
+    // formatter costs more than the write itself.
+    private static let dayFormatter = dateFormatter()
+    static func name(for date: Date) -> String { "thermalforge-\(dayFormatter.string(from: date)).log" }
 
     private func files() throws -> [File] {
-        let formatter = Self.dateFormatter()
+        let formatter = Self.dayFormatter
         return try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]).compactMap { url in
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
@@ -183,30 +188,56 @@ final class RuntimeLogStore {
         }
     }
     private func locked(_ body: () throws -> Void) throws {
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let fd = try Self.openRegular(directory.appendingPathComponent(".runtime-log.lock"))
+        let lock = directory.appendingPathComponent(".runtime-log.lock")
+        let fd: Int32
+        do { fd = try Self.openRegular(lock) }
+        catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
+            // Only a missing directory costs a creation attempt, not every write.
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            fd = try Self.openRegular(lock)
+        }
         defer { Darwin.close(fd) }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw Failure.busy }
         defer { flock(fd, LOCK_UN) }
         try body()
     }
     func maintain(at date: Date, retentionDays: Int) throws {
-        try locked { try prune(at: date, days: retentionDays) }
+        try locked {
+            let size = Self.size(of: directory.appendingPathComponent(Self.name(for: date))) ?? 0
+            try prune(at: date, days: retentionDays, reserve: max(0, policy.fileBytes - size))
+            prunedSinceStart = true
+        }
     }
     func clear() throws { try locked { for file in try files() { try fm.removeItem(at: file.url) } } }
     func write(_ data: Data, at date: Date, retentionDays: Int) throws {
         try locked {
-            try prune(at: date, days: retentionDays, reserve: data.count)
             let current = directory.appendingPathComponent(Self.name(for: date))
-            let entries = try files()
-            if let file = entries.first(where: { $0.url.lastPathComponent == current.lastPathComponent }), file.bytes + data.count > policy.fileBytes {
-                let last = entries.filter { $0.day == file.day && $0.index != Int.max }.map(\.index).max() ?? 0
-                guard last < Int.max - 1 else { throw Failure.notRegularFile }
-                let archive = current.deletingPathExtension().appendingPathExtension("\(last + 1).log")
-                try fm.moveItem(at: current, to: archive)
+            var size = Self.size(of: current)
+            if let bytes = size, bytes + data.count > policy.fileBytes, try rotate(current) { size = nil }
+            // The total only grows through the current file, which never exceeds fileBytes.
+            // Pruning when a current file starts (rotation, a new day) or when this process
+            // first writes leaves room for a full current file, so every append in between,
+            // from any process, stays within totalBytes without rescanning the directory.
+            if size == nil || !prunedSinceStart {
+                try prune(at: date, days: retentionDays, reserve: max(0, policy.fileBytes - (size ?? 0)))
+                prunedSinceStart = true
             }
             try writer(data, current)
         }
+    }
+    /// Archive the current file under the next free index for its day.
+    private func rotate(_ current: URL) throws -> Bool {
+        let entries = try files()
+        guard let file = entries.first(where: { $0.url.lastPathComponent == current.lastPathComponent }) else { return false }
+        let last = entries.filter { $0.day == file.day && $0.index != Int.max }.map(\.index).max() ?? 0
+        guard last < Int.max - 1 else { throw Failure.notRegularFile }
+        let archive = current.deletingPathExtension().appendingPathExtension("\(last + 1).log")
+        try fm.moveItem(at: current, to: archive)
+        return true
+    }
+    private static func size(of url: URL) -> Int? {
+        var info = stat()
+        return lstat(url.path, &info) == 0 ? Int(info.st_size) : nil
     }
     private static func openRegular(_ url: URL) throws -> Int32 {
         let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
