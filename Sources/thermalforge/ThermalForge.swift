@@ -535,19 +535,16 @@ struct Log: ParsableCommand {
         abstract: "Record thermal data to CSV for research and analysis"
     )
 
-    /// Static reference for SIGINT handler (can't capture context in C function pointer)
-    nonisolated(unsafe) static var activeLogger: ThermalLogger?
-
     @Option(name: .shortAndLong, help: "Sample rate in Hz (default: 1)")
     var rate: Double = 1.0
 
     @Option(name: .shortAndLong, help: "Duration (e.g., 1h, 30m, 60s). Omit for indefinite.")
     var duration: String?
 
-    @Option(name: .shortAndLong, help: "Output directory (default: ~/Library/Application Support/ThermalForge/logs)")
+    @Option(name: .shortAndLong, help: "Export directory (custom output is kept permanently)")
     var output: String?
 
-    @Flag(name: .long, help: "Keep logs permanently (default: auto-delete after 24h)")
+    @Flag(name: .long, help: "Keep logs permanently (temporary default captures expire 24h after completion)")
     var noExpire: Bool = false
 
     func run() throws {
@@ -561,7 +558,7 @@ struct Log: ParsableCommand {
             rateHz: rate,
             duration: durationSec,
             outputDir: outputURL,
-            noExpire: noExpire
+            noExpire: noExpire || output != nil
         )
 
         // Clean expired sessions on startup
@@ -572,16 +569,24 @@ struct Log: ParsableCommand {
         print("  Rate: \(rate) Hz")
         print("  Duration: \(durationStr)")
         print("  Output: \(logger.outputPath.path)")
-        print("  Auto-delete: \(noExpire ? "off" : "after 24h")")
+        print("  Retention: \((noExpire || output != nil) ? "permanent" : "24h after completion; cleaned periodically while the app runs")")
+        if !noExpire && output == nil { print("  Size limit: 100 MiB per temporary recording") }
         print("\nLogging... Ctrl-C to stop.\n")
 
-        // Clean shutdown on Ctrl-C
-        Log.activeLogger = logger
-        signal(SIGINT) { _ in
-            print("\n\nStopping...")
-            Log.activeLogger?.stop()
-            Thread.sleep(forTimeInterval: 1)
-            Darwin.exit(0)
+        // Handle termination outside a signal handler so CSV handles, metadata
+        // and expiry markers are finalized normally, even with a slow sample rate.
+        let previousINT = signal(SIGINT, SIG_IGN)
+        let previousTERM = signal(SIGTERM, SIG_IGN)
+        let signals = [SIGINT, SIGTERM].map { number in
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global(qos: .utility))
+            source.setEventHandler { logger.stop() }
+            source.resume()
+            return source
+        }
+        defer {
+            signals.forEach { $0.cancel() }
+            signal(SIGINT, previousINT)
+            signal(SIGTERM, previousTERM)
         }
 
         logger.onSample = { line in

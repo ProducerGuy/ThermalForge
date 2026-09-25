@@ -280,17 +280,17 @@ Each session produces a self-contained folder:
 - **CSV + JSON sidecar** — loads directly in pandas, R, Excel, or any data tool without a custom parser
 - **Raw SMC key names** — no friendly labels that could be wrong across chip generations. Cross-reference against Apple hardware documentation directly
 - **Self-describing sessions** — every log folder contains everything needed to interpret the data. Hand it to someone with no context and they can work with it
-- **Auto-delete by default (24h)** — prevents disk bloat for casual users. `--no-expire` for researchers who need to keep data
+- **Temporary by default** — default captures expire 24 hours after completion and stop at 100 MiB of CSV data. Use `--no-expire` or an explicit `--output` directory for permanent, uncapped exports.
 
 ### Storage
 
-ThermalForge has three types of stored data, all automatically managed:
+Runtime logs and research recordings have separate retention policies:
 
-**App log** (daily files in `~/Library/Logs/ThermalForge/`) — one file per day (`thermalforge-2026-04-05.log`). Records all app events: profile changes, fan commands, temperature spikes, safety overrides, sustained trigger events. Auto-deletes files older than 7 days on app launch. Each daily file is small and easy to open or share.
+**Runtime logs** (`~/Library/Logs/ThermalForge/`) record profile changes, fan commands, temperature spikes and safety events. Daily files such as `thermalforge-2026-04-05.log` roll over into numbered archives at 5 MiB. Each process user's log directory retains at most 50 MiB and seven calendar days, including today. The app and root daemon use separate directories. Cleanup runs at startup, during writes and hourly while running, including an idle daemon. A bounded background queue keeps file I/O off control callers; disk errors trigger a retry backoff instead of propagating into fan control. Overloaded queues may drop log entries.
 
-**Research session logs** (`thermalforge log` exports in `~/Library/Application Support/ThermalForge/logs/`) — CSV/JSON research data. Auto-delete after 24 hours by default. Use `--no-expire` to keep permanently.
+**Temporary recordings** (default `thermalforge log` output in `~/Library/Application Support/ThermalForge/logs/`) stop at 100 MiB of combined CSV data, retaining the partial recording. Expiry is marked at creation and extended to 24 hours after completion, including Ctrl-C and SIGTERM. A process lock protects active recordings; abruptly terminated recordings become eligible for cleanup once their initial expiry passes. Cleanup runs hourly while the app runs and when the app or a recording starts. When the app is closed, expired files remain until the next cleanup.
 
-Nothing accumulates indefinitely. All cleanup runs automatically on app launch.
+**Permanent exports** (`--output <directory>` or `--no-expire`) have no automatic expiry or CSV size limit and need to be managed by the user. Unmarked legacy recordings and unrelated files are preserved. Cleanup does not search custom output locations.
 
 ## Future Specs
 

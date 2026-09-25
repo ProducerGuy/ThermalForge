@@ -364,6 +364,8 @@ public final class DaemonServer {
     /// Run the server loop (blocks forever)
     public func run() {
         NSLog("ThermalForge daemon: listening on %@", ThermalForgeDaemon.socketPath)
+        // Start log maintenance even when no fan command has been issued.
+        TFLogger.shared.daemon("Listening on \(ThermalForgeDaemon.socketPath)")
 
         // Watch for sleep/wake to re-apply fan settings
         registerWakeNotification()
