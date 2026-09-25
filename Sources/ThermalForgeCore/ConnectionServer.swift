@@ -3,8 +3,8 @@
 //  ThermalForge
 //
 //  Phase 4 connection layer: concurrent, bounded accept + one framed request/response
-//  per connection over DispatchIO, with a ~1s header deadline and a ~5s full-request
-//  deadline (replacing Phase 0's SO_RCVTIMEO). Decoupled from DaemonServer so it can be
+//  per connection over DispatchIO, with a ~1s header deadline and separate ~5s
+//  request-body/response-write deadlines. Decoupled from DaemonServer so it can be
 //  tested against a plain bound AF_UNIX socket — the daemon's request processing is
 //  injected as `handle`. Framing-level replies (legacy peer, oversized) live here; the
 //  verb dispatch does not.
@@ -75,10 +75,13 @@ final class ConnectionServer: @unchecked Sendable {
     }
 
     /// One request/response per connection. A per-connection SERIAL queue serializes this
-    /// connection's reads/writes/timers (they never race); different connections run
-    /// concurrently. The header deadline closes a connect-and-hang fast (freeing its slot
-    /// so a queued request isn't starved); the full deadline bounds a slow/partial body.
+    /// connection's reads/writes/timers; different connections run concurrently.
+    /// The header deadline frees connect-and-hang slots; body and write deadlines
+    /// bound incomplete frames without counting legitimate hardware execution.
     private func handleConnection(_ fd: Int32) {
+        // A timed-out client must not terminate the root daemon with SIGPIPE.
+        var noSignal: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
         let q = DispatchQueue(label: "com.thermalforge.conn")
         let io = DispatchIO(type: .stream, fileDescriptor: fd, queue: q) { [self] _ in
@@ -93,12 +96,9 @@ final class ConnectionServer: @unchecked Sendable {
             headerTimeout.cancel()
             guard let header else { io.close(flags: .stop); return }
 
-            // The full-request deadline bounds everything from here THROUGH the final
-            // write. It is cancelled only in `finish`, AFTER the write completes — so a
-            // client that sends a header then never reads its reply can't hang the
-            // connection (and leak its slot): the deadline force-closes it. Every
-            // terminal path routes through `finish`, so io is closed exactly once and
-            // the DispatchIO cleanup handler runs connectionFinished exactly once.
+            // Bound incomplete request bodies independently of firmware processing.
+            // A valid M4 handoff may exceed 5s; the old timer then raced and closed
+            // its successful reply. Response writes get their own bounded deadline.
             let fullTimeout = DispatchWorkItem { io.close(flags: .stop) }
             q.asyncAfter(deadline: .now() + requestDeadline, execute: fullTimeout)
             let finish = { fullTimeout.cancel(); io.close(flags: .stop) }
@@ -117,9 +117,15 @@ final class ConnectionServer: @unchecked Sendable {
             case .length(let len):
                 readExactly(io, length: len, queue: q) { [self] body in
                     guard let body else { finish(); return }
+                    fullTimeout.cancel()
                     autoreleasepool {   // v0.1.10 hygiene, now per request
                         let response = handle(Data(body))
-                        writeResponse(io, response, queue: q, completion: finish)
+                        let writeTimeout = DispatchWorkItem { io.close(flags: .stop) }
+                        q.asyncAfter(deadline: .now() + requestDeadline, execute: writeTimeout)
+                        writeResponse(io, response, queue: q) {
+                            writeTimeout.cancel()
+                            finish()
+                        }
                     }
                 }
             }

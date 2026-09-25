@@ -153,61 +153,23 @@ public final class FanControl {
     /// On M1-M4: writes Ftst=1, then polls until mode write succeeds.
     /// On M5+: Ftst doesn't exist, attempts direct mode write.
     private func unlockFans(count: Int) throws {
-        if hasFtst {
-            // M1-M4 path: Ftst unlock suppresses thermalmonitord
-            guard smc.writeKey(SMCFanKey.forceTest, bytes: [1]) else {
-                throw ThermalForgeError.unlockFailed(
-                    "Failed to write Ftst=1. Run with sudo."
-                )
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-        }
-
-        // Set each fan to manual mode
-        for i in 0..<count {
-            let modeKey = SMCFanKey.key(modeKeyTemplate, fan: i)
-            let deadline = Date().addingTimeInterval(10.0)
-            var success = false
-
-            while Date() < deadline {
-                if smc.writeKey(modeKey, bytes: [1]) {
-                    success = true
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.1)
-            }
-
-            if !success {
-                throw ThermalForgeError.unlockFailed(
-                    "Timed out setting fan \(i) to manual mode. Run with sudo."
-                )
-            }
-        }
+        try acquireManualMode(indices: Array(0..<count))
     }
 
     /// Unlock a single fan for manual control
     private func unlockSingleFan(_ index: Int) throws {
-        if hasFtst {
-            guard smc.writeKey(SMCFanKey.forceTest, bytes: [1]) else {
-                throw ThermalForgeError.unlockFailed(
-                    "Failed to write Ftst=1. Run with sudo."
-                )
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+        try acquireManualMode(indices: [index])
+    }
 
-        let modeKey = SMCFanKey.key(modeKeyTemplate, fan: index)
-        let deadline = Date().addingTimeInterval(10.0)
-
-        while Date() < deadline {
-            if smc.writeKey(modeKey, bytes: [1]) {
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-
-        throw ThermalForgeError.unlockFailed(
-            "Timed out setting fan \(index) to manual mode. Run with sudo."
+    private func acquireManualMode(indices: [Int]) throws {
+        try FanHandoff.acquire(
+            indices: indices, hasFtst: hasFtst,
+            modeKey: { SMCFanKey.key(self.modeKeyTemplate, fan: $0) },
+            readMode: { index in
+                let result = self.smc.readKey(SMCFanKey.key(self.modeKeyTemplate, fan: index))
+                return result.success && result.size == 1 ? result.bytes.first : nil
+            },
+            write: { self.smc.writeKey($0, bytes: $1) }
         )
     }
 

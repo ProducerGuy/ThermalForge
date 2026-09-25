@@ -161,7 +161,8 @@ public final class DaemonClient {
     ///   No effect on resetAuto (nothing to hold).
     @discardableResult
     public func execute(_ command: FanCommand, oneshot: Bool = false) throws -> FanApplyResult {
-        let response = try request(DaemonRequest(command, oneshot: oneshot))
+        let req = DaemonRequest(command, oneshot: oneshot)
+        let response = try request(req, timeout: DaemonRequestPolicy.timeout(for: req.verb))
         guard response.ok else {
             throw DaemonError.commandFailed(
                 response.message ?? response.error.map { String(describing: $0) } ?? "daemon error"
@@ -179,11 +180,14 @@ public final class DaemonClient {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.connectionFailed }
         defer { close(fd) }
+        var noSignal: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
 
         // Bound every send/recv so a hung or contended daemon can never block the
         // caller indefinitely — the v0.1.7 freeze. Healthy round-trips here are
-        // sub-millisecond (heartbeat/version/state) to low-single-digit ms; 2s is a
-        // stall cutoff with wide margin over the heaviest real reply.
+        // sub-millisecond for heartbeat/version/state. Hardware writes use a
+        // separate 30s budget because initial M1-M4 manual acquisition can take
+        // up to the shared 20s acquisition budget; cached reads retain the 2s default.
         let whole = Int(timeout)
         var tv = timeval(tv_sec: whole, tv_usec: Int32((timeout - Double(whole)) * 1_000_000))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -669,9 +673,11 @@ public final class DaemonServer {
         guard request.v <= DaemonProtocol.version else {
             return .unsupported(daemonVersion: ThermalForgeVersion.current)
         }
-        smcLock.lock()
-        let response = process(request)
-        smcLock.unlock()
+        // Liveness/state/version use only stateLock (or immutable data). Let them
+        // answer during a slow firmware handoff instead of starving the watchdog.
+        let response = DaemonRequestPolicy.perform(request.verb, lock: smcLock) {
+            process(request)
+        }
         // Verb + outcome only — never raw client bytes.
         NSLog("ThermalForge daemon: verb=%@ outcome=%@", request.verb.rawValue,
               response.ok ? "ok" : (response.error?.rawValue ?? "error"))
@@ -679,7 +685,7 @@ public final class DaemonServer {
     }
 
     /// The full request dispatch — MOVED VERBATIM from the pre-Phase-4 serial handler.
-    /// The CALLER holds smcLock for the whole call, so every check-then-act
+    /// For hardware verbs the CALLER holds smcLock for the whole call, so every check-then-act
     /// (blockedByCLIHold, rate limit, clamp, recordHold + SMC write) stays atomic exactly
     /// as before; Phase 4 concurrency lives only in the I/O around this, never inside it.
     /// Same-class concurrent writers resolve by last-write-wins (recordHold overwrites) —
