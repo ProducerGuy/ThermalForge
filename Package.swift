@@ -10,6 +10,10 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ThermalForgeLocalization",
+            resources: [.process("Resources")]
+        ),
+        .target(
             name: "ThermalForgeCore",
             path: "Sources/ThermalForgeCore",
             linkerSettings: [
@@ -20,18 +24,19 @@ let package = Package(
             name: "thermalforge",
             dependencies: [
                 "ThermalForgeCore",
+                "ThermalForgeLocalization",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/thermalforge"
         ),
         .executableTarget(
             name: "ThermalForgeApp",
-            dependencies: ["ThermalForgeCore"],
+            dependencies: ["ThermalForgeCore", "ThermalForgeLocalization"],
             path: "Sources/ThermalForgeApp"
         ),
         .testTarget(
             name: "ThermalForgeTests",
-            dependencies: ["ThermalForgeCore"],
+            dependencies: ["ThermalForgeCore", "ThermalForgeApp", "ThermalForgeLocalization"],
             path: "Tests/ThermalForgeTests"
         ),
     ]

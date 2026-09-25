@@ -7,15 +7,17 @@
 
 import SwiftUI
 import ThermalForgeCore
+import ThermalForgeLocalization
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var language: AppLanguageStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Text("ThermalForge")
+                Text(language.text("ThermalForge"))
                     .font(.headline)
                 Spacer()
                 stateIndicator
@@ -59,10 +61,10 @@ struct MenuBarView: View {
 
             // Fan speeds
             if let status = appState.latestStatus {
-                SectionHeader(title: "FANS")
+                SectionHeader(title: language.text("FANS"))
                 ForEach(status.fans, id: \.index) { fan in
                     HStack {
-                        Text("Fan \(fan.index)")
+                        Text(language.text("Fan {index}", ["index": String(fan.index)]))
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text("\(fan.actualRPM) RPM")
@@ -75,14 +77,14 @@ struct MenuBarView: View {
                 Divider().padding(.vertical, 4)
 
                 // Temperatures
-                SectionHeader(title: "TEMPERATURES")
-                TemperatureRow(label: "CPU", value: peakTemp(prefixes: ["TC", "Tp"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "GPU", value: peakTemp(prefixes: ["TG", "Tg"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "RAM", value: peakTemp(prefixes: ["TR", "Tm", "TM"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "SSD", value: peakTemp(prefixes: ["TH"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "Ambient", value: peakTemp(prefixes: ["TA"]), fahrenheit: appState.useFahrenheit)
+                SectionHeader(title: language.text("TEMPERATURES"))
+                TemperatureRow(label: language.text("CPU"), value: peakTemp(prefixes: ["TC", "Tp"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: language.text("GPU"), value: peakTemp(prefixes: ["TG", "Tg"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: language.text("RAM"), value: peakTemp(prefixes: ["TR", "Tm", "TM"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: language.text("SSD"), value: peakTemp(prefixes: ["TH"]), fahrenheit: appState.useFahrenheit)
+                TemperatureRow(label: language.text("Ambient"), value: peakTemp(prefixes: ["TA"]), fahrenheit: appState.useFahrenheit)
             } else {
-                Text("Reading sensors...")
+                Text(language.text("Reading sensors..."))
                     .foregroundStyle(.secondary)
                     .padding(12)
             }
@@ -90,8 +92,8 @@ struct MenuBarView: View {
             Divider().padding(.vertical, 4)
 
             // Profile picker
-            SectionHeader(title: "PROFILE")
-            Picker("Profile", selection: Binding(
+            SectionHeader(title: language.text("PROFILE"))
+            Picker(language.text("Profile"), selection: Binding(
                 get: { appState.activeProfile.id },
                 set: { id in
                     if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
@@ -101,7 +103,7 @@ struct MenuBarView: View {
             )) {
                 ForEach(FanProfile.builtIn) { profile in
                     HStack {
-                        Text(profile.name)
+                        Text(language.text(profile.name))
                         Spacer()
                         if !profile.curve.handsOff {
                             let unit = appState.useFahrenheit ? "F" : "C"
@@ -109,7 +111,7 @@ struct MenuBarView: View {
                                 // Max: show instant trigger temp
                                 let startC = profile.curve.startTemp
                                 let startDisp = appState.useFahrenheit ? startC * 9 / 5 + 32 : startC
-                                Text("\(Int(startDisp))°\(unit) instant")
+                                Text(language.text("{temperature}°{unit} instant", ["temperature": String(Int(startDisp)), "unit": unit]))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
@@ -149,14 +151,14 @@ struct MenuBarView: View {
                         }
                     }
                 )) {
-                    Label("Smart", systemImage: "fan.fill")
+                    Label(language.text("Smart"), systemImage: "fan.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .toggleStyle(.button)
                 .tint(.orange)
 
                 Button(action: { appState.resetAuto() }) {
-                    Label("Default", systemImage: "arrow.counterclockwise")
+                    Label(language.text("Default"), systemImage: "arrow.counterclockwise")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -165,14 +167,27 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 4)
 
+            // Language changes update presentation only; AppState stays alive.
+            Picker(language.text("Language"), selection: Binding(
+                get: { language.selection }, set: { language.select($0) }
+            )) {
+                ForEach(AppLanguage.allCases) { choice in
+                    Text(language.title(for: choice)).tag(choice)
+                }
+            }
+            .accessibilityIdentifier("com.thermalforge.language")
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
+
             // Footer
-            Toggle("°F / °C", isOn: $appState.useFahrenheit)
+            Toggle(language.text("°F / °C"), isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
-            Toggle("Launch at Login", isOn: $appState.launchAtLogin)
+            Toggle(language.text("Launch at Login"), isOn: $appState.launchAtLogin)
                 .padding(.horizontal, 12)
 
             Button(action: { NSApp.terminate(nil) }) {
-                Text("Quit ThermalForge")
+                Text(language.text("Quit ThermalForge"))
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -189,15 +204,15 @@ struct MenuBarView: View {
     private var stateIndicator: some View {
         switch appState.monitorState {
         case .safetyOverride:
-            Label("SAFETY", systemImage: "exclamationmark.triangle.fill")
+            Label(language.text("SAFETY"), systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
         case .active(let name):
-            Label(name, systemImage: "fan.fill")
+            Label(language.text(name), systemImage: "fan.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
         case .idle:
-            Label("Idle", systemImage: "fan")
+            Label(language.text("Idle"), systemImage: "fan")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -215,11 +230,12 @@ struct MenuBarView: View {
 /// Banner shown when a hold was set from the CLI. Explains what's pinned and how
 /// to release it without needing to know any terminal commands.
 private struct ExternalHoldBanner: View {
+    @EnvironmentObject var language: AppLanguageStore
     let hold: DaemonHoldState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Fans held from Terminal", systemImage: "terminal.fill")
+            Label(language.text("Fans held from Terminal"), systemImage: "terminal.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.orange)
 
@@ -228,7 +244,7 @@ private struct ExternalHoldBanner: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Press Default below (or pick a profile) to release.")
+            Text(language.text("Press Default below (or pick a profile) to release."))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -246,13 +262,13 @@ private struct ExternalHoldBanner: View {
         // RPM shown in the fan rows is the actual tach, which hovers ~1% around it. Exact
         // wording ("pinned to 3500") next to a row reading 3488/3512 looks like a bug.
         case "max":
-            return "Fans are held at maximum. The app won't adjust them until you take over."
+            return language.text("Fans are held at maximum. The app won't adjust them until you take over.")
         case "set" where parts.count > 1:
-            return "Fans are held at about \(parts[1]) RPM. The app won't adjust them until you take over."
+            return language.text("Fans are held at about {rpm} RPM. The app won't adjust them until you take over.", ["rpm": parts[1]])
         case "setfan" where parts.count > 2:
-            return "Fan \(parts[1]) is held at about \(parts[2]) RPM. The app won't adjust fans until you take over."
+            return language.text("Fan {fan} is held at about {rpm} RPM. The app won't adjust fans until you take over.", ["fan": parts[1], "rpm": parts[2]])
         default:
-            return "Fans are held manually. The app won't adjust them until you take over."
+            return language.text("Fans are held manually. The app won't adjust them until you take over.")
         }
     }
 }
@@ -260,20 +276,21 @@ private struct ExternalHoldBanner: View {
 /// Non-modal in-menu banner telling the user the background daemon is out of
 /// sync and exactly how to fix it. Command is selectable so it can be copied.
 private struct DaemonUpdateBanner: View {
+    @EnvironmentObject var language: AppLanguageStore
     let daemonVersion: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Update needed", systemImage: "exclamationmark.triangle.fill")
+            Label(language.text("Update needed"), systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.orange)
 
-            Text("The background service is running \(daemonVersion), but the app is \(ThermalForgeVersion.current). Fan control may not match what you set until they're re-synced.")
+            Text(language.text("The background service is running {daemonVersion}, but the app is {appVersion}. Fan control may not match what you set until they're re-synced.", ["daemonVersion": daemonVersion, "appVersion": ThermalForgeVersion.current]))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Run this in Terminal:")
+            Text(language.text("Run this in Terminal:"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
@@ -299,21 +316,22 @@ private struct DaemonUpdateBanner: View {
 /// shipped and how to get it — the app can't run `brew upgrade` for them. Dismissible
 /// per-version via "Later".
 private struct UpdateAvailableBanner: View {
+    @EnvironmentObject var language: AppLanguageStore
     let update: AvailableUpdate
     let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Update available", systemImage: "arrow.down.circle.fill")
+            Label(language.text("Update available"), systemImage: "arrow.down.circle.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.blue)
 
-            Text("ThermalForge \(update.version) is available. You have \(ThermalForgeVersion.current).")
+            Text(language.text("ThermalForge {version} is available. You have {appVersion}.", ["version": update.version, "appVersion": ThermalForgeVersion.current]))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Update with:")
+            Text(language.text("Update with:"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
@@ -327,18 +345,18 @@ private struct UpdateAvailableBanner: View {
                 .padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.15)))
 
-            Text("Built from source? Run  git pull && ./setup.sh")
+            Text(language.text("Built from source? Run  git pull && ./setup.sh"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack {
                 if let url = URL(string: update.url) {
-                    Link("What's new", destination: url)
+                    Link(language.text("What's new"), destination: url)
                         .font(.caption2)
                 }
                 Spacer()
-                Button("Later", action: onDismiss)
+                Button(language.text("Later"), action: onDismiss)
                     .buttonStyle(.plain)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -357,21 +375,22 @@ private struct UpdateAvailableBanner: View {
 /// prompt). The daemon's KeepAlive usually restarts it on its own, so this is the
 /// manual nudge for the rare stuck case; it never asks the user to reinstall.
 private struct DaemonDownBanner: View {
+    @EnvironmentObject var language: AppLanguageStore
     let onRestart: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Fan control unavailable", systemImage: "exclamationmark.octagon.fill")
+            Label(language.text("Fan control unavailable"), systemImage: "exclamationmark.octagon.fill")
                 .font(.caption.bold())
                 .foregroundStyle(.red)
 
-            Text("The background service isn't responding, so profiles and Default can't change the fans right now.")
+            Text(language.text("The background service isn't responding, so profiles and Default can't change the fans right now."))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Button(action: onRestart) {
-                Label("Restart daemon", systemImage: "arrow.clockwise")
+                Label(language.text("Restart daemon"), systemImage: "arrow.clockwise")
                     .font(.caption.bold())
                     .frame(maxWidth: .infinity)
             }
@@ -379,7 +398,7 @@ private struct DaemonDownBanner: View {
             .tint(.red)
             .padding(.top, 2)
 
-            Text("Asks for your password once. If it doesn't come back right away, it will keep retrying on its own.")
+            Text(language.text("Asks for your password once. If it doesn't come back right away, it will keep retrying on its own."))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

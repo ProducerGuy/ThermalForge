@@ -7,6 +7,7 @@
 
 import SwiftUI
 import ThermalForgeCore
+import ThermalForgeLocalization
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -41,11 +42,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct ThermalForgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var appState = AppState()
+    @StateObject private var language = AppLanguageStore()
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(appState)
+                .environmentObject(language)
         } label: {
             MenuBarLabel(
                 state: appState.monitorState,
@@ -53,6 +56,7 @@ struct ThermalForgeApp: App {
                 fahrenheit: appState.useFahrenheit,
                 needsDaemonUpdate: appState.daemonVersionMismatch != nil
             )
+            .environmentObject(language)
         }
         .menuBarExtraStyle(.window)
     }
@@ -61,6 +65,7 @@ struct ThermalForgeApp: App {
 // MARK: - Menu Bar Label
 
 struct MenuBarLabel: View {
+    @EnvironmentObject var language: AppLanguageStore
     let state: MonitorState
     let maxTemp: Float?
     var fahrenheit: Bool = false
@@ -85,6 +90,16 @@ struct MenuBarLabel: View {
                     .font(.system(.caption, design: .monospaced))
             }
         }
+        .help(language.text("ThermalForge: {reading}", ["reading": accessibleReading]))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("ThermalForge")
+        .accessibilityValue(accessibleReading)
+    }
+
+    private var accessibleReading: String {
+        guard let tempC = maxTemp else { return language.text("Temperature unavailable") }
+        let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
+        return "\(Int(display))°\(fahrenheit ? "F" : "C")"
     }
 
     private var iconName: String {
