@@ -31,7 +31,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ThermalForgeTests",
-            dependencies: ["ThermalForgeCore"],
+            dependencies: ["ThermalForgeCore", "ThermalForgeApp"],
             path: "Tests/ThermalForgeTests"
         ),
     ]
