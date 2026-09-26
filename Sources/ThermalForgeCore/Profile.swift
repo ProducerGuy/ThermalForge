@@ -243,15 +243,15 @@ extension FanProfile {
             .appendingPathComponent("Library/Application Support/ThermalForge/profiles")
     }
 
-    public func save() throws {
-        let dir = Self.profilesDirectory
+    public func save(to directory: URL? = nil) throws {
+        let dir = directory ?? Self.profilesDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(self)
         try data.write(to: dir.appendingPathComponent("\(id).json"))
     }
 
-    public static func loadAll() -> [FanProfile] {
-        let dir = profilesDirectory
+    public static func loadAll(from directory: URL? = nil) -> [FanProfile] {
+        let dir = directory ?? profilesDirectory
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil
         ) else {
