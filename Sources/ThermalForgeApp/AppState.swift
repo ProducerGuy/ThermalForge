@@ -13,6 +13,12 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
     @Published var activeProfile: FanProfile = .silent
+    /// Profiles offered in the menu bar picker: the built-ins plus any custom profiles in
+    /// `~/Library/Application Support/ThermalForge/profiles` (a custom file replaces the
+    /// built-in of the same id). Read once at launch and never reloaded — the picker is
+    /// rebuilt on every status update, so it must not touch the filesystem. Adding or
+    /// editing a profile file needs a relaunch to show up.
+    let availableProfiles: [FanProfile] = FanProfile.loadAll()
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
@@ -454,9 +460,12 @@ final class AppState: ObservableObject {
     }
 
     /// The profile to restore at launch: the persisted choice resolved against the known
-    /// profiles, or Silent when nothing is saved or the id no longer exists.
+    /// profiles, or Silent when nothing is saved or the id no longer exists. Resolves
+    /// against `availableProfiles` so a custom profile comes back too; Smart is appended
+    /// because it's surfaced by its own button rather than the picker.
     private func restoredProfile() -> FanProfile {
-        FanProfile.selectable(id: UserDefaults.standard.string(forKey: Self.selectedProfileKey))
+        FanProfile.selectable(id: UserDefaults.standard.string(forKey: Self.selectedProfileKey),
+                              from: availableProfiles + [.smart])
     }
 
     // MARK: - Daemon recovery

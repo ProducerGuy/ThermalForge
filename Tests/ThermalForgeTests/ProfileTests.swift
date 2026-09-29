@@ -96,8 +96,18 @@ struct ProfileTests {
         #expect(smartDecoded == FanProfile.smart)
     }
 
+    /// A throwaway profiles directory. Tests never touch the real one — a user with a
+    /// hand-written balanced.json would otherwise have it overwritten by `swift test`.
+    private static func scratchDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ThermalForgeTests-\(UUID().uuidString)")
+    }
+
     @Test("Custom profile saves and loads")
     func saveLoad() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
         let custom = FanProfile(
             id: "test_custom",
             name: "Test Custom",
@@ -106,9 +116,9 @@ struct ProfileTests {
                                     rampUpPerSec: 0.08, sustainedTriggerSec: 3)
         )
 
-        try custom.save()
+        try custom.save(to: dir)
 
-        let loaded = FanProfile.loadAll()
+        let loaded = FanProfile.loadAll(from: dir)
         let found = loaded.first { $0.id == "test_custom" }
         #expect(found != nil)
         #expect(found?.curve.startTemp == 55)
@@ -116,11 +126,43 @@ struct ProfileTests {
         #expect(found?.curve.curveShape == .easeOut)
         #expect(found?.curve.rampUpPerSec == 0.08)
         #expect(found?.curve.sustainedTriggerSec == 3)
+    }
 
-        // Clean up
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles/test_custom.json")
-        try? FileManager.default.removeItem(at: path)
+    @Test("A missing profiles directory yields the built-ins")
+    func loadAllWithNoDirectory() {
+        #expect(FanProfile.loadAll(from: Self.scratchDirectory()) == FanProfile.builtIn)
+    }
+
+    @Test("A custom profile sorts by loudness, not onto the end of the list")
+    func customProfilesSortByCeiling() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // A 45% cap is quieter than Balanced's 60%, so it belongs between Silent and
+        // Balanced. Appending would put it after Max, reading as the most aggressive entry.
+        try FanProfile(
+            id: "test_low_cap", name: "Test Low Cap",
+            curve: FanProfile.Curve(startTemp: 62, ceilingTemp: 85, maxRPMPercent: 0.45,
+                                    curveShape: .easeIn)
+        ).save(to: dir)
+
+        #expect(FanProfile.loadAll(from: dir).map(\.id)
+            == ["silent", "test_low_cap", "balanced", "performance", "max"])
+    }
+
+    @Test("Ordering leaves the built-in list exactly as shipped")
+    func builtInOrderUnchanged() {
+        #expect(FanProfile.orderedByCeiling(FanProfile.builtIn) == FanProfile.builtIn)
+    }
+
+    @Test("Profiles sharing a cap keep insertion order, so a built-in stays ahead")
+    func equalCeilingsKeepInsertionOrder() {
+        let sameAsBalanced = FanProfile(
+            id: "test_tie", name: "Test Tie",
+            curve: FanProfile.Curve(startTemp: 58, ceilingTemp: 72, maxRPMPercent: 0.60)
+        )
+        let ordered = FanProfile.orderedByCeiling(FanProfile.builtIn + [sameAsBalanced])
+        #expect(ordered.map(\.id) == ["silent", "balanced", "test_tie", "performance", "max"])
     }
 
     @Test("Safety threshold is 95°C")
@@ -303,5 +345,150 @@ struct ProfileTests {
         #expect(FanProfile.performance.curve.sustainedTriggerSec == 4)  // Responsive
         #expect(FanProfile.max.curve.sustainedTriggerSec == 5)          // Attack dog threshold
         #expect(FanProfile.smart.curve.sustainedTriggerSec == 6)        // Proactive
+    }
+
+    // MARK: - Curve Validation
+
+    @Test("Every profile offered in the picker passes the validation applied to loaded ones")
+    func builtInProfilesValidate() {
+        // Smart is excluded deliberately: its 3°C band is under the project's 5°C rule, and
+        // it never goes through this path because `smart` is a reserved id on disk.
+        for profile in FanProfile.builtIn {
+            #expect(profile.curve.validationError == nil,
+                    "\(profile.id): \(profile.curve.validationError ?? "")")
+        }
+    }
+
+    @Test("Nonsensical curves are rejected")
+    func invalidCurvesAreRejected() {
+        // Start at or below stop: the hysteresis band is empty or inverted.
+        #expect(FanProfile.Curve(stopTemp: 60, startTemp: 55).validationError != nil)
+        #expect(FanProfile.Curve(stopTemp: 55, startTemp: 55).validationError != nil)
+        // Ceiling below start: the proportional zone runs backwards.
+        #expect(FanProfile.Curve(startTemp: 70, ceilingTemp: 60).validationError != nil)
+        // Ceiling equal to start without instantEngage: the curve collapses to a step.
+        #expect(FanProfile.Curve(startTemp: 65, ceilingTemp: 65).validationError != nil)
+        // Speeds and rates outside their ranges.
+        #expect(FanProfile.Curve(maxRPMPercent: 0).validationError != nil)
+        #expect(FanProfile.Curve(maxRPMPercent: 1.5).validationError != nil)
+        #expect(FanProfile.Curve(rampUpPerSec: 0).validationError != nil)
+        #expect(FanProfile.Curve(sustainedTriggerSec: 400).validationError != nil)
+        #expect(FanProfile.Curve(sustainedTriggerSec: -1).validationError != nil)
+        // Engaging above the safety threshold would never fire before the override does.
+        #expect(FanProfile.Curve(startTemp: 97, ceilingTemp: 99).validationError != nil)
+        // A ceiling past the override is unreachable.
+        #expect(FanProfile.Curve(startTemp: 60, ceilingTemp: 120).validationError != nil)
+        // alwaysOn never hands the fans back to auto.
+        #expect(FanProfile.Curve(alwaysOn: true).validationError != nil)
+
+        // Max's ceiling == start is allowed: instant engage has no proportional zone.
+        #expect(FanProfile.Curve(stopTemp: 50, startTemp: 65, ceilingTemp: 65,
+                                 maxRPMPercent: 1.0, instantEngage: true).validationError == nil)
+        // handsOff short-circuits: Silent controls nothing, so its thresholds are inert.
+        #expect(FanProfile.Curve(stopTemp: 99, startTemp: 1, handsOff: true)
+            .validationError == nil)
+    }
+
+    @Test("Validation boundaries are inclusive where the message says they are")
+    func validationBoundaries() {
+        // Exactly the project's 5°C hysteresis band: allowed.
+        #expect(FanProfile.Curve(stopTemp: 50, startTemp: 55).validationError == nil)
+        // A whisker under it: rejected.
+        #expect(FanProfile.Curve(stopTemp: 50, startTemp: 54.9).validationError != nil)
+        // Exactly the safety threshold: startTemp rejected, ceilingTemp allowed.
+        #expect(FanProfile.Curve(startTemp: 95, ceilingTemp: 99).validationError != nil)
+        #expect(FanProfile.Curve(startTemp: 88, ceilingTemp: 95).validationError == nil)
+        // Full speed and the trigger ceiling are both legal.
+        #expect(FanProfile.Curve(maxRPMPercent: 1.0).validationError == nil)
+        #expect(FanProfile.Curve(sustainedTriggerSec: 300).validationError == nil)
+        #expect(FanProfile.Curve(sustainedTriggerSec: 301).validationError != nil)
+    }
+
+    @Test("A malformed profile file is skipped, leaving the built-in in place")
+    func malformedProfileIsSkipped() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // ceilingTemp below startTemp — the fan would never reach its cap.
+        try FanProfile(
+            id: "performance",
+            name: "Performance",
+            curve: FanProfile.Curve(stopTemp: 50, startTemp: 80, ceilingTemp: 60)
+        ).save(to: dir)
+
+        let performance = FanProfile.loadAll(from: dir).first { $0.id == "performance" }
+        #expect(performance?.curve.startTemp == 55)   // shipped value, not the broken 80
+        #expect(performance?.curve.ceilingTemp == 65)
+    }
+
+    @Test("Undecodable JSON is skipped without taking the rest of the directory with it")
+    func undecodableFileIsSkipped() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let good = FanProfile(id: "test_good", name: "Good",
+                              curve: FanProfile.Curve(startTemp: 62, ceilingTemp: 85,
+                                                      maxRPMPercent: 0.45))
+        try good.save(to: dir)
+        // Partial JSON: Curve's properties are non-optional, so this cannot decode.
+        try Data(#"{"id":"test_partial","name":"Partial","curve":{"startTemp":62}}"#.utf8)
+            .write(to: dir.appendingPathComponent("test_partial.json"))
+
+        let loaded = FanProfile.loadAll(from: dir)
+        #expect(loaded.contains { $0.id == "test_good" })
+        #expect(!loaded.contains { $0.id == "test_partial" })
+    }
+
+    @Test("A file claiming the reserved smart id is rejected, not offered alongside Smart")
+    func reservedIDIsRejected() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // ThermalMonitor dispatches "smart" to its own adaptive path, which reads almost
+        // none of this curve — offering it would be a profile that silently doesn't apply.
+        try FanProfile(id: "smart", name: "My Smart",
+                       curve: FanProfile.Curve(startTemp: 70, ceilingTemp: 90,
+                                               maxRPMPercent: 0.5)).save(to: dir)
+
+        let loaded = FanProfile.loadAll(from: dir)
+        #expect(!loaded.contains { $0.id == "smart" })
+    }
+
+    // MARK: - Custom Profile Discovery
+
+    @Test("selectable(id:from:) restores a custom profile the user had selected")
+    func selectableFromCustomList() {
+        let custom = FanProfile(
+            id: "test_custom_profile",
+            name: "Test Custom Profile",
+            curve: FanProfile.Curve(startTemp: 62, ceilingTemp: 85, maxRPMPercent: 0.45)
+        )
+        let available = FanProfile.builtIn + [.smart, custom]
+
+        #expect(FanProfile.selectable(id: "test_custom_profile", from: available).id == "test_custom_profile")
+        #expect(FanProfile.selectable(id: "smart", from: available).id == "smart")
+        // An id that vanished (profile deleted between launches) falls back to Silent.
+        #expect(FanProfile.selectable(id: "test_custom_profile", from: FanProfile.builtIn).id == "silent")
+        #expect(FanProfile.selectable(id: nil, from: available).id == "silent")
+    }
+
+    @Test("A custom profile overrides a built-in with the same id")
+    func customOverridesBuiltIn() throws {
+        let dir = Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try FanProfile(
+            id: "balanced",
+            name: "Balanced",
+            curve: FanProfile.Curve(startTemp: 62, ceilingTemp: 85, maxRPMPercent: 0.45,
+                                    curveShape: .easeIn)
+        ).save(to: dir)
+
+        let loaded = FanProfile.loadAll(from: dir)
+        // Still exactly one "balanced" — the custom file replaces it, not appends.
+        #expect(loaded.filter { $0.id == "balanced" }.count == 1)
+        let balanced = loaded.first { $0.id == "balanced" }
+        #expect(balanced?.curve.startTemp == 62)
+        #expect(balanced?.curve.maxRPMPercent == 0.45)
     }
 }
