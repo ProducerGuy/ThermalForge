@@ -231,7 +231,7 @@ extension FanProfile {
     /// profile removed or renamed in a later version), so a stale saved id never crashes.
     public static func selectable(id: String?) -> FanProfile {
         guard let id else { return .silent }
-        return (builtIn + [smart]).first { $0.id == id } ?? .silent
+        return (builtIn + [loadSmart()]).first { $0.id == id } ?? .silent
     }
 }
 
@@ -248,6 +248,28 @@ extension FanProfile {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(self)
         try data.write(to: dir.appendingPathComponent("\(id).json"))
+    }
+
+    /// Smart with optional overrides from `smart.json` (any subset of the curve's keys).
+    /// A missing, malformed, or unsafe file yields the built-in Smart.
+    public static func loadSmart(from url: URL? = nil) -> FanProfile {
+        let url = url ?? profilesDirectory.deletingLastPathComponent().appendingPathComponent("smart.json")
+        guard let data = try? Data(contentsOf: url) else { return smart }
+        guard let overrides = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let defaults = try? JSONSerialization.jsonObject(
+                  with: JSONEncoder().encode(smart.curve)) as? [String: Any],
+              let merged = try? JSONSerialization.data(
+                  withJSONObject: defaults.merging(overrides) { $1 }),
+              let c = try? JSONDecoder().decode(Curve.self, from: merged),
+              c.stopTemp >= 20, c.stopTemp < c.startTemp, c.startTemp < c.ceilingTemp,
+              c.ceilingTemp < safetyTempThreshold, (0.1...1).contains(c.maxRPMPercent),
+              c.rampUpPerSec > 0, c.rampDownPerSec > 0, (0...300).contains(c.sustainedTriggerSec),
+              !c.handsOff, !c.alwaysOn, !c.instantEngage
+        else {
+            TFLogger.shared.error("smart.json ignored (malformed or out-of-range values) — using Smart defaults")
+            return smart
+        }
+        return FanProfile(id: smart.id, name: smart.name, curve: c)
     }
 
     public static func loadAll() -> [FanProfile] {

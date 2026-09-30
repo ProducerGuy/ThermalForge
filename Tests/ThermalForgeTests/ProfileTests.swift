@@ -27,6 +27,33 @@ struct ProfileTests {
         #expect(FanProfile.selectable(id: nil).id == "silent")
     }
 
+    // MARK: - smart.json overrides
+
+    @Test("smart.json overrides the given keys; missing or invalid files keep the defaults")
+    func smartConfig() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("smart-\(UUID()).json")
+        #expect(FanProfile.loadSmart(from: url) == .smart)  // no file
+
+        func load(_ json: String) throws -> FanProfile {
+            try Data(json.utf8).write(to: url)
+            return FanProfile.loadSmart(from: url)
+        }
+        let custom = try load(#"{ "startTemp": 60, "maxRPMPercent": 0.7, "curveShape": "linear" }"#)
+        #expect(custom.id == "smart")
+        #expect(custom.curve.startTemp == 60)
+        #expect(custom.curve.maxRPMPercent == 0.7)
+        #expect(custom.curve.curveShape == .linear)
+        #expect(custom.curve.ceilingTemp == 85)
+        #expect(custom.curve.rampDownPerSec == FanProfile.smart.curve.rampDownPerSec)
+
+        #expect(try load("{}") == .smart)
+        for bad in ["{ not json", #"{ "startTemp": 40 }"#, #"{ "ceilingTemp": 96 }"#,
+                    #"{ "maxRPMPercent": 0 }"#, #"{ "rampUpPerSec": 0 }"#,
+                    #"{ "sustainedTriggerSec": 1e30 }"#, #"{ "handsOff": true }"#] {
+            #expect(try load(bad) == .smart)
+        }
+    }
+
     // MARK: - Built-in Profile Parameters
 
     @Test("Built-in profiles have correct curve parameters")

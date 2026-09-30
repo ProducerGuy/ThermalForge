@@ -291,12 +291,12 @@ public final class ThermalMonitor {
     // MARK: - Smart Profile
 
     /// Target temperature ceiling — keep below this to avoid any throttling
-    private static let smartCeiling: Float = 85.0
+    private var smartCeiling: Float { activeProfile.curve.ceilingTemp }
     /// Smart starts earlier than other profiles to get ahead of rising temps
-    private static let smartFloor: Float = 53.0
+    private var smartFloor: Float { activeProfile.curve.startTemp }
 
     /// All profiles share the same off threshold — 50°C matches Apple's observed stop range
-    private static let smartStopTemp: Float = 50.0
+    private var smartStopTemp: Float { activeProfile.curve.stopTemp }
 
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
         // Sample temperature history at monitor cadence (2s) for stable rate-of-change
@@ -310,22 +310,22 @@ public final class ThermalMonitor {
         let minPct = minRPM / maxRPM
 
         // Below stop threshold and fans running: turn off (with hysteresis)
-        if peakTemp < Self.smartStopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
+        if peakTemp < smartStopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
             applyCommand(.resetAuto)
             lastAppliedRPMPercent = 0
             fansCurrentlyRunning = false
             state = .idle
-            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(Self.smartStopTemp))°C")
+            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(smartStopTemp))°C")
             return
         }
 
         // Below floor and fans not running: stay off
-        if peakTemp < Self.smartFloor && !fansCurrentlyRunning {
+        if peakTemp < smartFloor && !fansCurrentlyRunning {
             return
         }
 
         // In hysteresis band (50-53°C): maintain current state
-        if peakTemp >= Self.smartStopTemp && peakTemp < Self.smartFloor && !fansCurrentlyRunning {
+        if peakTemp >= smartStopTemp && peakTemp < smartFloor && !fansCurrentlyRunning {
             return
         }
 
@@ -347,26 +347,25 @@ public final class ThermalMonitor {
 
             if rate > 0 {
                 // Rising: boost proportionally to rate and proximity to ceiling
-                let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
+                let urgency = min(max((peakTemp - smartFloor) / (smartCeiling - smartFloor), 0), 1)
                 targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
             }
         } else {
             // Uncalibrated: S-curve (matches profile curveShape)
-            let range = Self.smartCeiling - Self.smartFloor
-            let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
-            targetPct = position * position * (3 - 2 * position)
+            targetPct = peakTemp < smartFloor ? 0
+                : activeProfile.curve.targetPercent(at: peakTemp, fansCurrentlyRunning: true) ?? 0
 
             if rate > 0 {
                 targetPct = min(targetPct + rate * 0.2, 1.0)
             }
         }
 
-        if peakTemp > Self.smartCeiling {
+        if peakTemp > smartCeiling {
             targetPct = 1.0
         }
 
         // Clamp to valid range, enforce minimum RPM
-        targetPct = min(max(targetPct, 0), 1.0)
+        targetPct = min(max(targetPct, 0), activeProfile.curve.maxRPMPercent)
         if targetPct > 0 && targetPct < minPct {
             targetPct = minPct
         }
