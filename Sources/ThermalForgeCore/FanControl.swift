@@ -45,6 +45,15 @@ public struct ThermalStatus: Encodable {
     public let fans: [FanStatus]
     public let temperatures: [String: Float]
 
+    /// The hottest of ALL reported sensors (vs. the CPU+GPU safety peak).
+    /// The power-protection decision uses this conservative peak, matching the
+    /// v1 script: sensors that don't exist on a machine simply aren't in the
+    /// dict, so this is the max over whatever this hardware exposes. Nil when
+    /// no sensor could be read.
+    public var maxSensorTemperature: Float? {
+        temperatures.values.max()
+    }
+
     public struct FanStatus: Encodable {
         public let index: Int
         public let actualRPM: Int

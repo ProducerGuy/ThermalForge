@@ -112,6 +112,14 @@ public final class ThermalMonitor {
     /// Called when a fan command needs to be executed (may require privilege)
     public var onFanCommand: ((FanCommand) throws -> Void)?
 
+    /// Called on EVERY thermal tick (100 ms) with the full status. The app
+    /// uses this to drive the power-mode protection controller. Runs on the
+    /// monitor's internal queue — keep the closure cheap (no UI work, no I/O).
+    public var onTick: ((ThermalStatus) -> Void)?
+    /// Called on the monitor cadence (every 2 s), right after the heavy
+    /// monitor-tick work. Slot for slower app-side jobs (power-mode re-read).
+    public var onMonitorTick: (() -> Void)?
+
     public init(fanControl: FanControl, profile: FanProfile = .silent) {
         self.fanControl = fanControl
         self.activeProfile = profile
@@ -168,6 +176,10 @@ public final class ThermalMonitor {
         guard let status = try? fanControl.status() else { return }
         latestStatus = status
 
+        // Power-protection decision every 100 ms — the closure hands the status
+        // to the controller's own queue; the monitor never blocks on it.
+        onTick?(status)
+
         // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
         // so the client monitor and the daemon's floor read the identical value.
         let maxTemp = status.safetyPeakTemp
@@ -175,6 +187,7 @@ public final class ThermalMonitor {
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
         if tickCounter % Self.monitorCadence == 0 {
             monitorTick(status: status, maxTemp: maxTemp)
+            onMonitorTick?()
         }
 
         // Safety override: any sensor > 95°C
