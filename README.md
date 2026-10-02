@@ -202,7 +202,12 @@ Set fans from the terminal and the menu bar app shows a **"Fans held from Termin
 
 ## Compatibility
 
-Tested on MacBook Pro M5 Max (Mac17,7). Should work on M1–M5 MacBooks.
+Supports Apple Silicon Macs.
+
+Supported devices: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.
+
+Chips: M1, M2, M3, M4, M5, M6.
+
 Run `thermalforge discover` on your machine and [submit a compatibility report](../../issues/new?template=compatibility-report.md).
 
 | Machine | Chip | Status |
