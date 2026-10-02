@@ -2,7 +2,7 @@
 //  ThermalForge.swift
 //  ThermalForge
 //
-//  CLI entry point — fan control for Apple Silicon MacBooks.
+//  CLI entry point. Fan control for Apple Silicon Macs: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.
 //
 
 import ArgumentParser
