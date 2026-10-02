@@ -215,6 +215,8 @@ Run `thermalforge discover` on your machine and [submit a compatibility report](
 | MacBook Pro 16" (2025) | M5 Max | Tested |
 | Mac Studio (2022) | M2 Ultra | Tested |
 | MacBook Pro 16" (2021) | M1 Max | Tested |
+| Mac mini | M5 Pro | Tested |
+| Mac mini | M6 | Tested |
 | MacBook Pro 16" M5 Pro (Mac17,8) | M5 Pro | Reported |
 | MacBook Pro 14" M5 Pro (Mac17,9) | M5 Pro | Reported |
 | MacBook Pro M4 Max (Mac16,5) | M4 Max | Reported |
