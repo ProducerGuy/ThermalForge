@@ -2,7 +2,7 @@
 //  ThermalForgeApp.swift
 //  ThermalForge
 //
-//  Menu bar app for fan control on Apple Silicon MacBooks.
+//  Menu bar app for fan control on Apple Silicon Macs: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.
 //
 
 import SwiftUI
