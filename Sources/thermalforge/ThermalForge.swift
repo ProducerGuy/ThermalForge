@@ -13,7 +13,7 @@ import ThermalForgeCore
 struct ThermalForge: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "thermalforge",
-        abstract: "Fan control for Apple Silicon MacBooks",
+        abstract: "Fan control for Apple Silicon Macs: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac",
         version: ThermalForgeVersion.current,
         subcommands: [
             Max.self,
