@@ -7,7 +7,7 @@ Built in 2026 with Swift. No subscriptions, no telemetry, no ads.
 [![CI](https://github.com/ProducerGuy/ThermalForge/actions/workflows/ci.yml/badge.svg)](https://github.com/ProducerGuy/ThermalForge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
-[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%E2%80%93M5-orange)](https://support.apple.com/en-us/116943)
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%2C%20M2%2C%20M3%2C%20M4%2C%20M5%2C%20M6-orange)](https://support.apple.com/en-us/116943)
 
 ---
 
