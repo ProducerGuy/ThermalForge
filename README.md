@@ -1,8 +1,10 @@
 # ThermalForge
 
-**Free, open-source fan control for Apple Silicon Macs.** Menu bar app + CLI.
+**Free Apple fan control, open source, for Apple Silicon Macs (M1, M2, M3, M4, M5, M6): Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.** Menu bar app + CLI.
 
 Built in 2026 with Swift. No subscriptions, no telemetry, no ads.
+
+ThermalForge by [Producer Guy](https://github.com/ProducerGuy)
 
 [![CI](https://github.com/ProducerGuy/ThermalForge/actions/workflows/ci.yml/badge.svg)](https://github.com/ProducerGuy/ThermalForge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
