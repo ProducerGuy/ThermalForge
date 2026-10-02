@@ -5,7 +5,9 @@ title: "[Compat] Mac __ M__"
 labels: compatibility
 ---
 
-**Machine:** MacBook Pro M__ (year)
+**Machine:** (Mac mini, MacBook, MacBook Pro, Mac Studio, iMac)
+**Chip:** (M1, M2, M3, M4, M5, M6, plus Pro, Max, or Ultra if applicable)
+**Year:**
 **macOS version:**
 **thermalforge version:**
 
