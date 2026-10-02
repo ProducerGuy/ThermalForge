@@ -206,7 +206,7 @@ Supports Apple Silicon Macs.
 
 Supported devices: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.
 
-Chips: M1, M2, M3, M4, M5, M6.
+Supported chips: M1, M2, M3, M4, M5, M6.
 
 Run `thermalforge discover` on your machine and [submit a compatibility report](../../issues/new?template=compatibility-report.md).
 
