@@ -71,3 +71,103 @@ public struct ThermalFloor {
         return .engage
     }
 }
+
+// MARK: - Peer authentication
+
+/// A connected peer's effective uid/gid, as the kernel recorded them at connect().
+struct PeerCredentials: Equatable {
+    let uid: uid_t
+    let gid: gid_t
+}
+
+/// Why a peer's credentials couldn't be read. Any such failure is a rejection.
+struct PeerCredentialError: Error, Equatable {
+    let errno: Int32
+}
+
+/// The per-connection peer check's verdict. Only `.allow` gets a handler.
+enum PeerDecision: Equatable {
+    case allow(PeerCredentials)
+    case reject(PeerCredentials)
+    case unavailable(errno: Int32)
+}
+
+/// What ConnectionServer needs from a peer check: a verdict per accepted fd, and the
+/// allowed set for the rejection log. Injected so tests can supply a fake.
+protocol PeerAuthorizing {
+    func decide(fd: Int32) -> PeerDecision
+    var allowedDescription: String { get }
+}
+
+/// Second layer behind the socket's 0600 permissions: only root and the daemon's
+/// owner may talk to it. Credentials come from getpeereid(), which reads the
+/// LOCAL_PEERCRED copy the kernel took at connect() — still valid after the peer
+/// exits, so the check can't race the peer going away.
+struct PeerAuthorizer: PeerAuthorizing {
+    let ownerUID: uid_t
+    private let credentials: (Int32) -> Result<PeerCredentials, PeerCredentialError>
+
+    init(ownerUID: uid_t,
+         credentials: @escaping (Int32) -> Result<PeerCredentials, PeerCredentialError> = PeerAuthorizer.kernelCredentials) {
+        self.ownerUID = ownerUID
+        self.credentials = credentials
+    }
+
+    /// True only for root and the owner.
+    static func allows(uid: uid_t, ownerUID: uid_t) -> Bool {
+        uid == 0 || uid == ownerUID
+    }
+
+    func decide(fd: Int32) -> PeerDecision {
+        switch credentials(fd) {
+        case .success(let peer):
+            return Self.allows(uid: peer.uid, ownerUID: ownerUID) ? .allow(peer) : .reject(peer)
+        case .failure(let error):
+            return .unavailable(errno: error.errno)
+        }
+    }
+
+    var allowedDescription: String { "uid 0, owner uid \(ownerUID)" }
+
+    static func kernelCredentials(_ fd: Int32) -> Result<PeerCredentials, PeerCredentialError> {
+        // Start from values that can never pass the policy, so no path defaults to root.
+        var uid = uid_t.max
+        var gid = gid_t.max
+        guard getpeereid(fd, &uid, &gid) == 0 else {
+            return .failure(PeerCredentialError(errno: errno))
+        }
+        return .success(PeerCredentials(uid: uid, gid: gid))
+    }
+}
+
+/// Bounds the rejection log so a hostile local process can't flood the system log:
+/// a burst of 5 lines, then one per minute. Suppressed rejections are counted; the
+/// count rides on the next line that gets through, or on the summary the caller
+/// emits from its one-shot timer (`flush`). The clock is injected for tests.
+struct RejectionLogLimiter {
+    private var limiter: RateLimiter
+    private(set) var suppressed = 0
+
+    init(now: Date) {
+        limiter = RateLimiter(capacity: 5, refillPerSecond: 1.0 / 60, now: now)
+    }
+
+    /// The line to log for this rejection, or nil when it's suppressed.
+    mutating func record(_ message: String, now: Date) -> String? {
+        guard limiter.allow(now: now) else {
+            suppressed += 1
+            return nil
+        }
+        defer { suppressed = 0 }
+        return suppressed > 0
+            ? "\(message) (\(suppressed) earlier rejections suppressed)"
+            : message
+    }
+
+    /// Summary of rejections suppressed since the last line, or nil if none.
+    mutating func flush() -> String? {
+        guard suppressed > 0 else { return nil }
+        defer { suppressed = 0 }
+        return "ThermalForge daemon: \(suppressed) further peer rejections suppressed"
+    }
+}

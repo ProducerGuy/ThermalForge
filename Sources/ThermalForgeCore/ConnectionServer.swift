@@ -7,7 +7,8 @@
 //  deadline (replacing Phase 0's SO_RCVTIMEO). Decoupled from DaemonServer so it can be
 //  tested against a plain bound AF_UNIX socket — the daemon's request processing is
 //  injected as `handle`. Framing-level replies (legacy peer, oversized) live here; the
-//  verb dispatch does not.
+//  verb dispatch does not. Every accepted fd passes the injected peer check before
+//  anything else happens to it.
 //
 
 import Darwin
@@ -16,6 +17,11 @@ import Foundation
 final class ConnectionServer: @unchecked Sendable {
     private let listenFD: Int32
     private let maxConnections: Int
+    /// Accepts per accept event before returning, so one burst of connects can't hold
+    /// the accept queue in a single handler call. The read source is level-triggered:
+    /// anything still pending fires it again.
+    private let maxAcceptsPerEvent: Int
+    private let authorizer: any PeerAuthorizing
     private let headerDeadline: TimeInterval
     private let requestDeadline: TimeInterval
     /// Processes a decoded request body → response. DaemonServer wraps its call in
@@ -26,14 +32,29 @@ final class ConnectionServer: @unchecked Sendable {
     private var acceptSource: DispatchSourceRead?
     private var activeConnections = 0   // acceptQueue-confined
     private var accepting = true        // acceptQueue-confined
+    private var rejectionLog: RejectionLogLimiter   // acceptQueue-confined
+    private var summaryScheduled = false            // acceptQueue-confined
+    private let summaryDelay: TimeInterval
+    private let log: (String) -> Void
 
+    /// `authorizer` is required, with no allow-all default, so no caller can build an
+    /// unauthenticated server by omission.
     init(listenFD: Int32,
+         authorizer: any PeerAuthorizing,
          maxConnections: Int = 8,
+         maxAcceptsPerEvent: Int = 64,
          headerDeadline: TimeInterval = 1.0,
          requestDeadline: TimeInterval = 5.0,
+         summaryDelay: TimeInterval = 60,
+         log: @escaping (String) -> Void = { NSLog("%@", $0) },
          handle: @escaping (Data) -> DaemonResponse) {
         self.listenFD = listenFD
+        self.authorizer = authorizer
         self.maxConnections = maxConnections
+        self.maxAcceptsPerEvent = maxAcceptsPerEvent
+        self.rejectionLog = RejectionLogLimiter(now: Date())
+        self.summaryDelay = summaryDelay
+        self.log = log
         self.headerDeadline = headerDeadline
         self.requestDeadline = requestDeadline
         self.handle = handle
@@ -42,13 +63,26 @@ final class ConnectionServer: @unchecked Sendable {
     /// Accept via a DispatchSource on the (non-blocking) listen fd, bounded to
     /// maxConnections concurrent handlers. At capacity we suspend accepting; a finishing
     /// connection resumes it — pending connects wait in the listen backlog (queueing).
+    ///
+    /// The peer check runs right after accept, before the fd is counted, made
+    /// non-blocking, or wrapped in DispatchIO. A rejected fd is closed inline: no byte
+    /// is read from it or written to it, it never holds a slot, and connectionFinished
+    /// never runs for it.
     func start() {
         _ = fcntl(listenFD, F_SETFL, fcntl(listenFD, F_GETFL, 0) | O_NONBLOCK)
         let source = DispatchSource.makeReadSource(fileDescriptor: listenFD, queue: acceptQueue)
         source.setEventHandler { [self] in
-            while activeConnections < maxConnections {
+            var accepted = 0
+            while activeConnections < maxConnections, accepted < maxAcceptsPerEvent {
                 let clientFD = accept(listenFD, nil, nil)
                 if clientFD < 0 { break }   // EAGAIN (no more pending) or error
+                accepted += 1
+                let decision = authorizer.decide(fd: clientFD)
+                guard case .allow = decision else {
+                    close(clientFD)
+                    logRejection(decision)
+                    continue
+                }
                 activeConnections += 1
                 handleConnection(clientFD)
             }
@@ -64,6 +98,29 @@ final class ConnectionServer: @unchecked Sendable {
         // establishes the happens-before so the acceptQueue reads see it.
         acceptSource = source
         source.resume()
+    }
+
+    /// Rate-limited (see RejectionLogLimiter). The first suppressed rejection arms a
+    /// one-shot summary so a flood that stops still gets its count logged.
+    private func logRejection(_ decision: PeerDecision) {
+        let message: String
+        switch decision {
+        case .reject(let peer):
+            message = "ThermalForge daemon: rejected peer euid \(peer.uid) egid \(peer.gid) (allowed: \(authorizer.allowedDescription))"
+        case .unavailable(let err):
+            message = "ThermalForge daemon: rejected peer, credentials unavailable: errno \(err) (allowed: \(authorizer.allowedDescription))"
+        case .allow:
+            return
+        }
+        if let line = rejectionLog.record(message, now: Date()) {
+            log(line)
+        } else if !summaryScheduled {
+            summaryScheduled = true
+            acceptQueue.asyncAfter(deadline: .now() + summaryDelay) { [self] in
+                summaryScheduled = false
+                if let summary = rejectionLog.flush() { log(summary) }
+            }
+        }
     }
 
     private func connectionFinished() {

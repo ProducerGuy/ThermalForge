@@ -74,7 +74,7 @@ struct SIGPIPETests {
         let requestArrived = DispatchSemaphore(value: 0)
         let clientClosed = DispatchSemaphore(value: 0)
         let first = NSLock(); var isFirst = true
-        let server = ConnectionServer(listenFD: listenFD) { _ in
+        let server = ConnectionServer(listenFD: listenFD, authorizer: FakeAuthorizer.allowAll()) { _ in
             first.lock(); let park = isFirst; isFirst = false; first.unlock()
             if park {
                 requestArrived.signal()
