@@ -79,6 +79,10 @@ final class ConnectionServer: @unchecked Sendable {
     /// concurrently. The header deadline closes a connect-and-hang fast (freeing its slot
     /// so a queued request isn't starved); the full deadline bounds a slow/partial body.
     private func handleConnection(_ fd: Int32) {
+        // A client that hangs up before its reply is written must cost us an EPIPE,
+        // not a SIGPIPE: the default action would terminate the daemon.
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
         let q = DispatchQueue(label: "com.thermalforge.conn")
         let io = DispatchIO(type: .stream, fileDescriptor: fd, queue: q) { [self] _ in
