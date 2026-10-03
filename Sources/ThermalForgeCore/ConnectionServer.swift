@@ -137,7 +137,8 @@ final class ConnectionServer: @unchecked Sendable {
     /// so a queued request isn't starved); the full deadline bounds a slow/partial body.
     private func handleConnection(_ fd: Int32) {
         // A client that hangs up before its reply is written must cost us an EPIPE,
-        // not a SIGPIPE: the default action would terminate the daemon.
+        // not a SIGPIPE: the default action would terminate the daemon. Any new socket
+        // the daemon writes to must set SO_NOSIGPIPE too.
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)

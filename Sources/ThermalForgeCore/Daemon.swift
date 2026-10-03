@@ -195,7 +195,8 @@ public final class DaemonClient {
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         // A daemon that closes before replying (restart, or a rejected peer) must make
-        // the write fail with EPIPE, not raise SIGPIPE and kill the app or CLI.
+        // the write fail with EPIPE, not raise SIGPIPE and kill the app or CLI. Any new
+        // client socket must set SO_NOSIGPIPE too.
         var noSigPipe: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
