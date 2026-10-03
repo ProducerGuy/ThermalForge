@@ -14,10 +14,12 @@ Where the ~4% goes:
   default.
   Checking this often, and double-checking that every reading is valid before it acts on it,
   is the single biggest cost, and it is the whole reason the app exists.
-- **The rest** is drawing the menu bar display, writing its logs, noting which programs are
-  running when a heat spike happens, and talking to its background helper. Each of these is
-  small. We have put an upper limit on them together (see Experiments 3 to 5) and are not
-  pursuing them individually, because the possible saving is too small to matter.
+- **About a quarter is drawing the menu bar display.** Even with nothing open, the app keeps
+  the menu bar readout current. We measured this in Experiment 1.
+- **The small remainder** is writing its logs, noting which programs are running when a heat
+  spike happens, and talking to its background helper. We have put an upper limit on these
+  together (see Experiments 3 to 5) and are not pursuing them individually, because the
+  possible saving is too small to matter.
 
 Could we make the ~4% smaller? Only by giving something up:
 
@@ -25,9 +27,10 @@ Could we make the ~4% smaller? Only by giving something up:
   carefully, that is, removing the step that confirms every reading is valid before the app
   acts on it, or watching fewer sensors. Both weaken exactly what the app is built to do. We
   are not doing that.
-- **Drawing the menu less often** could save a little, but only a little (at most about a
-  quarter of the total, and realistically less), and it would take a large rewrite of the
-  app's internals for that small gain. Not worth it.
+- **Drawing the menu less often** could save up to about a quarter of the idle CPU, but that
+  is only about one percent of a single core in absolute terms, and a fix that keeps the
+  display working buys less than that. It would take a large rewrite of the app's internals.
+  Not worth it.
 
 Bottom line: the ~4% is mostly the honest cost of the app's core job, watching temperatures
 closely and safely. We are leaving it as is. The rest of this document is the detailed
