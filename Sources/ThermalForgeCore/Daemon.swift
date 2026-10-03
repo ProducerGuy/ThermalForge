@@ -142,7 +142,13 @@ public struct FanApplyResult: Equatable {
 }
 
 public final class DaemonClient {
-    public init() {}
+    private let socketPath: String
+
+    public init() { self.socketPath = ThermalForgeDaemon.socketPath }
+
+    /// Test seam: point the client at a plain bound AF_UNIX socket instead of the
+    /// daemon's. Production callers use `init()`.
+    init(socketPath: String) { self.socketPath = socketPath }
 
     /// Read the daemon's current hold (what's set and who owns it) so the menu
     /// bar app can reflect a CLI hold instead of fighting or wiping it.
@@ -191,7 +197,7 @@ public final class DaemonClient {
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        setPath(&addr, ThermalForgeDaemon.socketPath)
+        setPath(&addr, socketPath)
 
         // connect() must ALSO be bounded, not just read/write. A wedged daemon
         // (accept loop stalled in a slow handleClient, listen backlog full) makes a
