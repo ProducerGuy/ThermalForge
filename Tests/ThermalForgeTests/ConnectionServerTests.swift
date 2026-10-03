@@ -52,8 +52,7 @@ struct ConnectionServerTests {
         let listenFD = bindListener(path)
         defer { close(listenFD); unlink(path) }
 
-        let server = ConnectionServer(listenFD: listenFD, authorizer: FakeAuthorizer.allowAll(),
-                                      maxConnections: 8,
+        let server = ConnectionServer(listenFD: listenFD, maxConnections: 8,
                                       headerDeadline: 1.0, requestDeadline: 5.0) { _ in
             .versionResponse("served")   // prove the request was actually processed
         }
