@@ -142,7 +142,13 @@ public struct FanApplyResult: Equatable {
 }
 
 public final class DaemonClient {
-    public init() {}
+    private let socketPath: String
+
+    public init() { self.socketPath = ThermalForgeDaemon.socketPath }
+
+    /// Test seam: point the client at a plain bound AF_UNIX socket instead of the
+    /// daemon's. Production callers use `init()`.
+    init(socketPath: String) { self.socketPath = socketPath }
 
     /// Read the daemon's current hold (what's set and who owns it) so the menu
     /// bar app can reflect a CLI hold instead of fighting or wiping it.
@@ -188,10 +194,15 @@ public final class DaemonClient {
         var tv = timeval(tv_sec: whole, tv_usec: Int32((timeout - Double(whole)) * 1_000_000))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        // A daemon that closes before replying (restart, or a rejected peer) must make
+        // the write fail with EPIPE, not raise SIGPIPE and kill the app or CLI. Any new
+        // client socket must set SO_NOSIGPIPE too.
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        setPath(&addr, ThermalForgeDaemon.socketPath)
+        setPath(&addr, socketPath)
 
         // connect() must ALSO be bounded, not just read/write. A wedged daemon
         // (accept loop stalled in a slow handleClient, listen backlog full) makes a
@@ -380,7 +391,12 @@ public final class DaemonServer {
         // Accept connections concurrently (bounded) so one hung connection can't stall
         // others, and — the security fix — a slow-reading client can no longer hold
         // smcLock during the response write (processFrame takes it only around process()).
-        let server = ConnectionServer(listenFD: socketFD) { [self] body in processFrame(body) }
+        // Every accepted connection is checked against the peer's kernel credentials
+        // (root or ownerUID only), a second layer behind the socket's 0600 permissions.
+        let server = ConnectionServer(listenFD: socketFD,
+                                      authorizer: PeerAuthorizer(ownerUID: ownerUID)) { [self] body in
+            processFrame(body)
+        }
         server.start()
         connectionServer = server
 
