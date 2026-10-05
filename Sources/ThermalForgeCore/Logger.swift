@@ -6,12 +6,54 @@
 //  One file per day (thermalforge-2026-04-05.log).
 //  Auto-deletes files older than 7 days on app launch.
 //
+//  Running as root (the daemon, or the CLI under sudo) it writes no files: its
+//  messages go to the unified log instead (RootLog, public). A file log there
+//  would land under root's home, where the user never looks and nothing prunes it.
+//
 
+import Darwin
 import Foundation
+import os
+
+/// The unified-log channel for TFLogger in a process running as root, which in
+/// practice is the CLI under sudo (the daemon's own lines go through DaemonLog).
+/// Its own subsystem, so a log reader can tell a sudo command from the daemon.
+/// Public, like the daemon's log: nothing here needs hiding from the Mac's admin.
+enum RootLog {
+    static let subsystem = "com.thermalforge.cli"
+    static let category = "root"
+    private static let logger = Logger(subsystem: subsystem, category: category)
+
+    static func notice(_ message: String) {
+        logger.notice("\(message, privacy: .public)")
+    }
+
+    static func error(_ message: String) {
+        logger.error("\(message, privacy: .public)")
+    }
+}
 
 public final class TFLogger {
     public static let shared = TFLogger()
 
+    /// Where this process's messages go, decided once from its effective user.
+    enum Destination: Equatable {
+        /// Daily files in this folder (the app, and the CLI as the user).
+        case files(URL)
+        /// The unified log only (any process running as root).
+        case unifiedLog
+    }
+
+    static func destination(euid: uid_t, home: URL) -> Destination {
+        euid == 0 ? .unifiedLog : .files(home.appendingPathComponent("Library/Logs/ThermalForge"))
+    }
+
+    let destination: Destination
+    /// Where root-mode lines go: the unified log. Tests swap it to capture lines
+    /// without writing to the Mac's log.
+    var unifiedLogSink: (_ line: String, _ isError: Bool) -> Void = { line, isError in
+        if isError { RootLog.error(line) } else { RootLog.notice(line) }
+    }
     private let logDir: URL
     private let lock = NSLock()
     private let isoFormatter = ISO8601DateFormatter()
@@ -26,12 +68,15 @@ public final class TFLogger {
         return logDir.appendingPathComponent("thermalforge-\(dateStr).log")
     }
 
-    private init() {
-        logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/ThermalForge")
+    init(euid: uid_t = geteuid(), home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        destination = Self.destination(euid: euid, home: home)
+        logDir = home.appendingPathComponent("Library/Logs/ThermalForge")
 
         dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
+
+        // As root, nothing on disk: no folder, no cleanup.
+        guard destination != .unifiedLog else { return }
 
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
 
@@ -72,6 +117,11 @@ public final class TFLogger {
     // MARK: - Writing
 
     private func write(_ category: String, _ message: String) {
+        guard destination != .unifiedLog else {
+            unifiedLogSink("ThermalForge CLI (root) [\(category)]: \(message)", category == "ERROR")
+            return
+        }
+
         lock.lock()
         defer { lock.unlock() }
 
@@ -120,6 +170,7 @@ public final class TFLogger {
 
     /// Delete all log files
     public func clearAll() {
+        guard destination != .unifiedLog else { return }
         lock.lock()
         defer { lock.unlock() }
         try? FileManager.default.removeItem(at: logDir)

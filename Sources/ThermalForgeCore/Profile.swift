@@ -244,14 +244,22 @@ extension FanProfile {
     }
 
     public func save() throws {
-        let dir = Self.profilesDirectory
+        try save(in: Self.profilesDirectory)
+    }
+
+    /// Save into `dir`. Tests pass a temporary folder, so no test touches the
+    /// user's real profiles.
+    func save(in dir: URL) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(self)
         try data.write(to: dir.appendingPathComponent("\(id).json"))
     }
 
     public static func loadAll() -> [FanProfile] {
-        let dir = profilesDirectory
+        loadAll(from: profilesDirectory)
+    }
+
+    static func loadAll(from dir: URL) -> [FanProfile] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil
         ) else {

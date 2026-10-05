@@ -84,6 +84,10 @@ public final class FanControl {
     private let modeKeyTemplate: String
     /// Whether Ftst unlock is available (M1-M4) or not (M5+)
     private let hasFtst: Bool
+    /// Where operational messages go. nil means TFLogger (a daily file for the app
+    /// and the CLI as the user; the unified log when running as root). The daemon
+    /// sets this so its lines carry the daemon's own prefix.
+    var logSink: ((String) -> Void)?
 
     public init() throws {
         guard let connection = SMCConnection() else {
@@ -287,6 +291,32 @@ public final class FanControl {
         }
     }
 
+    // MARK: - Manual-Control Check
+
+    /// Whether a manual-control session is engaged at the SMC: any fan in manual
+    /// mode, or (M1-M4) Ftst still set, which keeps thermalmonitord off the fans
+    /// even with every mode back on auto. Throws when a key can't be read, so the
+    /// caller picks its own safe default rather than this guessing "auto".
+    public func manualControlEngaged() throws -> Bool {
+        let count = try fanCount()
+        for i in 0..<count {
+            let modeKey = SMCFanKey.key(modeKeyTemplate, fan: i)
+            let result = smc.readKey(modeKey)
+            guard result.success, let mode = result.bytes.first else {
+                throw ThermalForgeError.readFailed(modeKey)
+            }
+            if mode == 1 { return true }   // 1 = manual (see fanInfo)
+        }
+        if hasFtst {
+            let result = smc.readKey(SMCFanKey.forceTest)
+            guard result.success, let ftst = result.bytes.first else {
+                throw ThermalForgeError.readFailed(SMCFanKey.forceTest)
+            }
+            if ftst != 0 { return true }
+        }
+        return false
+    }
+
     // MARK: - Reset
 
     /// Reset all fans to Apple defaults (auto mode, thermalmonitord resumes)
@@ -440,6 +470,13 @@ public final class FanControl {
     }
 
     private func log(_ message: String) {
-        TFLogger.shared.fan(message)
+        Self.deliver(message, to: logSink) { TFLogger.shared.fan($0) }
+    }
+
+    /// Send to `sink` when set, otherwise to `fallback`. The fallback runs only
+    /// then, so a routed FanControl never initializes TFLogger.
+    static func deliver(_ message: String, to sink: ((String) -> Void)?,
+                        fallback: (String) -> Void) {
+        if let sink { sink(message) } else { fallback(message) }
     }
 }

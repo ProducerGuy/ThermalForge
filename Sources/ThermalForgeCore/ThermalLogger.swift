@@ -45,6 +45,10 @@ public final class ThermalLogger {
     private let sampleInterval: TimeInterval
     private let duration: TimeInterval?
     private let outputDir: URL
+    /// The session folder as a trusted base plus components below it, for UserFiles.
+    private let base: URL
+    private let components: [String]
+    private let files: UserFiles
     private let noExpire: Bool
 
     private var csvHandle: FileHandle?
@@ -76,15 +80,19 @@ public final class ThermalLogger {
         let timestamp = isoFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let dirName = "thermalforge_log_\(timestamp)"
 
-        if let custom = outputDir {
-            self.outputDir = custom.appendingPathComponent(dirName)
-        } else {
-            let defaultDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/ThermalForge/logs")
-            self.outputDir = defaultDir.appendingPathComponent(dirName)
-        }
+        let location = UserDataLocation.current
+        (self.base, self.components) = Self.sessionFolder(outputDir: outputDir, location: location,
+                                                          dirName: dirName)
+        self.outputDir = components.reduce(base) { $0.appendingPathComponent($1, isDirectory: true) }
+        self.files = location.files
 
-        try FileManager.default.createDirectory(at: self.outputDir, withIntermediateDirectories: true)
+        // A folder named with --output is the user's choice and is created as
+        // named; the session folder inside it, like the default one, goes through
+        // UserFiles (under sudo: the invoking user's, never through a symlink).
+        if let custom = outputDir, !FileManager.default.fileExists(atPath: custom.path) {
+            try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+        }
+        try files.ensureDirectory(base: base, components)
 
         self.metadata = LogSessionMetadata(
             machine: machine,
@@ -105,14 +113,10 @@ public final class ThermalLogger {
     /// Run the logging loop. Blocks until duration expires, stop() is called, or interrupted.
     public func run() throws {
         // Create CSV
-        let csvPath = outputDir.appendingPathComponent("thermal.csv")
-        FileManager.default.createFile(atPath: csvPath.path, contents: nil)
-        csvHandle = try FileHandle(forWritingTo: csvPath)
+        csvHandle = try files.createFile(base: base, components, name: "thermal.csv")
 
         // Create processes CSV
-        let procPath = outputDir.appendingPathComponent("processes.csv")
-        FileManager.default.createFile(atPath: procPath.path, contents: nil)
-        let procHandle = try FileHandle(forWritingTo: procPath)
+        let procHandle = try files.createFile(base: base, components, name: "processes.csv")
         write(to: procHandle, "timestamp,pid,name,cpu_pct\n")
 
         // Write thermal CSV header after first sample (to capture actual sensor keys)
@@ -191,11 +195,10 @@ public final class ThermalLogger {
         metadata.totalSamples = sampleCount
 
         // Write metadata JSON
-        let metaPath = outputDir.appendingPathComponent("metadata.json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let metaData = try encoder.encode(metadata)
-        try metaData.write(to: metaPath)
+        try files.writeFile(base: base, components, name: "metadata.json", data: metaData)
 
         // Schedule auto-delete if not --no-expire
         if !noExpire {
@@ -261,15 +264,28 @@ public final class ThermalLogger {
 
     private func scheduleCleanup() {
         // Write a marker file so we know when to clean up
-        let marker = outputDir.appendingPathComponent(".expires")
         let expiry = Date().addingTimeInterval(24 * 60 * 60) // 24 hours
-        try? isoFormatter.string(from: expiry).write(to: marker, atomically: true, encoding: .utf8)
+        try? files.writeFile(base: base, components, name: ".expires",
+                             data: Data(isoFormatter.string(from: expiry).utf8))
+    }
+
+    /// Where a session's folder goes: inside the --output folder when given,
+    /// otherwise in the user's data folder (UserDataLocation: under sudo, the
+    /// invoking user's home).
+    static func sessionFolder(outputDir: URL?, location: UserDataLocation,
+                              dirName: String) -> (base: URL, components: [String]) {
+        if let outputDir { return (outputDir, [dirName]) }
+        return (location.home, UserDataLocation.appSupportComponents + ["logs", dirName])
     }
 
     /// Clean up expired log sessions
     public static func cleanExpired() {
-        let logsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/logs")
+        let location = UserDataLocation.current
+        // Under sudo the folder is the invoking user's: root doesn't delete folder
+        // trees there (a swapped-in link could redirect it). The app, running as
+        // that user, cleans it on launch, as does `thermalforge log` without sudo.
+        guard location.kind != .sudoUser else { return }
+        let logsDir = location.appSupport.appendingPathComponent("logs")
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: logsDir, includingPropertiesForKeys: nil
         ) else { return }

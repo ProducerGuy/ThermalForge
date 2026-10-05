@@ -112,32 +112,50 @@ public struct CalibrationData: Codable {
 // MARK: - Persistence
 
 extension CalibrationData {
+    static let fileName = "calibration.json"
+
+    /// Where calibration lives: the app's user data folder. Under sudo that's the
+    /// home of the user who ran sudo, not root's, so the menu bar app (running as
+    /// that user) loads what `sudo thermalforge calibrate` saved (UserData.swift).
     public static var filePath: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/calibration.json")
+        UserDataLocation.current.appSupport.appendingPathComponent(fileName)
     }
 
     public func save() throws {
-        let dir = Self.filePath.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try save(to: .current)
+    }
+
+    func save(to location: UserDataLocation) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
-        try data.write(to: Self.filePath)
+        try location.files.writeFile(base: location.home, UserDataLocation.appSupportComponents,
+                                     name: Self.fileName, data: data)
     }
 
     public static func load() -> CalibrationData? {
-        guard FileManager.default.fileExists(atPath: filePath.path) else { return nil }
+        load(from: .current)
+    }
 
-        guard let data = try? Data(contentsOf: filePath) else {
-            TFLogger.shared.error("Calibration file exists but couldn't be read — deleting")
-            try? FileManager.default.removeItem(at: filePath)
+    /// `logError` is where a bad-file message goes; tests capture it, so no test
+    /// writes to the user's real app log.
+    static func load(from location: UserDataLocation,
+                     logError: (String) -> Void = { TFLogger.shared.error($0) }) -> CalibrationData? {
+        let files = location.files
+        let data: Data
+        do {
+            guard let read = try files.readFile(base: location.home, UserDataLocation.appSupportComponents,
+                                                name: fileName) else { return nil }
+            data = read
+        } catch {
+            logError("Calibration file exists but couldn't be read; deleting")
+            _ = try? files.removeFile(base: location.home, UserDataLocation.appSupportComponents, name: fileName)
             return nil
         }
 
         guard let calibration = try? JSONDecoder().decode(CalibrationData.self, from: data) else {
-            TFLogger.shared.error("Calibration file is corrupted (JSON decode failed) — deleting")
-            try? FileManager.default.removeItem(at: filePath)
+            logError("Calibration file is corrupted (JSON decode failed); deleting")
+            _ = try? files.removeFile(base: location.home, UserDataLocation.appSupportComponents, name: fileName)
             return nil
         }
 
@@ -146,6 +164,16 @@ extension CalibrationData {
 
     public static var exists: Bool {
         FileManager.default.fileExists(atPath: filePath.path)
+    }
+
+    /// Delete the saved calibration (calibrate --reset). Returns whether one existed.
+    @discardableResult
+    public static func remove() throws -> Bool {
+        try remove(from: .current)
+    }
+
+    static func remove(from location: UserDataLocation) throws -> Bool {
+        try location.files.removeFile(base: location.home, UserDataLocation.appSupportComponents, name: fileName)
     }
 }
 
@@ -410,15 +438,14 @@ public final class CalibrationRunner {
         try fanControl.resetAuto()
         waitForCooldown(below: 45)
 
-        // Set up CSV log
-        let logDir = CalibrationData.filePath.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        // Set up CSV log, beside the calibration in the user's data folder
+        let location = UserDataLocation.current
         let timestamp = isoFormatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
-        let csvURL = logDir.appendingPathComponent("calibration_\(timestamp).csv")
-        FileManager.default.createFile(atPath: csvURL.path, contents: nil)
-        csvHandle = try FileHandle(forWritingTo: csvURL)
-        logPath = csvURL
+        let csvName = "calibration_\(timestamp).csv"
+        csvHandle = try location.files.createFile(base: location.home, UserDataLocation.appSupportComponents,
+                                                  name: csvName)
+        logPath = location.appSupport.appendingPathComponent(csvName)
         csvWrite("timestamp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
 
         // Phase 2: Fan-level stabilization sweep (high to low)

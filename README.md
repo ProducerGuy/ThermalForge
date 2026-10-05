@@ -31,7 +31,7 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 | Process correlation in logs | **Yes** | No | No |
 | Sleep/wake re-apply | Yes | Yes | Yes |
 | Safety override (95°C) | **Yes — daemon-enforced, works with app closed** | No | Requires manual setup |
-| Crash recovery (heartbeat watchdog) | **Yes — daemon-enforced, holds during overheat** | Reverts on quit only | Override removes macOS safety |
+| Crash recovery (heartbeat watchdog) | **Yes — daemon-enforced, hands fans back to Apple** | Reverts on quit only | Override removes macOS safety |
 | Open source | **Yes** | No | No |
 | Price | **Free** | $15 | $20 |
 
@@ -51,7 +51,7 @@ Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control 
 - Automatic fan re-apply after sleep/wake
 - Fahrenheit / Celsius toggle
 - Safety override: the background daemon forces fans to maximum if a critical sensor crosses 95°C while a manual hold is keeping them too low — enforced in the daemon, so it works even with the menu bar app closed
-- Crash recovery: the daemon's heartbeat watchdog resets fans to Apple defaults if the app dies — and if a thermal safety override is active, it holds fans at max and defers the reset until the machine cools, so it never hands hot fans back to auto
+- Crash recovery: the daemon's heartbeat watchdog resets fans to Apple defaults if the app dies, even while a thermal safety override is active. Apple's own fan control takes over, hot or not
 - Temperature anomaly detection: logs instant spikes (>5°C in 2s) and sustained changes (>10°C in 30s) with process capture
 - Privileged daemon — one-time sudo, zero password prompts after
 - Native Swift — lightweight, no Electron, no bloat
@@ -173,7 +173,7 @@ This always works, even if the app isn't running. It stops ThermalForge and hand
 ```bash
 sudo thermalforge uninstall
 ```
-Removes the daemon, binary, app, and all logs. Clean slate.
+Removes the background daemon, the `thermalforge` binary in `/usr/local/bin`, the menu bar app, and the daemon's logs. Your calibration and custom profiles, plus your recordings unless you saved them elsewhere, stay in `~/Library/Application Support/ThermalForge`, and the app's logs stay in `~/Library/Logs/ThermalForge`. Delete those folders yourself if you want a clean slate.
 
 If installed via Homebrew, run `brew uninstall thermalforge` first.
 

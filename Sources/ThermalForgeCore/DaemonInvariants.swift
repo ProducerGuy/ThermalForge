@@ -72,6 +72,63 @@ public struct ThermalFloor {
     }
 }
 
+// MARK: - Daemon start and stop (#31)
+
+/// What a freshly started daemon does about the fans. It starts holding nothing,
+/// so fans left under manual control — by a daemon killed mid-hold, a crash, or a
+/// direct root SMC write made while no daemon ran — would stay pinned with no
+/// thermal floor or wake re-apply behind them. Release them to Apple. Adopting
+/// instead isn't possible: the SMC records no owner, so a CLI hold can't be told
+/// from a dead app's curve point, and per-fan targets don't fit one hold command.
+/// The SMC access is injected so this tests without root.
+public enum StartupFanReconcile {
+    public enum Outcome: Equatable {
+        case alreadyAuto
+        case reset
+        /// The SMC couldn't be read, so we reset anyway: auto is the safe state.
+        case resetAfterUnreadable
+        case resetFailed(String)
+    }
+
+    public static func run(manualControlEngaged: () throws -> Bool,
+                           resetAuto: () throws -> Void) -> Outcome {
+        let unreadable: Bool
+        do {
+            guard try manualControlEngaged() else { return .alreadyAuto }
+            unreadable = false
+        } catch {
+            unreadable = true
+        }
+        do {
+            try resetAuto()
+            return unreadable ? .resetAfterUnreadable : .reset
+        } catch {
+            return .resetFailed("\(error)")
+        }
+    }
+}
+
+/// The heartbeat watchdog's call on a supervised (app) hold: revert it once the
+/// app has gone quiet for longer than `timeout`. CLI holds never reach this. The
+/// thermal floor's state is deliberately not an input — Apple's auto control is
+/// the safe default even on a hot machine, so a dead app's hold is always handed
+/// back to it.
+public enum HeartbeatWatchdog {
+    public static let timeout: TimeInterval = 15
+
+    public static func revertsHold(lastBeat: Date, now: Date) -> Bool {
+        now.timeIntervalSince(lastBeat) > timeout
+    }
+}
+
+/// What the daemon does on SIGTERM (a bootout, or a manual kill): release the
+/// fans only if it was controlling them, so it never touches fans it doesn't own.
+public enum DaemonShutdown {
+    public static func releasesFans(holding: Bool, safetySuspended: Bool) -> Bool {
+        holding || safetySuspended
+    }
+}
+
 // MARK: - Peer authentication
 
 /// A connected peer's effective uid/gid, as the kernel recorded them at connect().

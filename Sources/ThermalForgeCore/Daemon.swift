@@ -62,22 +62,185 @@ public enum ThermalForgeDaemon {
 
     /// Boot out our launchd job, but only if the label is actually registered —
     /// so a fresh install (nothing loaded) doesn't provoke a spurious
-    /// "Boot-out failed: No such process". If a bootout IS attempted and fails
-    /// for a real reason, it throws rather than swallowing it.
-    public static func bootoutIfRegistered() throws {
-        guard isRegisteredWithLaunchd else { return }
+    /// "Boot-out failed: No such process". Returns once launchd reports the job
+    /// gone, not after a guessed delay. Failures throw a LaunchdError carrying
+    /// `rerun`, the command that recovers.
+    public static func bootoutIfRegistered(rerun: String) throws {
+        try LaunchdControl.system.bootoutIfRegistered(label: label, rerun: rerun)
+    }
 
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = ["bootout", "system/\(label)"]
-        try p.run()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else {
-            throw ThermalForgeError.writeFailed(
-                "launchctl bootout system/\(label) failed (exit \(p.terminationStatus))"
-            )
+    /// Load our launchd job, retrying once if the first attempt fails while
+    /// nothing is registered. `note` receives a line for the user on a retry.
+    public static func bootstrap(rerun: String, note: (String) -> Void = { _ in }) throws {
+        try LaunchdControl.system.bootstrap(plist: plistPath, rerun: rerun, note: note)
+    }
+
+    /// Wait (bounded) for the daemon's socket to accept connections, instead of
+    /// checking once after a fixed delay. False only if `limit` passes first.
+    public static func waitUntilRunning(limit: TimeInterval = 10) -> Bool {
+        LaunchdControl.system.waitUntil(limit: limit) { isRunning }
+    }
+
+    /// Where the daemon's file log lived before it moved to the unified log:
+    /// TFLogger wrote under the running user's home, and the daemon runs as root.
+    /// Nothing writes it anymore: as root, TFLogger logs to the unified log only.
+    public static let legacyLogDirectory = "/var/root/Library/Logs/ThermalForge"
+
+    public enum LegacyLogCleanup: Equatable {
+        case notPresent
+        case removed
+        case failed(String)
+    }
+
+    /// Remove the old daemon log folder at exactly `path`, never anything outside
+    /// it: a symlink at `path` is removed as a link, and links inside are removed
+    /// as links, not followed.
+    public static func removeLegacyLogs(at path: String = legacyLogDirectory) -> LegacyLogCleanup {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            let err = errno
+            return err == ENOENT ? .notPresent : .failed("\(String(cString: strerror(err))) (errno \(err))")
         }
-        Thread.sleep(forTimeInterval: 0.5)   // let launchd settle before re-bootstrap
+        do {
+            try FileManager.default.removeItem(atPath: path)
+            return .removed
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+}
+
+/// A launchd step that failed during install or uninstall. Kept apart from
+/// ThermalForgeError, whose cases describe SMC failures: a bootout/bootstrap
+/// problem is neither an SMC write nor fixed by sudo (the caller already has it),
+/// and the user needs the command that recovers. `detail` is launchctl's own
+/// output, folded in so the user sees one message with the real cause.
+public enum LaunchdError: Error, CustomStringConvertible, Equatable {
+    case bootoutFailed(exitStatus: Int32, detail: String, rerun: String)
+    case stillRegistered(seconds: Int, rerun: String)
+    case bootstrapFailed(exitStatus: Int32, detail: String, rerun: String)
+
+    public var description: String {
+        switch self {
+        case .bootoutFailed(let status, let detail, let rerun):
+            return "Couldn't stop the running ThermalForge daemon\(Self.cause(detail, status)). Re-run: \(rerun)"
+        case .stillRegistered(let seconds, let rerun):
+            return "launchd still had the old ThermalForge daemon registered \(seconds)s after it was stopped. Re-run: \(rerun)"
+        case .bootstrapFailed(let status, let detail, let rerun):
+            return "Couldn't start the ThermalForge daemon, also on retry\(Self.cause(detail, status)). Re-run: \(rerun)"
+        }
+    }
+
+    /// ": <launchctl's message> (launchctl exit N)", or just the exit status when
+    /// launchctl said nothing.
+    static func cause(_ detail: String, _ status: Int32) -> String {
+        detail.isEmpty ? " (launchctl exit \(status))" : ": \(detail) (launchctl exit \(status))"
+    }
+}
+
+/// Why the daemon couldn't start serving. Kept apart from ThermalForgeError, whose
+/// cases describe SMC failures: none of these is an SMC write, and the daemon
+/// already runs as root, so "run with sudo" is never the fix.
+public enum DaemonStartError: Error, CustomStringConvertible, Equatable {
+    case ownerIsRoot
+    case socketFailed(errno: Int32)
+    case bindFailed(path: String, errno: Int32)
+    case chownFailed(path: String, uid: uid_t, errno: Int32)
+    case chmodFailed(path: String, errno: Int32)
+    case listenFailed(errno: Int32)
+
+    public var description: String {
+        switch self {
+        case .ownerIsRoot:
+            return "refusing to start: the owner uid is 0. Reinstall from your user account: sudo thermalforge install"
+        case .socketFailed(let err):
+            return "couldn't create the control socket: \(Self.reason(err))"
+        case .bindFailed(let path, let err):
+            return "couldn't bind the control socket at \(path): \(Self.reason(err))"
+        case .chownFailed(let path, let uid, let err):
+            return "couldn't give the control socket at \(path) to uid \(uid): \(Self.reason(err))"
+        case .chmodFailed(let path, let err):
+            return "couldn't set the control socket at \(path) to mode 0600: \(Self.reason(err))"
+        case .listenFailed(let err):
+            return "couldn't listen on the control socket: \(Self.reason(err))"
+        }
+    }
+
+    private static func reason(_ err: Int32) -> String {
+        "\(String(cString: strerror(err))) (errno \(err))"
+    }
+}
+
+/// The launchd steps install/uninstall drive. launchctl, the registration query
+/// and the clock are injected so the ordering logic tests without root; `system`
+/// is the real thing. Nothing here waits a fixed time: each wait polls for the
+/// state it needs, bounded so a genuine failure still ends.
+struct LaunchdControl {
+    /// Runs launchctl with the given arguments; returns its exit status and its
+    /// combined stdout/stderr, trimmed. Output is captured, never printed raw.
+    var launchctl: ([String]) throws -> (status: Int32, output: String)
+    var isRegistered: () -> Bool
+    var now: () -> Date = Date.init
+    var pause: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// Cap on waiting for launchd to finish tearing the old job down. Above
+    /// launchd's default 20s SIGTERM→SIGKILL exit timeout, so it only ends a wait
+    /// that is never going to succeed.
+    var teardownLimit: TimeInterval = 30
+    var pollInterval: TimeInterval = 0.2
+
+    static let system = LaunchdControl(
+        launchctl: { arguments in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            p.arguments = arguments
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = pipe
+            try p.run()
+            // Drain before waiting, so a full pipe can never stall launchctl.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let output = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (p.terminationStatus, output)
+        },
+        isRegistered: { ThermalForgeDaemon.isRegisteredWithLaunchd }
+    )
+
+    /// Poll `condition` until it holds; false only if `limit` passes first.
+    func waitUntil(limit: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = now().addingTimeInterval(limit)
+        while true {
+            if condition() { return true }
+            if now() >= deadline { return false }
+            pause(pollInterval)
+        }
+    }
+
+    func bootoutIfRegistered(label: String, rerun: String) throws {
+        guard isRegistered() else { return }
+        let result = try launchctl(["bootout", "system/\(label)"])
+        guard result.status == 0 else {
+            throw LaunchdError.bootoutFailed(exitStatus: result.status, detail: result.output, rerun: rerun)
+        }
+        // bootout can return before launchd finishes tearing the job down; an
+        // immediate bootstrap would then fail. Wait for the state, not a delay.
+        guard waitUntil(limit: teardownLimit, { !isRegistered() }) else {
+            throw LaunchdError.stillRegistered(seconds: Int(teardownLimit), rerun: rerun)
+        }
+    }
+
+    func bootstrap(plist: String, rerun: String, note: (String) -> Void) throws {
+        let first = try launchctl(["bootstrap", "system", plist])
+        guard first.status != 0 else { return }
+        // Registered despite the error: the job is loaded, so the caller's
+        // running check decides. Retrying would only fail on the existing job.
+        guard !isRegistered() else { return }
+        note("Starting the daemon failed\(LaunchdError.cause(first.output, first.status)); retrying once.")
+        let second = try launchctl(["bootstrap", "system", plist])
+        guard second.status == 0 else {
+            throw LaunchdError.bootstrapFailed(exitStatus: second.status, detail: second.output, rerun: rerun)
+        }
     }
 }
 
@@ -290,9 +453,14 @@ public final class DaemonServer {
 
     /// Phase 4 connection layer (concurrent bounded accept + framed I/O), created in run().
     private var connectionServer: ConnectionServer?
+    /// SIGTERM handler (#31), created in run(); kept so the source isn't released.
+    private var terminationSource: DispatchSourceSignal?
 
     public init(fanControl: FanControl, ownerUID: uid_t,
                 sampleMaxTemp: (() -> Float?)? = nil) throws {
+        // First, before anything can log: the daemon's fan messages go to the
+        // unified log with the daemon's own prefix.
+        fanControl.logSink = { DaemonLog.notice("ThermalForge daemon: \($0)") }
         self.fanControl = fanControl
         self.ownerUID = ownerUID
         // Cache fan RPM limits once (fixed hardware constants). Empty on a read failure
@@ -307,15 +475,10 @@ public final class DaemonServer {
         // out of fan control. Fail loudly under KeepAlive so Console.app shows why,
         // rather than a mystery "daemon-down" banner. Install.run() guarantees a
         // real uid, so reaching here means a hand-edited plist or a dev mistake.
-        guard ownerUID != 0 else {
-            NSLog("ThermalForge daemon: refusing to start — owner uid is 0. Reinstall with `sudo thermalforge install` from your user account.")
-            throw ThermalForgeError.writeFailed("daemon owner uid must be non-zero")
-        }
+        guard ownerUID != 0 else { throw Self.startFailure(.ownerIsRoot) }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw ThermalForgeError.smcConnectionFailed
-        }
+        guard fd >= 0 else { throw Self.startFailure(.socketFailed(errno: errno)) }
         self.socketFD = fd
 
         // Remove stale socket (safe now: only root can have created anything in
@@ -335,10 +498,11 @@ public final class DaemonServer {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        let bindErrno = errno   // captured before any other call can change it
         umask(oldMask)
         guard bindResult == 0 else {
             close(fd)
-            throw ThermalForgeError.writeFailed("bind() failed: \(errno)")
+            throw Self.startFailure(.bindFailed(path: ThermalForgeDaemon.socketPath, errno: bindErrno))
         }
 
         // Hand the socket to the controlling user: owned by them, group wheel,
@@ -355,26 +519,40 @@ public final class DaemonServer {
         // puts the errno in Console.app beats a silent lockout.
         guard chown(ThermalForgeDaemon.socketPath, ownerUID, 0) == 0 else {
             let err = errno
-            NSLog("ThermalForge daemon: chown of the socket to uid %u failed: errno %d", ownerUID, err)
             close(fd)
-            throw ThermalForgeError.writeFailed("chown() failed: errno \(err)")
+            throw Self.startFailure(.chownFailed(path: ThermalForgeDaemon.socketPath, uid: ownerUID, errno: err))
         }
         guard chmod(ThermalForgeDaemon.socketPath, 0o600) == 0 else {
             let err = errno
-            NSLog("ThermalForge daemon: chmod(0600) on the socket failed: errno %d", err)
             close(fd)
-            throw ThermalForgeError.writeFailed("chmod() failed: errno \(err)")
+            throw Self.startFailure(.chmodFailed(path: ThermalForgeDaemon.socketPath, errno: err))
         }
 
         guard listen(fd, 16) == 0 else {   // backlog holds queued connects while at the 8-handler cap
+            let err = errno
             close(fd)
-            throw ThermalForgeError.writeFailed("listen() failed")
+            throw Self.startFailure(.listenFailed(errno: err))
         }
+    }
+
+    /// Log a start failure where Console.app can read it (launchd discards the
+    /// daemon's stderr), then hand it back to throw.
+    private static func startFailure(_ error: DaemonStartError) -> DaemonStartError {
+        DaemonLog.error("ThermalForge daemon: \(error)")
+        return error
     }
 
     /// Run the server loop (blocks forever)
     public func run() {
-        NSLog("ThermalForge daemon: listening on %@", ThermalForgeDaemon.socketPath)
+        DaemonLog.notice("ThermalForge daemon: listening on \(ThermalForgeDaemon.socketPath)")
+
+        // Start holding nothing with nothing pinned, before any client can connect
+        // or any loop can act (#31): release fans a previous daemon or a direct
+        // root write left under manual control.
+        reconcileFansAtStartup()
+
+        // Release our fans if we're told to stop (bootout, kill -TERM).
+        installTerminationHandler()
 
         // Watch for sleep/wake to re-apply fan settings
         registerWakeNotification()
@@ -404,6 +582,53 @@ public final class DaemonServer {
         RunLoop.main.run()
     }
 
+    // MARK: - Start and Stop (#31)
+
+    private func reconcileFansAtStartup() {
+        smcLock.lock()
+        defer { smcLock.unlock() }
+        switch StartupFanReconcile.run(manualControlEngaged: { try fanControl.manualControlEngaged() },
+                                       resetAuto: { try fanControl.resetAuto() }) {
+        case .alreadyAuto:
+            break
+        case .reset:
+            DaemonLog.notice("ThermalForge daemon: fans were under manual control with no hold at startup; reset to auto")
+        case .resetAfterUnreadable:
+            DaemonLog.notice("ThermalForge daemon: couldn't read fan modes at startup; reset to auto as a precaution")
+        case .resetFailed(let error):
+            DaemonLog.error("ThermalForge daemon: startup fan reset failed: \(error)")
+        }
+    }
+
+    /// SIGTERM's default action kills the daemon with whatever hold it had still
+    /// on the SMC. A dispatch source runs our handler on a normal thread instead of
+    /// in signal context, so taking locks and writing the SMC is safe there.
+    private func installTerminationHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
+        source.setEventHandler { [self] in releaseFansAndExit() }
+        source.resume()
+        terminationSource = source
+    }
+
+    private func releaseFansAndExit() -> Never {
+        // smcLock is held through exit, so no request, watchdog, floor or wake
+        // re-apply can write the SMC after the release. Lock order matches
+        // processFrame (smcLock, then stateLock).
+        smcLock.lock()
+        stateLock.lock()
+        let release = DaemonShutdown.releasesFans(holding: hold.command != nil,
+                                                  safetySuspended: safetySuspended)
+        hold = .none
+        safetySuspended = false
+        stateLock.unlock()
+        if release {
+            let ok = (try? fanControl.resetAuto()) != nil
+            DaemonLog.notice("ThermalForge daemon: stopping: \(ok ? "released fans to auto" : "fan release failed")")
+        }
+        exit(0)
+    }
+
     // MARK: - Heartbeat Watchdog
 
     private func startHeartbeatWatchdog() {
@@ -423,46 +648,40 @@ public final class DaemonServer {
                 // v0.1.5 fix: the app's heartbeat can no longer drag a CLI hold
                 // into the supervised branch.
                 guard case .supervised(_, let lastBeat) = current,
-                      Date().timeIntervalSince(lastBeat) > 15 else { continue }
+                      HeartbeatWatchdog.revertsHold(lastBeat: lastBeat, now: Date()) else { continue }
 
-                // If the thermal floor is holding fans at max (overheating), do NOT
-                // resetAuto — dropping fans while hot is the unsafe move. The app is
-                // gone, so clear the dead hold (it must not be restored on cooldown);
-                // fans stay at max, and the floor's cooldown path resets to auto once
-                // it's safe. Crash protection preserved, its auto-reset deferred.
-                stateLock.lock()
-                let suspended = safetySuspended
-                stateLock.unlock()
-                if suspended {
-                    stateLock.lock()
-                    if case .supervised(_, let beat) = hold, beat == lastBeat { hold = .none }
-                    stateLock.unlock()
-                    NSLog("ThermalForge daemon: supervised hold timed out during thermal suspension — cleared; fans stay at max until cooldown")
-                    continue
-                }
+                // The revert happens even while the thermal floor holds fans at max:
+                // Apple's auto control is the safe default on a hot machine too. The
+                // floor exists to correct a ThermalForge hold pinning fans low; once
+                // the dead app's hold is gone there is nothing of ours to correct, so
+                // the suspension is cleared with it (below).
 
-                // Only the revert path allocates anything autoreleasable (NSLog +
+                // Only the revert path allocates anything autoreleasable (logging +
                 // error interpolation), and it never returns from this loop, so pool
                 // it. The sleep/guard/continue stay outside — a steady tick allocates
                 // nothing autoreleasable (Date is a value type).
                 autoreleasepool {
-                    NSLog("ThermalForge daemon: heartbeat timeout — resetting fans to auto")
+                    DaemonLog.notice("ThermalForge daemon: heartbeat timeout; resetting fans to auto")
                     smcLock.lock()
                     let resetSucceeded: Bool
                     do {
                         try fanControl.resetAuto()
                         resetSucceeded = true
                     } catch {
-                        NSLog("ThermalForge daemon: watchdog reset failed: %@, will retry", "\(error)")
+                        DaemonLog.error("ThermalForge daemon: watchdog reset failed: \(error), will retry")
                         resetSucceeded = false
                     }
                     smcLock.unlock()
 
                     // Clear only if the reset worked AND the same supervised hold is
-                    // still current — a new command may have arrived meanwhile.
+                    // still current — a new command may have arrived meanwhile. Apple
+                    // now has the fans, so any floor override ends with the hold.
                     if resetSucceeded {
                         stateLock.lock()
-                        if case .supervised(_, let beat) = hold, beat == lastBeat { hold = .none }
+                        if case .supervised(_, let beat) = hold, beat == lastBeat {
+                            hold = .none
+                            safetySuspended = false
+                        }
                         stateLock.unlock()
                     }
                 }
@@ -585,12 +804,11 @@ public final class DaemonServer {
             smcLock.unlock()
             guard ok else { return }
             stateLock.lock(); safetySuspended = true; stateLock.unlock()
-            NSLog("ThermalForge daemon: thermal floor engaged at %.1f°C — fans held at max (was %@)",
-                  temp, heldCommand ?? "none")
+            DaemonLog.notice("ThermalForge daemon: thermal floor engaged at \(String(format: "%.1f", temp))°C; fans held at max (was \(heldCommand ?? "none"))")
 
         case .restore:
-            // Re-read the hold at restore time — the watchdog may have cleared a dead
-            // app's hold during the suspension, in which case go to auto instead.
+            // Re-read the hold at restore time — if none of ours is left to restore,
+            // hand the fans back to Apple's auto control.
             stateLock.lock()
             let restoreCommand = hold.command
             stateLock.unlock()
@@ -602,8 +820,7 @@ public final class DaemonServer {
             }
             smcLock.unlock()
             stateLock.lock(); safetySuspended = false; stateLock.unlock()
-            NSLog("ThermalForge daemon: thermal floor cleared at %.1f°C — %@",
-                  temp, restoreCommand.map { "restored \($0)" } ?? "reset to auto")
+            DaemonLog.notice("ThermalForge daemon: thermal floor cleared at \(String(format: "%.1f", temp))°C; \(restoreCommand.map { "restored \($0)" } ?? "reset to auto")")
         }
     }
 
@@ -638,13 +855,13 @@ public final class DaemonServer {
         )
 
         guard rootPort != 0, let notifyPort = notifyPort else {
-            NSLog("ThermalForge daemon: failed to register for power notifications")
+            DaemonLog.error("ThermalForge daemon: failed to register for power notifications")
             return
         }
 
         let source = IONotificationPortGetRunLoopSource(notifyPort).takeUnretainedValue()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
-        NSLog("ThermalForge daemon: registered for wake notifications")
+        DaemonLog.notice("ThermalForge daemon: registered for wake notifications")
     }
 
     private func handleWake() {
@@ -652,11 +869,11 @@ public final class DaemonServer {
         let heldCommand = hold.command
         stateLock.unlock()
         guard let command = heldCommand else {
-            NSLog("ThermalForge daemon: woke — no profile to re-apply")
+            DaemonLog.notice("ThermalForge daemon: woke; no profile to re-apply")
             return
         }
 
-        NSLog("ThermalForge daemon: woke — re-applying: %@", command)
+        DaemonLog.notice("ThermalForge daemon: woke; re-applying: \(command)")
 
         // Delay slightly — SMC needs a moment after wake
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [self] in
@@ -664,9 +881,9 @@ public final class DaemonServer {
             defer { smcLock.unlock() }
             do {
                 try applyCommandString(command)
-                NSLog("ThermalForge daemon: re-applied after wake")
+                DaemonLog.notice("ThermalForge daemon: re-applied after wake")
             } catch {
-                NSLog("ThermalForge daemon: wake re-apply failed: %@", "\(error)")
+                DaemonLog.error("ThermalForge daemon: wake re-apply failed: \(error)")
             }
         }
     }
@@ -689,8 +906,7 @@ public final class DaemonServer {
         let response = process(request)
         smcLock.unlock()
         // Verb + outcome only — never raw client bytes.
-        NSLog("ThermalForge daemon: verb=%@ outcome=%@", request.verb.rawValue,
-              response.ok ? "ok" : (response.error?.rawValue ?? "error"))
+        DaemonLog.notice("ThermalForge daemon: verb=\(request.verb.rawValue) outcome=\(response.ok ? "ok" : (response.error?.rawValue ?? "error"))")
         return response
     }
 
