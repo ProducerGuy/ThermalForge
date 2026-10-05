@@ -309,13 +309,15 @@ public final class ThermalMonitor {
         let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
         let minPct = minRPM / maxRPM
 
-        // Below stop threshold and fans running: turn off (with hysteresis)
-        if peakTemp < Self.smartStopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
+        // Below stop threshold and fans running: turn off. The stop threshold
+        // already supplies hysteresis; requiring a non-positive rate here can
+        // leave a stale positive history rate holding fans at the prior target.
+        if peakTemp <= Self.smartStopTemp && fansCurrentlyRunning {
             applyCommand(.resetAuto)
             lastAppliedRPMPercent = 0
             fansCurrentlyRunning = false
             state = .idle
-            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(Self.smartStopTemp))°C")
+            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C at/below \(Int(Self.smartStopTemp))°C")
             return
         }
 
@@ -341,7 +343,13 @@ public final class ThermalMonitor {
         let rate = rateOfChange()
         var targetPct: Float
 
-        if let cal = calibration, let calPct = cal.fanPercentForTemp(peakTemp) {
+        if peakTemp < Self.smartFloor {
+            // The hysteresis band is a cooldown zone. Do not query calibration
+            // here: calibration values below their first sample are allowed to
+            // repeat that sample, which can otherwise keep Smart pinned high
+            // after the machine has cooled.
+            targetPct = minPct
+        } else if let cal = calibration, let calPct = cal.fanPercentForTemp(peakTemp) {
             // Calibrated: use machine-specific temp→fan lookup
             targetPct = calPct
 
@@ -418,7 +426,12 @@ public final class ThermalMonitor {
 
         // Hands-off profiles (Silent): don't control fans, just monitor
         if curve.handsOff {
-            if fansCurrentlyRunning {
+            // The SMC can remain in manual mode across sleep/wake or after the
+            // monitor is recreated, while this instance still believes no fan
+            // command is active. Inspect the hardware state as well as our local
+            // bookkeeping so Silent always hands control back to macOS.
+            let hardwareIsManual = status.fans.contains { $0.mode == "manual" }
+            if fansCurrentlyRunning || hardwareIsManual {
                 applyCommand(.resetAuto)
                 fansCurrentlyRunning = false
                 lastAppliedRPMPercent = 0
