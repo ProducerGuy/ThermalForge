@@ -388,9 +388,10 @@ final class AppState: ObservableObject {
 
     func setSmart() {
         let took = seizeControl()
-        activeProfile = .smart
+        let smart = FanProfile.loadSmart()  // re-read smart.json on every activation
+        activeProfile = smart
         persistSelectedProfile(FanProfile.smart.id)
-        monitor?.switchProfile(.smart)
+        monitor?.switchProfile(smart)
         // Taking over a CLI hold: clear it so the unsupervised hold isn't
         // orphaned; the Smart tick then establishes supervised control. Off-main
         // one-shot on the pump (never coalesced/reordered).

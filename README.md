@@ -138,6 +138,25 @@ The Smart profile eliminates this. It monitors temperature velocity — not just
 
 Apple doesn't do this because silence sells in store demos and most users never run sustained workloads. ThermalForge gives power users the choice Apple doesn't.
 
+### Customizing Smart
+
+Create `~/Library/Application Support/ThermalForge/smart.json` to override any of Smart's defaults — every key is optional:
+
+```json
+{
+  "stopTemp": 50,
+  "startTemp": 53,
+  "ceilingTemp": 85,
+  "maxRPMPercent": 1.0,
+  "curveShape": "sCurve",
+  "rampUpPerSec": 0.05,
+  "rampDownPerSec": 0.025,
+  "sustainedTriggerSec": 6
+}
+```
+
+The keys mean the same as in the profile table above (`curveShape` is `linear`, `easeIn`, `easeOut`, or `sCurve`; ramps are fractions of max RPM per second). The file is re-read each time you select Smart. If it is malformed or a value is out of range (`stopTemp` < `startTemp` < `ceilingTemp` < 95, `maxRPMPercent` 0.1–1.0, ramps > 0, `sustainedTriggerSec` 0–300), it is ignored and Smart uses its defaults. With calibration data, the calibrated lookup replaces `curveShape`.
+
 ### How Smart works
 
 **The curve:** Smart maps temperature to fan speed across a 53–85°C range using an S-curve (gentle at both ends, steeper in the middle). Below 50°C, fans turn off. Between 50–53°C, fans maintain current state (hysteresis). Above 85°C, fans go to max.
