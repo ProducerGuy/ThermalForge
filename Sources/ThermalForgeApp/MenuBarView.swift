@@ -10,6 +10,7 @@ import ThermalForgeCore
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -74,13 +75,12 @@ struct MenuBarView: View {
 
                 Divider().padding(.vertical, 4)
 
-                // Temperatures
+                // Temperatures — one row per `Sensor` case, so this can't drift from
+                // the same categories the Custom Curve editor lets you pick between.
                 SectionHeader(title: "TEMPERATURES")
-                TemperatureRow(label: "CPU", value: peakTemp(prefixes: ["TC", "Tp"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "GPU", value: peakTemp(prefixes: ["TG", "Tg"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "RAM", value: peakTemp(prefixes: ["TR", "Tm", "TM"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "SSD", value: peakTemp(prefixes: ["TH"]), fahrenheit: appState.useFahrenheit)
-                TemperatureRow(label: "Ambient", value: peakTemp(prefixes: ["TA"]), fahrenheit: appState.useFahrenheit)
+                ForEach(Sensor.allCases, id: \.self) { sensor in
+                    TemperatureRow(label: sensor.displayName, value: peakTemp(sensor), fahrenheit: appState.useFahrenheit)
+                }
             } else {
                 Text("Reading sensors...")
                     .foregroundStyle(.secondary)
@@ -89,12 +89,13 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 4)
 
-            // Profile picker
+            // Profile picker — built-ins and saved Custom Profiles share one
+            // radio-style selection list, same as every other profile.
             SectionHeader(title: "PROFILE")
             Picker("Profile", selection: Binding(
                 get: { appState.activeProfile.id },
                 set: { id in
-                    if let profile = FanProfile.builtIn.first(where: { $0.id == id }) {
+                    if let profile = (FanProfile.builtIn + customProfiles).first(where: { $0.id == id }) {
                         appState.selectProfile(profile)
                     }
                 }
@@ -125,10 +126,50 @@ struct MenuBarView: View {
                     }
                     .tag(profile.id)
                 }
+
+                if !customProfiles.isEmpty {
+                    Divider()
+                    ForEach(customProfiles) { profile in
+                        HStack {
+                            Text(profile.name)
+                            Spacer()
+                            Text("Custom")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(profile.id)
+                    }
+                }
             }
             .pickerStyle(.inline)
             .labelsHidden()
             .padding(.horizontal, 12)
+
+            // Custom Profile management (rq.md §16). "Edit" only appears once a
+            // Custom Profile is the current selection — pick it above first, same as
+            // any other profile, then edit it here.
+            HStack {
+                Button {
+                    openProfileEditor(.new)
+                } label: {
+                    Label("New Custom Profile", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+
+                if let activeCustom = customProfiles.first(where: { $0.id == appState.activeProfile.id }) {
+                    Spacer()
+                    Button {
+                        openProfileEditor(.edit(activeCustom.id))
+                    } label: {
+                        Label("Edit", systemImage: "pencil.circle")
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 2)
 
             Divider().padding(.vertical, 4)
 
@@ -168,6 +209,10 @@ struct MenuBarView: View {
             // Footer
             Toggle("°F / °C", isOn: $appState.useFahrenheit)
                 .padding(.horizontal, 12)
+            Toggle("Show RPM in Menu Bar", isOn: $appState.showRPMInMenuBar)
+                .padding(.horizontal, 12)
+            Toggle("Color Icon by Fan Speed", isOn: $appState.colorizeMenuBarIcon)
+                .padding(.horizontal, 12)
             Toggle("Launch at Login", isOn: $appState.launchAtLogin)
                 .padding(.horizontal, 12)
 
@@ -184,6 +229,25 @@ struct MenuBarView: View {
     }
 
     // MARK: - Helpers
+
+    /// Custom Profiles saved to disk (rq.md §15) — distinguished from a built-in
+    /// override by carrying a `customCurve` (single-axis, e.g. from the CLI) or a
+    /// `customCurve2D` (dual-sensor, what the in-app editor creates). Re-read each
+    /// time the menu opens rather than cached, so a profile added/edited outside the
+    /// app shows up without a relaunch.
+    private var customProfiles: [FanProfile] {
+        FanProfile.loadAll().filter { $0.customCurve != nil || $0.customCurve2D != nil }
+    }
+
+    /// Opens the Custom Profile editor window to `target`. `NSApp.activate` is
+    /// needed because this is an accessory app (`LSUIElement` — no Dock icon): without
+    /// it, `openWindow` can create the window behind the frontmost app instead of
+    /// bringing it forward.
+    private func openProfileEditor(_ target: ProfileEditorTarget) {
+        appState.profileEditorTarget = target
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "profile-editor")
+    }
 
     @ViewBuilder
     private var stateIndicator: some View {
@@ -203,10 +267,8 @@ struct MenuBarView: View {
         }
     }
 
-    private func peakTemp(prefixes: [String]) -> Float? {
-        guard let temps = appState.latestStatus?.temperatures else { return nil }
-        let values = temps.filter { key, _ in prefixes.contains(where: { key.hasPrefix($0) }) }.values
-        return values.max()
+    private func peakTemp(_ sensor: Sensor) -> Float? {
+        appState.latestStatus.flatMap { sensor.temperature(in: $0) }
     }
 }
 
