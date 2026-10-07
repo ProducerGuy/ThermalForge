@@ -5,10 +5,14 @@
 //  Menu bar app for fan control on Apple Silicon Macs: Mac mini, MacBook, MacBook Pro, Mac Studio, iMac.
 //
 
-import SwiftUI
+import AppKit
 import ThermalForgeCore
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let appState = AppState()
+    private var statusController: StatusBarController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
@@ -19,7 +23,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if running.count > 1 {
             TFLogger.shared.error("Another instance already running — quitting")
             NSApp.terminate(nil)
+            return
         }
+
+        statusController = StatusBarController(appState: appState)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -37,61 +44,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// AppKit entry point on purpose. A placeholder SwiftUI `Settings` scene (used
+// to satisfy `App` after MenuBarExtra was dropped) becomes the app's only
+// scene, and macOS opens its empty window at launch. The menu bar UI is a
+// native NSStatusItem owned by the delegate, so no scenes are needed at all.
 @main
-struct ThermalForgeApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var appState = AppState()
-
-    var body: some Scene {
-        MenuBarExtra {
-            MenuBarView()
-                .environmentObject(appState)
-        } label: {
-            MenuBarLabel(
-                state: appState.monitorState,
-                maxTemp: appState.maxTemp,
-                fahrenheit: appState.useFahrenheit,
-                needsDaemonUpdate: appState.daemonVersionMismatch != nil
-            )
-        }
-        .menuBarExtraStyle(.window)
-    }
-}
-
-// MARK: - Menu Bar Label
-
-struct MenuBarLabel: View {
-    let state: MonitorState
-    let maxTemp: Float?
-    var fahrenheit: Bool = false
-    var needsDaemonUpdate: Bool = false
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: iconName)
-                .overlay(alignment: .topTrailing) {
-                    // Small dot when the daemon is out of sync — visible without
-                    // opening the menu, for users who never touch the CLI.
-                    if needsDaemonUpdate {
-                        Circle()
-                            .fill(.orange)
-                            .frame(width: 5, height: 5)
-                            .offset(x: 3, y: -2)
-                    }
-                }
-            if let tempC = maxTemp {
-                let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
-                Text("\(Int(display))°")
-                    .font(.system(.caption, design: .monospaced))
-            }
-        }
-    }
-
-    private var iconName: String {
-        switch state {
-        case .safetyOverride: return "exclamationmark.triangle.fill"
-        case .active: return "fan.fill"
-        case .idle: return "fan"
+enum ThermalForgeMain {
+    @MainActor
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) {
+            app.run()
         }
     }
 }
