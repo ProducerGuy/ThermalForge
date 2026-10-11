@@ -330,7 +330,15 @@ public final class DaemonClient {
     ///   No effect on resetAuto (nothing to hold).
     @discardableResult
     public func execute(_ command: FanCommand, oneshot: Bool = false) throws -> FanApplyResult {
-        let response = try request(DaemonRequest(command, oneshot: oneshot))
+        // Hardware commands can legitimately take seconds on M1-M4: the first manual
+        // acquisition runs the firmware unlock dance (direct write → Ftst, with
+        // retries). The 2s default stall cutoff expired mid-acquisition, so the
+        // command landed but the caller reported "closed" — a fake failure
+        // (reproduced: first `set` after idle dies at exactly 2.0s while the daemon
+        // logs outcome=ok; the immediate second set succeeds in <1s). Give hardware
+        // verbs a wide budget; the acquisition itself stays bounded below it by the
+        // unlock timeouts (≤10s per fan) plus the reply write.
+        let response = try request(DaemonRequest(command, oneshot: oneshot), timeout: 30.0)
         guard response.ok else {
             throw DaemonError.commandFailed(
                 response.message ?? response.error.map { String(describing: $0) } ?? "daemon error"

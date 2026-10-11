@@ -3,12 +3,15 @@
 //  ThermalForge
 //
 //  Phase 4 connection layer: concurrent, bounded accept + one framed request/response
-//  per connection over DispatchIO, with a ~1s header deadline and a ~5s full-request
-//  deadline (replacing Phase 0's SO_RCVTIMEO). Decoupled from DaemonServer so it can be
-//  tested against a plain bound AF_UNIX socket — the daemon's request processing is
-//  injected as `handle`. Framing-level replies (legacy peer, oversized) live here; the
-//  verb dispatch does not. Every accepted fd passes the injected peer check before
-//  anything else happens to it.
+//  per connection over DispatchIO. Deadlines, in order: a ~1s header deadline frees
+//  connect-and-hang slots; a ~5s request-body deadline bounds incomplete frames;
+//  firmware processing after the body is exempt from that timer but gets its own
+//  generous processing ceiling (~45s) so every slot still has a finite lifetime; the
+//  response write is bounded on its own (~5s). Decoupled from DaemonServer so it can
+//  be tested against a plain bound AF_UNIX socket — the daemon's request processing
+//  is injected as `handle`. Framing-level replies (legacy peer, oversized) live here;
+//  the verb dispatch does not. Every accepted fd passes the injected peer check
+//  before anything else happens to it.
 //
 
 import Darwin
@@ -24,6 +27,9 @@ final class ConnectionServer: @unchecked Sendable {
     private let authorizer: any PeerAuthorizing
     private let headerDeadline: TimeInterval
     private let requestDeadline: TimeInterval
+    /// Finite lifetime for the processing phase: firmware work may legitimately take
+    /// seconds, but it may not hold a connection slot forever.
+    private let processingDeadline: TimeInterval
     /// Processes a decoded request body → response. DaemonServer wraps its call in
     /// smcLock, so it's safe under the concurrent handlers here.
     private let handle: (Data) -> DaemonResponse
@@ -45,6 +51,7 @@ final class ConnectionServer: @unchecked Sendable {
          maxAcceptsPerEvent: Int = 64,
          headerDeadline: TimeInterval = 1.0,
          requestDeadline: TimeInterval = 5.0,
+         processingDeadline: TimeInterval = 45.0,
          summaryDelay: TimeInterval = 60,
          log: @escaping (String) -> Void = { DaemonLog.notice($0) },
          handle: @escaping (Data) -> DaemonResponse) {
@@ -57,6 +64,7 @@ final class ConnectionServer: @unchecked Sendable {
         self.log = log
         self.headerDeadline = headerDeadline
         self.requestDeadline = requestDeadline
+        self.processingDeadline = processingDeadline
         self.handle = handle
     }
 
@@ -155,12 +163,16 @@ final class ConnectionServer: @unchecked Sendable {
             headerTimeout.cancel()
             guard let header else { io.close(flags: .stop); return }
 
-            // The full-request deadline bounds everything from here THROUGH the final
-            // write. It is cancelled only in `finish`, AFTER the write completes — so a
-            // client that sends a header then never reads its reply can't hang the
-            // connection (and leak its slot): the deadline force-closes it. Every
-            // terminal path routes through `finish`, so io is closed exactly once and
-            // the DispatchIO cleanup handler runs connectionFinished exactly once.
+            // The request-body deadline bounds the header→body window. It is cancelled
+            // as soon as the body is complete so it cannot count firmware processing
+            // (an M1-M4 first manual acquisition can take seconds, and the old timer
+            // raced a successful reply — the caller saw "closed" while the command
+            // applied). The processing ceiling takes over from there so a wedged
+            // handler still can't hold a slot forever, and the response write gets its
+            // own deadline so a client that sends a request then never reads its reply
+            // can't hang the connection either. Every terminal path routes through
+            // `finish`, so io is closed exactly once and the DispatchIO cleanup handler
+            // runs connectionFinished exactly once.
             let fullTimeout = DispatchWorkItem { io.close(flags: .stop) }
             q.asyncAfter(deadline: .now() + requestDeadline, execute: fullTimeout)
             let finish = { fullTimeout.cancel(); io.close(flags: .stop) }
@@ -179,9 +191,27 @@ final class ConnectionServer: @unchecked Sendable {
             case .length(let len):
                 readExactly(io, length: len, queue: q) { [self] body in
                     guard let body else { finish(); return }
+                    // Body complete — the request-body deadline has done its job. Swap in
+                    // the processing ceiling: firmware processing (a first manual
+                    // acquisition) legitimately takes seconds, but the slot keeps a
+                    // finite lifetime. (A handler that blocks this connection's serial
+                    // queue also blocks this timer, so the true bound on handler runtime
+                    // is the SMC operations' own timeouts; this ceiling backstops
+                    // everything around them.)
+                    fullTimeout.cancel()
+                    let processingTimeout = DispatchWorkItem { io.close(flags: .stop) }
+                    q.asyncAfter(deadline: .now() + processingDeadline, execute: processingTimeout)
                     autoreleasepool {   // v0.1.10 hygiene, now per request
                         let response = handle(Data(body))
-                        writeResponse(io, response, queue: q, completion: finish)
+                        // Bound the reply write on its own so it — not the handler's
+                        // runtime — is what a vanished reader is limited by.
+                        let writeTimeout = DispatchWorkItem { io.close(flags: .stop) }
+                        q.asyncAfter(deadline: .now() + requestDeadline, execute: writeTimeout)
+                        writeResponse(io, response, queue: q) {
+                            processingTimeout.cancel()
+                            writeTimeout.cancel()
+                            finish()
+                        }
                     }
                 }
             }
