@@ -445,7 +445,14 @@ public final class DaemonServer {
     private var rateLimiter: RateLimiter
     private let rateLock = NSLock()
     /// The thermal safety floor's decision logic (thresholds mirrored from FanProfile).
-    private let thermalFloor = ThermalFloor()
+    /// Rebuilt safety governor: pressure-primary, calibrated per-class thresholds,
+    /// and a release-to-system action instead of pinning fans to max (the old
+    /// ThermalFloor over-triggered on M4-class machines — see SafetyGovernor).
+    private var safetyGovernor = SafetyGovernor()
+    private let governorLock = NSLock()
+    /// Timestamp of the previous thermal tick, for measured elapsed time (the
+    /// governor's persistence windows are seconds, not ticks).
+    private var lastThermalTick: Date?
     /// A temperature sampler injected by tests. When nil, the floor reads the SMC
     /// safety keys itself — per key under smcLock — so it unit-tests via ThermalFloor
     /// and runs without head-of-line blocking in production.
@@ -755,34 +762,48 @@ public final class DaemonServer {
         }
     }
 
-    /// Peak CPU/GPU temperature. Production path reads each safety key under smcLock
-    /// and RELEASES between keys: the read serializes with client writes (no torn SMC
-    /// access — the defect this fixes) but never holds the lock longer than a single
-    /// ~0.3ms read, so a full ~10ms sweep can't head-of-line-block a fan command.
-    /// Sampling temps interleaved with writes is safe — a write changes fan speed, not
-    /// the sensors, and a threshold check doesn't need an instantaneous snapshot.
-    private func currentSafetyTemp() -> Float? {
-        if let injected = injectedSampler { return injected() }
-        var peak: Float = 0
-        for key in FanControl.safetyTempKeys {
+    /// Classified safety samples. Production path reads each safety key under
+    /// smcLock and RELEASES between keys: the read serializes with client writes (no
+    /// torn SMC access — the defect this fixes) but never holds the lock longer than
+    /// a single ~0.3ms read, so a full ~10ms sweep can't head-of-line-block a fan
+    /// command. Sampling temps interleaved with writes is safe — a write changes fan
+    /// speed, not the sensors, and a threshold check doesn't need an instantaneous
+    /// snapshot.
+    private func currentSafetySamples() -> [SafetySample] {
+        if let injected = injectedSampler {
+            if let t = injected() { return [SafetySample(key: "injected", celsius: t, sensorClass: .hotspot)] }
+            return []
+        }
+        let hotspot = Set(FanControl.hotspotSafetyKeys)
+        let structure = Set(FanControl.structureSafetyKeys)
+        let battery = Set(FanControl.batterySafetyKeys)
+        var out: [SafetySample] = []
+        for key in FanControl.safetyTemperatureKeys {
             smcLock.lock()
             let t = fanControl.readTemp(key)
             smcLock.unlock()
-            if let t { peak = max(peak, t) }
+            guard let t else { continue }
+            let cls: SafetySensorClass
+            if hotspot.contains(key) { cls = .hotspot }
+            else if structure.contains(key) { cls = .structure }
+            else if battery.contains(key) { cls = .battery }
+            else { continue }
+            out.append(SafetySample(key: key, celsius: t, sensorClass: cls))
         }
-        return peak > 0 ? peak : nil
+        return out
     }
 
     private func thermalTick() {
+        let now = Date()
+        let elapsed = min(max(now.timeIntervalSince(lastThermalTick ?? now.addingTimeInterval(-1)), 0.05), 5.0)
+        lastThermalTick = now
+
         // Read hold/suspension FIRST, and skip the SMC sweep entirely when there is no
-        // hold and we aren't already overriding. Rationale (we will be asked): the floor
-        // protects a HOLD. No hold means fans are on Apple's auto curve — macOS is
-        // managing thermals and there is nothing for the floor to override, so a reading
-        // it could not act on is not safety. The floor exists for one case: ThermalForge
-        // has pinned fans below what the machine needs and something has gone wrong. The
-        // client monitor at 100ms is the primary governor with its own override; this is
-        // the backstop that survives the app's death. So an idle daemon does zero SMC
-        // work per tick — only a live below-max hold (or an active suspension) samples.
+        // hold and we aren't already latched. Rationale: the floor protects a HOLD. No
+        // hold means fans are on Apple's auto curve — macOS is managing thermals and
+        // there is nothing for the floor to act on. The client monitor at 100ms is the
+        // primary governor; this is the backstop that survives the app's death. So an
+        // idle daemon does zero SMC work per tick.
         stateLock.lock()
         let suspended = safetySuspended
         let heldCommand = hold.command
@@ -790,23 +811,36 @@ public final class DaemonServer {
 
         guard suspended || heldCommand != nil else { return }
 
-        guard let temp = currentSafetyTemp() else { return }
+        // "max" holds are already the protective setting — the old floor skipped them
+        // and so does the governor.
+        let holdProtected = (heldCommand != nil && heldCommand != "max")
+        let samples = currentSafetySamples()
+        let pressure = ThermalPressureLevel(ProcessInfo.processInfo.thermalState)
 
-        switch thermalFloor.evaluate(temp: temp, holdCommand: heldCommand, suspended: suspended) {
+        governorLock.lock()
+        // Reconcile: an external clear (CLI `auto`, the crash watchdog) has already
+        // handed the fans back — the governor must not keep thinking it is latched.
+        if !suspended && safetyGovernor.isLatched { safetyGovernor.clearLatch() }
+        let action = safetyGovernor.evaluate(samples: samples, pressure: pressure,
+                                             holdActive: holdProtected, elapsed: elapsed)
+        governorLock.unlock()
+
+        switch action {
         case .none:
             return
 
-        case .engage:
-            // Override the below-max hold to max. Direct SMC write — NEVER recordHold,
-            // so the user's command + lastBeat are preserved for restore.
+        case .engage(let reason):
+            // Hold fans at max while a below-max hold is overheating. Direct SMC write
+            // — NEVER recordHold, so the user's command + lastBeat are preserved for
+            // restore.
             smcLock.lock()
             let ok = (try? fanControl.setMax()) != nil
             smcLock.unlock()
             guard ok else { return }
             stateLock.lock(); safetySuspended = true; stateLock.unlock()
-            DaemonLog.notice("ThermalForge daemon: thermal floor engaged at \(String(format: "%.1f", temp))°C; fans held at max (was \(heldCommand ?? "none"))")
+            DaemonLog.notice("ThermalForge daemon: thermal floor engaged — \(reason); fans held at max (was \(heldCommand ?? "none"))")
 
-        case .restore:
+        case .restore(let reason):
             // Re-read the hold at restore time — if none of ours is left to restore,
             // hand the fans back to Apple's auto control.
             stateLock.lock()
@@ -820,7 +854,16 @@ public final class DaemonServer {
             }
             smcLock.unlock()
             stateLock.lock(); safetySuspended = false; stateLock.unlock()
-            DaemonLog.notice("ThermalForge daemon: thermal floor cleared at \(String(format: "%.1f", temp))°C; \(restoreCommand.map { "restored \($0)" } ?? "reset to auto")")
+            DaemonLog.notice("ThermalForge daemon: thermal floor cleared — \(reason); \(restoreCommand.map { "restored \($0)" } ?? "left on auto")")
+
+        case .stayAuto(let reason):
+            // Repeated trips: stop the cycle. Hand the fans to Apple and clear the
+            // hold; a deliberate re-apply starts a fresh cycle.
+            smcLock.lock()
+            try? fanControl.resetAuto()
+            smcLock.unlock()
+            stateLock.lock(); hold = .none; safetySuspended = false; stateLock.unlock()
+            DaemonLog.notice("ThermalForge daemon: floor cleared after repeated trips — \(reason)")
         }
     }
 

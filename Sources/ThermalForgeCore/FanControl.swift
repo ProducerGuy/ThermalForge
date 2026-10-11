@@ -69,6 +69,27 @@ extension ThermalStatus {
     }
 }
 
+extension ThermalStatus {
+    /// Classified safety samples for the rebuilt thermal governor, from this
+    /// snapshot. Only the keys the governor knows about are included; the rest of
+    /// the snapshot is ignored. See `FanControl.safetyTemperatureKeys`.
+    public var safetySamples: [SafetySample] {
+        let hotspot = Set(FanControl.hotspotSafetyKeys)
+        let structure = Set(FanControl.structureSafetyKeys)
+        let battery = Set(FanControl.batterySafetyKeys)
+        var out: [SafetySample] = []
+        for (key, celsius) in temperatures {
+            let cls: SafetySensorClass
+            if hotspot.contains(key) { cls = .hotspot }
+            else if structure.contains(key) { cls = .structure }
+            else if battery.contains(key) { cls = .battery }
+            else { continue }
+            out.append(SafetySample(key: key, celsius: celsius, sensorClass: cls))
+        }
+        return out
+    }
+}
+
 public struct DiscoveredKey {
     public let key: String
     public let size: UInt32
@@ -371,6 +392,28 @@ public final class FanControl {
     /// derived from `thermalKeys` so it can't drift from what `status()` reports.
     public static let safetyTempKeys: [String] =
         thermalKeys.filter { key in ["TC", "Tp", "TG", "Tg"].contains { key.hasPrefix($0) } }
+
+    /// Battery sensors that some Apple Silicon machines expose under TG* names. On
+    /// M4 Max these three are the battery, not the GPU (upstream issue #63), so they
+    /// are kept out of the hotspot class — a hot battery must never read as a hot die.
+    public static let misnamedBatteryKeys: Set<String> = ["TG0B", "TG0H", "TG0V"]
+
+    /// Hotspot-class safety keys: the die-adjacent sensors the governor watches with
+    /// the 118°C sustained backstop. Every TC/Tp/TG/Tg key except the misnamed
+    /// battery sensors above — on Apple Silicon these legitimately read 96-113°C
+    /// under sustained load while macOS itself stays nominal (calibrated 2026-10).
+    public static let hotspotSafetyKeys: [String] =
+        safetyTempKeys.filter { !misnamedBatteryKeys.contains($0) }
+
+    /// Structure / board / proximity sensors — slower, closer to what a user feels.
+    public static let structureSafetyKeys: [String] = ["TS0P"]
+
+    /// Battery sensors — heat here ages cells long before the die is stressed.
+    public static let batterySafetyKeys: [String] = ["TB0T"]
+
+    /// Every key the safety governor reads each tick.
+    public static let safetyTemperatureKeys: [String] =
+        hotspotSafetyKeys + structureSafetyKeys + batterySafetyKeys
 
     /// Read one temperature key, decoding by returned size (flt 4-byte or ioft 8-byte).
     /// nil if absent, wrong size, or out of the sane 0–150°C range. Does NOT lock — the

@@ -87,6 +87,12 @@ public final class ThermalMonitor {
     private var anomalyHistory: [Float] = []
     private var isCalibrating = false
 
+    /// Rebuilt safety governor — pressure-primary with per-class thresholds and
+    /// seconds-based persistence (measured elapsed time, so a cadence change
+    /// can't rescale the windows). See SafetyGovernor.
+    private var safetyGovernor = SafetyGovernor()
+    private var lastGovernorTick: Date?
+
     // MARK: - Process Buffer
 
     /// Rolling buffer — captures what was running BEFORE a spike.
@@ -177,27 +183,40 @@ public final class ThermalMonitor {
             monitorTick(status: status, maxTemp: maxTemp)
         }
 
-        // Safety override: any sensor > 95°C
-        if maxTemp >= FanProfile.safetyTempThreshold {
-            if state != .safetyOverride {
-                applyCommand(.setMax)
-                state = .safetyOverride
-                fansCurrentlyRunning = true
-                lastAppliedRPMPercent = 1.0
-                TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
-            }
+        // Safety governor: pressure-primary with per-class, seconds-based backstops.
+        var holding = false
+        if case .active = state { holding = true }
+        let now = Date()
+        let elapsed = min(max(now.timeIntervalSince(lastGovernorTick ?? now.addingTimeInterval(-0.1)), 0.05), 2.0)
+        lastGovernorTick = now
+        switch safetyGovernor.evaluate(
+            samples: status.safetySamples,
+            pressure: ThermalPressureLevel(ProcessInfo.processInfo.thermalState),
+            holdActive: holding,
+            elapsed: elapsed
+        ) {
+        case .none:
+            break
+        case .engage(let reason):
+            applyCommand(.setMax)
+            state = .safetyOverride
+            fansCurrentlyRunning = true
+            lastAppliedRPMPercent = 1.0
+            TFLogger.shared.safety("Floor engaged: \(reason) — fans at max")
+        case .restore(let reason):
+            TFLogger.shared.safety("Floor cleared: \(reason)")
+            state = .idle
+        case .stayAuto(let reason):
+            TFLogger.shared.safety("Floor cleared after repeated trips: \(reason)")
+            state = .idle
+        }
+
+        if state == .safetyOverride {
             if tickCounter % Self.uiUpdateCadence == 0 {
                 onUpdate?(status, activeProfile, state)
             }
             tickCounter += 1
             return
-        }
-
-        // Clear safety override with hysteresis
-        if state == .safetyOverride
-            && maxTemp < FanProfile.safetyTempThreshold - FanProfile.hysteresisDegrees
-        {
-            state = .idle
         }
 
         // Sustained trigger: track consecutive ticks above start threshold.
