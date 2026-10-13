@@ -48,6 +48,7 @@ final class AppState: ObservableObject {
     @Published var availableUpdate: AvailableUpdate?
 
     private var monitor: ThermalMonitor?
+    private var wakeObserver: NSObjectProtocol?
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: DispatchSourceTimer?
     /// Consecutive failed heartbeats, for debouncing `daemonUnreachable`.
@@ -178,6 +179,7 @@ final class AppState: ObservableObject {
     }
 
     deinit {
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         heartbeatTimer?.cancel()
     }
 
@@ -372,6 +374,10 @@ final class AppState: ObservableObject {
         }
         monitor.start()
         self.monitor = monitor
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak monitor] _ in monitor?.invalidateHardwareInventory() }
     }
 
     // MARK: - Actions

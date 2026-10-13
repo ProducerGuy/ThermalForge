@@ -462,6 +462,7 @@ public final class DaemonServer {
         // unified log with the daemon's own prefix.
         fanControl.logSink = { DaemonLog.notice("ThermalForge daemon: \($0)") }
         self.fanControl = fanControl
+        fanControl.enableKeyInventoryCaching()
         self.ownerUID = ownerUID
         // Cache fan RPM limits once (fixed hardware constants). Empty on a read failure
         // → clamp becomes a no-op and FanControl's own range check stays the backstop.
@@ -865,6 +866,9 @@ public final class DaemonServer {
     }
 
     private func handleWake() {
+        smcLock.lock()
+        fanControl.invalidateSMCKeyInventory()
+        smcLock.unlock()
         stateLock.lock()
         let heldCommand = hold.command
         stateLock.unlock()

@@ -112,6 +112,13 @@ public final class FanControl {
         }
     }
 
+    /// Opt into per-connection inventory caching for repeated polling. Discovery
+    /// is deferred to the next read; one-shot CLI callers retain their old path.
+    public func enableKeyInventoryCaching() { smc.enableKeyInventoryCaching() }
+
+    /// Invalidate discovery after wake, on the caller's serialized SMC queue.
+    func invalidateSMCKeyInventory() { smc.invalidateKeyInventory() }
+
     // MARK: - Fan Count
 
     public func fanCount() throws -> Int {

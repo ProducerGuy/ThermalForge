@@ -122,6 +122,7 @@ public final class ThermalMonitor {
 
     public func start(interval: TimeInterval = 0.1) {
         stop()
+        queue.async { [self] in fanControl.enableKeyInventoryCaching() }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: interval)
@@ -135,6 +136,11 @@ public final class ThermalMonitor {
     public func stop() {
         timer?.cancel()
         timer = nil
+    }
+
+    /// Rebuild the connection's sensor inventory after wake without racing reads.
+    public func invalidateHardwareInventory() {
+        queue.async { [self] in fanControl.invalidateSMCKeyInventory() }
     }
 
     /// Update the active profile.
