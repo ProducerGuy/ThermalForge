@@ -110,4 +110,37 @@ struct FanCommandPumpTests {
             #expect(box.value == expected)
         }
     }
+
+    // MARK: - Flush barrier (quit ordering)
+
+    /// The quit path's contract: resetAuto on a separate connection may only
+    /// land AFTER every already-submitted write. flush() returning must mean
+    /// exactly that — no polling, no timeout tolerance (the quit race was a
+    /// setRPM landing after the exit reset and re-pinning the fans in manual).
+    @Test("flush returns only after in-flight and pending writes have executed")
+    func flushIsABarrier() {
+        let h = Harness()
+        let pump = FanCommandPump(queue: DispatchQueue(label: "test.pump")) { cmd in h.execute(cmd) }
+        pump.submit(.setRPM(1000))          // blocks in-flight inside the harness
+        h.firstStarted.wait()
+        pump.submit(.setMax)                 // queued behind the blocked one
+        pump.submit(.setRPM(2000))           // queued (no coalesce: setMax between)
+        h.releaseFirst.signal()
+        pump.flush()
+        #expect(h.recorded == [.setRPM(1000), .setMax, .setRPM(2000)])
+    }
+
+    @Test("the pump still serves submits made after a flush")
+    func usableAfterFlush() {
+        let h = Harness()
+        let pump = FanCommandPump(queue: DispatchQueue(label: "test.pump")) { cmd in h.execute(cmd) }
+        pump.submit(.setMax)
+        h.firstStarted.wait()          // the harness blocks the FIRST command
+        h.releaseFirst.signal()        // ...so release it before the barrier
+        pump.flush()
+        #expect(h.recorded == [.setMax])
+        pump.submit(.resetAuto)
+        #expect(wait(h, forCount: 2))
+        #expect(h.recorded == [.setMax, .resetAuto])
+    }
 }

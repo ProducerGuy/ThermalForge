@@ -9,6 +9,12 @@ import SwiftUI
 import ThermalForgeCore
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Held (handed over by ThermalForgeApp.init) so applicationWillTerminate
+    /// can quiesce the fan pipeline — otherwise the exit resetAuto below runs
+    /// while the monitor's pipeline still has an in-flight write, which can
+    /// land a moment later and re-pin the fans in manual.
+    @MainActor var appState: AppState?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon — menu bar only
         NSApp.setActivationPolicy(.accessory)
@@ -23,6 +29,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Quiesce FIRST: stop the monitor's ticks, reject new submits, and
+        // drain the pump — otherwise an in-flight ramp write can land at the
+        // daemon AFTER the resetAuto below and re-pin the fans in manual
+        // until the daemon watchdog reverts them.
+        MainActor.assumeIsolated {
+            appState?.prepareForTermination()
+        }
+
         // Reset fans on quit so the daemon doesn't hold stale APP settings — but
         // ONLY if the app owns the hold. A CLI hold (`sudo thermalforge max`) is the
         // user's deliberate, unsupervised choice; quitting the menu bar app must not
@@ -40,7 +54,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ThermalForgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState: AppState
+
+    init() {
+        let state = AppState()
+        _appState = StateObject(wrappedValue: state)
+        // The StateObject owns it for SwiftUI; the delegate holds the same
+        // instance so the quit path can quiesce the fan pipeline.
+        delegate.appState = state
+    }
 
     var body: some Scene {
         MenuBarExtra {

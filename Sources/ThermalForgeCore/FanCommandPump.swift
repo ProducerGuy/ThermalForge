@@ -88,4 +88,18 @@ public final class FanCommandPump: @unchecked Sendable {
             done?(ok)
         }
     }
+
+    /// Synchronous barrier: blocks until every command submitted BEFORE this
+    /// call has executed. Termination ordering: the exit path stops new
+    /// submits, flushes, then runs its resetAuto on a separate connection —
+    /// without the barrier an in-flight write can land at the daemon AFTER
+    /// the reset and re-pin the fans in manual.
+    ///
+    /// The barrier block itself drains: a submit can be overtaken between its
+    /// buffered append and its queued kick, and a bare sync would return
+    /// before that command ran. With submits already stopped by the caller, a
+    /// drain inside the barrier closes that window.
+    public func flush() {
+        queue.sync { [self] in drain() }
+    }
 }
