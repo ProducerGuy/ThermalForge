@@ -65,11 +65,18 @@ public final class ThermalMonitor {
     /// At 100ms thermal tick, 20 × 0.1s = 2 seconds.
     private static let monitorCadence = 20
 
-    /// UI update cadence: onUpdate fires every N thermal ticks.
-    /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
-    private static let uiUpdateCadence = 5
+    /// UI update cadence: onUpdate fires at most every N thermal ticks,
+    /// plus immediately on a visible change (profile/state) via StatusPushGate.
+    /// At 100ms thermal tick, 10 × 0.1s = 1 second — the menu bar re-renders
+    /// on every push (MenuBarExtra view graph + NSStatusItem snapshot), and a
+    /// faster cadence spends most of an open menu's lifetime mid-rebuild,
+    /// which can eat picker taps (see StatusPushGate).
+    private static let uiUpdateCadence = 10
 
     private var tickCounter = 0
+
+    /// Decides when onUpdate pushes: 1s cadence, immediate on visible change.
+    private var pushGate = StatusPushGate(intervalTicks: uiUpdateCadence)
 
     // MARK: - Fan State
 
@@ -186,7 +193,7 @@ public final class ThermalMonitor {
                 lastAppliedRPMPercent = 1.0
                 TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
-            if tickCounter % Self.uiUpdateCadence == 0 {
+            if pushGate.shouldPush(tick: tickCounter, profileID: activeProfile.id, state: state) {
                 onUpdate?(status, activeProfile, state)
             }
             tickCounter += 1
@@ -216,8 +223,8 @@ public final class ThermalMonitor {
             tickCurve(status: status, peakTemp: maxTemp)
         }
 
-        // UI update at slower cadence (every 500ms)
-        if tickCounter % Self.uiUpdateCadence == 0 {
+        // UI update at slower cadence (1s; immediate on visible change)
+        if pushGate.shouldPush(tick: tickCounter, profileID: activeProfile.id, state: state) {
             onUpdate?(status, activeProfile, state)
         }
 
