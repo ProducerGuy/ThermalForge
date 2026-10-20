@@ -83,8 +83,11 @@ public final class ThermalMonitor {
 
     // MARK: - Anomaly Detection
 
-    /// Tracks temps over 30 seconds (15 readings at 2s monitor cadence)
-    private var anomalyHistory: [Float] = []
+    /// Two-tier spike/drop detector (2s and 30s windows) with a 60s report
+    /// cooldown — P-core peaks oscillate ±5°C at normal load, and a
+    /// cooldown-less detector logs an event every few seconds all day.
+    /// See AnomalyGate.
+    private var anomalyGate = AnomalyGate()
     private var isCalibrating = false
 
     // MARK: - Process Buffer
@@ -235,57 +238,60 @@ public final class ThermalMonitor {
         processBuffer.append((timestamp: ts, processes: currentProcs))
         if processBuffer.count > 15 { processBuffer.removeFirst() }
 
-        // Anomaly detection: two tiers
-        // Tier 1: instant spike — >5°C between consecutive readings (2 seconds)
-        // Tier 2: sustained change — >10°C over 30 seconds
+        // Anomaly detection: two tiers (Tier 1: >5°C between 2s readings;
+        // Tier 2: >10°C over 30s), decided by the pure AnomalyGate, both
+        // rate-limited by its 60s report cooldown. The gate is fed EVERY
+        // sample — the history stays warm even while calibration suppresses
+        // reporting — so the first post-calibration sample compares against
+        // a fresh reading, not a stale pre-calibration one.
+        let anomalyEvent = anomalyGate.evaluate(temp: maxTemp)
         if !isCalibrating {
-            var spikeDetected = false
-
-            // Tier 1: check against previous reading
-            if let prevTemp = anomalyHistory.last {
-                let instantDelta = maxTemp - prevTemp
-                if abs(instantDelta) > 5 {
-                    let direction = instantDelta > 0 ? "spike" : "drop"
-                    let fan0 = status.fans.first
-                    TFLogger.shared.info(
-                        "Instant \(direction): \(String(format: "%.1f", prevTemp))→\(String(format: "%.1f", maxTemp))°C " +
-                        "(\(String(format: "%+.1f", instantDelta))°C in 2s) | " +
-                        "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
-                        "Profile: \(activeProfile.name)"
-                    )
-                    spikeDetected = true
-                }
+            func report(_ tier: String, _ window: String, from: Float, to: Float) {
+                let delta = to - from
+                let direction = delta > 0 ? "spike" : "drop"
+                let fan0 = status.fans.first
+                TFLogger.shared.info(
+                    "\(tier) \(direction): \(String(format: "%.1f", from))→\(String(format: "%.1f", to))°C " +
+                    "(\(String(format: "%+.1f", delta))°C in \(window)) | " +
+                    "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
+                    "Profile: \(activeProfile.name)"
+                )
             }
 
-            // Tier 2: check over 30-second window
-            if anomalyHistory.count >= 15 {
-                let oldest = anomalyHistory.first!
-                let sustainedDelta = maxTemp - oldest
-                if abs(sustainedDelta) > 10 {
-                    let direction = sustainedDelta > 0 ? "spike" : "drop"
-                    let fan0 = status.fans.first
-                    TFLogger.shared.info(
-                        "Sustained \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
-                        "(\(String(format: "%+.1f", sustainedDelta))°C in 30s) | " +
-                        "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
-                        "Profile: \(activeProfile.name)"
-                    )
-                    spikeDetected = true
-                    anomalyHistory.removeAll()
-                }
-            }
-
-            // Dump the rolling buffer on any spike — shows what was running BEFORE
-            if spikeDetected {
-                TFLogger.shared.info("Pre-spike process history (last \(processBuffer.count * 2)s):")
-                for entry in processBuffer {
-                    TFLogger.shared.info("  \(entry.timestamp): \(entry.processes)")
-                }
+            switch anomalyEvent {
+            case .instant(let from, let to):
+                report("Instant", "2s", from: from, to: to)
+                dumpProcessHistory()
+            case .sustained(let from, let to):
+                report("Sustained", "30s", from: from, to: to)
+                dumpProcessHistory()
+            case .none:
+                break
             }
         }
+    }
 
-        anomalyHistory.append(maxTemp)
-        if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
+    /// Dump the rolling buffer on a reported event — shows what was running
+    /// BEFORE it. Consecutive identical snapshots collapse to one line: an
+    /// idle stretch used to cost 15 "  ts: idle" lines per event, which at
+    /// one event every few seconds swamped the daily log (~200k lines/day).
+    private func dumpProcessHistory() {
+        TFLogger.shared.info("Pre-spike process history (last \(processBuffer.count * 2)s):")
+        var idx = 0
+        while idx < processBuffer.count {
+            let entry = processBuffer[idx]
+            var run = 1
+            while idx + run < processBuffer.count, processBuffer[idx + run].processes == entry.processes {
+                run += 1
+            }
+            if run == 1 {
+                TFLogger.shared.info("  \(entry.timestamp): \(entry.processes)")
+            } else {
+                let last = processBuffer[idx + run - 1].timestamp
+                TFLogger.shared.info("  \(entry.timestamp) → \(last): \(entry.processes) (×\(run))")
+            }
+            idx += run
+        }
     }
 
     // MARK: - Smart Profile
