@@ -420,6 +420,10 @@ final class AppState: ObservableObject {
                 // here, on the daemon-confirmed success path, never on a failed reset.
                 self.persistSelectedProfile(FanProfile.silent.id)
                 self.monitor?.switchProfile(.silent)
+                // The daemon confirmed THIS resetAuto, but a fan write already in
+                // flight can still land after it and re-pin manual — arm the
+                // bounded watch so the handback is confirmed against hardware.
+                self.monitor?.armHandbackWatch()
                 TFLogger.shared.profile("Reset to Default (Silent (Apple Default))")
             }
         }
@@ -436,7 +440,13 @@ final class AppState: ObservableObject {
         // a CLI hold (so its unsupervised hold isn't orphaned). Otherwise active
         // profiles let tick() ramp from the current temperature. Off-main one-shot
         // on the pump (never coalesced/reordered).
-        if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" || took {
+        if profile.curve.handsOff {
+            // No direct resetAuto: a fan write already in flight can land at the
+            // daemon after it and re-pin manual. The bounded handback watch
+            // confirms auto against the hardware and retries as needed — it also
+            // covers a CLI-hold takeover, whose release is the same resetAuto.
+            monitor?.armHandbackWatch()
+        } else if profile.id == "smart" || took {
             commandPump.submit(.resetAuto)
         }
     }

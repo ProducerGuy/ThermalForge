@@ -48,9 +48,15 @@ public enum MonitorState: Equatable {
 // MARK: - Thermal Monitor
 
 public final class ThermalMonitor {
-    private let fanControl: FanControl
     private var timer: DispatchSourceTimer?
-    private let queue = DispatchQueue(label: "com.thermalforge.monitor")
+
+    /// The monitor's work queue. Internal (not private) so unit tests can run
+    /// tick() ON the queue and use a sync hop as a barrier behind async work.
+    let queue = DispatchQueue(label: "com.thermalforge.monitor")
+
+    /// Hardware status source — injected so unit tests can script fan modes
+    /// without SMC; production always passes the fanControl-backed reader.
+    private let readStatus: () throws -> ThermalStatus
 
     public private(set) var activeProfile: FanProfile
     public private(set) var state: MonitorState = .idle
@@ -75,6 +81,15 @@ public final class ThermalMonitor {
 
     private var lastAppliedRPMPercent: Float = 0
     private var fansCurrentlyRunning = false
+
+    /// Hands-off handback retry cadence: while the hardware still reads manual
+    /// on every 100ms tick, retry resetAuto at 1Hz — a healthy handback
+    /// confirms on the next tick, and a 10Hz retry would only hammer the
+    /// daemon. Internal for unit tests.
+    static let handsOffRetryCadence = 10
+
+    /// Ticks remaining in an armed handback watch (see armHandbackWatch).
+    private var handbackTicksLeft = 0
     private var sustainedAboveCount = 0
 
     // MARK: - Smart Profile State
@@ -112,10 +127,15 @@ public final class ThermalMonitor {
     /// Called when a fan command needs to be executed (may require privilege)
     public var onFanCommand: ((FanCommand) throws -> Void)?
 
-    public init(fanControl: FanControl, profile: FanProfile = .silent) {
-        self.fanControl = fanControl
+    public convenience init(fanControl: FanControl, profile: FanProfile = .silent) {
+        self.init(profile: profile, readStatus: { try fanControl.status() })
+    }
+
+    init(profile: FanProfile = .silent,
+         readStatus: @escaping () throws -> ThermalStatus) {
         self.activeProfile = profile
         self.tickInterval = 0.1
+        self.readStatus = readStatus
     }
 
     // MARK: - Lifecycle
@@ -135,6 +155,17 @@ public final class ThermalMonitor {
     public func stop() {
         timer?.cancel()
         timer = nil
+    }
+
+    /// Arm a bounded handback watch. For the next `seconds`, hands-off ticks
+    /// CONFIRM the handback to Apple auto against the hardware fan mode
+    /// instead of assuming it from our own bookkeeping, retrying resetAuto
+    /// while any fan still reads manual. Bounded, so a dead daemon or an
+    /// external tool legitimately holding manual is never fought forever.
+    public func armHandbackWatch(seconds: Float = 10) {
+        queue.async { [self] in
+            handbackTicksLeft = Int(seconds / tickInterval)
+        }
     }
 
     /// Update the active profile.
@@ -164,8 +195,10 @@ public final class ThermalMonitor {
 
     // MARK: - Polling
 
-    private func tick() {
-        guard let status = try? fanControl.status() else { return }
+    /// One thermal tick. Internal (not private) so unit tests can run it ON
+    /// the monitor queue, where it is designed to run.
+    func tick() {
+        guard let status = try? readStatus() else { return }
         latestStatus = status
 
         // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
@@ -416,12 +449,25 @@ public final class ThermalMonitor {
         let maxRPM = status.fans.first.map { Float($0.maxRPM) } ?? 7826
         let minRPM = status.fans.first.map { Float($0.minRPM) } ?? 2317
 
-        // Hands-off profiles (Silent): don't control fans, just monitor
+        // Hands-off profiles (Silent): don't control fans, just monitor. The
+        // handback to Apple auto is CONFIRMED against the hardware fan mode,
+        // not assumed from our own bookkeeping: a fan write already in flight
+        // when the profile switched can land at the daemon AFTER the switch's
+        // resetAuto and re-pin the fans in manual — switchProfile already
+        // cleared fansCurrentlyRunning, so a flag-driven branch would never
+        // correct the orphaned hold, and with the app alive and heartbeating
+        // the daemon watchdog never reclaims it either: the fans stay pinned
+        // in manual until quit. Supervision is bounded: the switch arms a
+        // handback watch, and during the window a manual reading re-sends
+        // resetAuto (rate-limited) — also catching a re-pin that lands after
+        // the hardware briefly confirmed auto.
         if curve.handsOff {
-            if fansCurrentlyRunning {
-                applyCommand(.resetAuto)
-                fansCurrentlyRunning = false
-                lastAppliedRPMPercent = 0
+            let watching = handbackTicksLeft > 0
+            if watching { handbackTicksLeft -= 1 }
+            if watching, status.fans.contains(where: { $0.mode == "manual" }) {
+                if tickCounter % Self.handsOffRetryCadence == 0 {
+                    applyCommand(.resetAuto)
+                }
                 state = .idle
             }
             return
