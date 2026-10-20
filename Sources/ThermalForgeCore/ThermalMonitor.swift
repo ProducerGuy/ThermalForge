@@ -76,6 +76,9 @@ public final class ThermalMonitor {
     private var lastAppliedRPMPercent: Float = 0
     private var fansCurrentlyRunning = false
     private var sustainedAboveCount = 0
+    /// Confirms the fans-off release with sustained cold instead of releasing
+    /// on the first below-stopTemp tick. See FanOffGate.
+    private var fanOffGate = FanOffGate()
 
     // MARK: - Smart Profile State
 
@@ -116,6 +119,7 @@ public final class ThermalMonitor {
         self.fanControl = fanControl
         self.activeProfile = profile
         self.tickInterval = 0.1
+        self.fanOffGate = FanOffGate(tickInterval: tickInterval)
     }
 
     // MARK: - Lifecycle
@@ -427,17 +431,34 @@ public final class ThermalMonitor {
             return
         }
 
+        // Fans-off gate — evaluated EVERY tick so the cold streak resets the
+        // moment the peak leaves the stop band (an idle core's sensor cliff
+        // can swing the peak across stopTemp on a 100ms scale).
+        let offAction = fanOffGate.evaluate(temp: peakTemp, stopTemp: curve.stopTemp)
+
         // Get target from curve (now applies curve shape: easeIn, linear, easeOut, sCurve)
-        guard let rawTarget = curve.targetPercent(at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning) else {
-            // Curve says fans should be off
-            if fansCurrentlyRunning {
-                applyCommand(.resetAuto)
-                fansCurrentlyRunning = false
-                lastAppliedRPMPercent = 0
-                state = .idle
-                TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
-            }
+        var rawTarget: Float
+        if let target = curve.targetPercent(at: peakTemp, fansCurrentlyRunning: fansCurrentlyRunning) {
+            rawTarget = target
+        } else if !fansCurrentlyRunning {
+            // Curve says fans should be off — and they already are.
             return
+        } else if offAction == .release {
+            // Sustained cold confirmed — hand the fans back to Apple now.
+            // The release is CONFIRMED, not instant: with stopTemp at
+            // idle-core resting level, an instant release hands the fans to
+            // Apple mid-ramp over and over (2,182 releases in three days of
+            // logs, fans slamming 3000+→1300 RPM every 3-7 seconds).
+            applyCommand(.resetAuto)
+            fansCurrentlyRunning = false
+            lastAppliedRPMPercent = 0
+            state = .idle
+            TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C sustained ≤\(Int(curve.stopTemp))°C for \(Int(FanProfile.stopSustainSeconds.rounded()))s [\(activeProfile.name)]")
+            return
+        } else {
+            // Cold not yet sustained — hold at minimum, the same treatment
+            // the hysteresis band gives. 0.001 signals that below.
+            rawTarget = 0.001
         }
 
         // Sustained trigger: per-profile duration.

@@ -289,4 +289,14 @@ extension FanProfile {
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
+    /// How long the peak sensor must STAY at/below stopTemp before fans are
+    /// handed back to Apple's auto mode. The peak is a max over all CPU/GPU
+    /// cores, and an idle core's reading drops 20-30°C the instant its workload
+    /// ends, so with stopTemp at idle-core resting level the peak oscillates
+    /// across the threshold on a 100ms scale; an instant release there handed
+    /// the fans to Apple mid-ramp 2,182 times in three days of logs (fans
+    /// slamming 3000+→1300 RPM every 3-7 seconds — the start/stop cycling that
+    /// is the #1 bearing wear factor). Until cold is confirmed, fans hold at
+    /// minimum. See FanOffGate.
+    public static let stopSustainSeconds: Float = 5.0
 }
