@@ -350,9 +350,17 @@ public final class FanControl {
         "Tp01", "Tp02", "Tp03", "Tp04", "Tp05", "Tp06", "Tp07", "Tp08",
         "Tp09", "Tp0A", "Tp0B", "Tp0C", "Tp0D", "Tp0F", "Tp0G", "Tp0H",
         "Tp0J", "Tp0L", "Tp0P", "Tp0S", "Tp0T", "Tp0W", "Tp0X", "Tp0b",
+        // CPU — M6 (Mac mini Mac18,5): P/S-cluster keys not in the list above, and the E cluster (Te prefix).
+        // Without these the hottest M6 cores (Tp0g/Tp0j) are not watched.
+        "Tp0E", "Tp0I", "Tp0d", "Tp0g", "Tp0j", "Tp0m", "Tp0o", "Tp0r",
+        "Tp0t", "Tp0u", "Tp0w", "Tp0x", "Tp0y", "Tp0z",
+        "Te07", "Te08", "Te09", "Te0c", "Te0e", "Te0f", "Te0g", "Te0h", "Te0i",
         // GPU (flt — M1-M4, and ioft 8-byte — M5 Max)
         "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg0f", "Tg0j",
         "TG0B", "TG0H", "TG0V",
+        // GPU — M6 (Mac mini Mac18,5). None of the keys above exist on M6, so no GPU temperature was shown.
+        "Tg01", "Tg07", "Tg08", "Tg09", "Tg0a", "Tg0b", "Tg0c", "Tg0d",
+        "Tg10", "Tg17", "Tg1a", "Tg1b", "Tg1c", "Tg1d", "Tg1e", "Tg1f", "Tg1g", "Tg1h",
         // Memory
         "Tm02", "Tm06", "Tm08", "Tm09", "TRDX", "TMVR",
         // Power delivery
