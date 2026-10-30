@@ -77,6 +77,15 @@ public final class SMCConnection {
 
     private let connection: io_connect_t
 
+    /// Data size per key, from the first successful readKeyInfo. 0 = the SMC said the
+    /// key does not exist. A key's size and existence are fixed by firmware, so each key
+    /// costs one readKeyInfo per connection instead of one per read. Without this,
+    /// status() spent 80 IOKit calls per 100ms tick, 32 of them on absent thermalKeys.
+    /// Transient IOKit failures are not cached. Locked because the daemon reads from
+    /// more than one thread.
+    private var keySizes: [UInt32: UInt32] = [:]
+    private let keySizesLock = NSLock()
+
     public init?() {
         var iterator: io_iterator_t = 0
         defer { IOObjectRelease(iterator) }
@@ -111,15 +120,8 @@ public final class SMCConnection {
         var input = SMCParamStruct()
         var output = SMCParamStruct()
 
-        // Get key info (data size)
         input.key = fourCharCode(key)
-        input.data8 = SMCCommand.readKeyInfo.rawValue
-        guard callSMC(&input, &output) == kIOReturnSuccess else {
-            return (false, [], 0)
-        }
-
-        let dataSize = output.keyInfo.dataSize
-        guard dataSize > 0 else { return (false, [], 0) }
+        guard let dataSize = keySize(input.key), dataSize > 0 else { return (false, [], 0) }
 
         // Read value
         input.keyInfo.dataSize = dataSize
@@ -199,6 +201,26 @@ public final class SMCConnection {
     }
 
     // MARK: - Private
+
+    /// Cached data size for a key (0 = absent), or nil if the readKeyInfo call failed.
+    private func keySize(_ code: UInt32) -> UInt32? {
+        keySizesLock.lock()
+        let cached = keySizes[code]
+        keySizesLock.unlock()
+        if let cached { return cached }
+
+        var input = SMCParamStruct()
+        var output = SMCParamStruct()
+        input.key = code
+        input.data8 = SMCCommand.readKeyInfo.rawValue
+        guard callSMC(&input, &output) == kIOReturnSuccess else { return nil }
+
+        let size = output.keyInfo.dataSize
+        keySizesLock.lock()
+        keySizes[code] = size
+        keySizesLock.unlock()
+        return size
+    }
 
     private func callSMC(_ input: inout SMCParamStruct, _ output: inout SMCParamStruct) -> kern_return_t {
         var outputSize = MemoryLayout<SMCParamStruct>.stride
