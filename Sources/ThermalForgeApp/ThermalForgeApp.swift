@@ -15,27 +15,17 @@ struct ThermalForgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     var body: some Scene {
-        // Custom Profile editor — a real window (not the menu bar popover) since
-        // it's a form, not a quick action. Opened via `openWindow(id: "profile-editor")`
-        // after setting `appState.profileEditorTarget`. The menu bar item itself is
-        // owned by `AppDelegate` via raw AppKit, not a `MenuBarExtra` scene — see its
-        // doc comment for why — but `openWindow` still resolves this scene
-        // registration app-wide no matter which view calls it.
+        // SwiftUI requires at least one Scene. The menu bar item AND the Custom Profile
+        // editor are both owned by `AppDelegate` via raw AppKit, so this is a placeholder
+        // that never shows anything (`Settings` is not auto-presented at launch).
         //
-        // With no `MenuBarExtra` scene anymore, this `Window` is the app's ONLY
-        // scene — and SwiftUI auto-presents an app's sole scene at launch unless
-        // told otherwise. `.defaultLaunchBehavior(.suppressed)` (the real fix)
-        // needs macOS 15, but this project supports macOS 14+, and `SceneBuilder`
-        // has no `buildLimitedAvailability` to branch on `#available` here — so the
-        // auto-opened window is closed imperatively instead, in
-        // `AppDelegate.applicationDidFinishLaunching`. (The other half of that bug
-        // — quitting the whole app when this window closed — is
-        // `applicationShouldTerminateAfterLastWindowClosed` in `AppDelegate`.)
-        Window("Custom Profile", id: "profile-editor") {
-            ProfileEditorWindow()
-                .environmentObject(delegate.appState)
-        }
-        .windowResizability(.contentSize)
+        // The editor used to be a `Window("Custom Profile")` scene here. That was the
+        // app's only scene, so SwiftUI auto-opened it at launch and a delegate hack
+        // closed it — but a closed `Window` scene keeps its `NSHostingView` alive, and
+        // every `AppState` change kept installing a never-torn-down Observation
+        // tracking entry on it: the app grew to GBs over days. A plain `NSWindow`
+        // created on demand and dropped on close has no such lifetime.
+        Settings { EmptyView() }
     }
 }
 
@@ -51,11 +41,12 @@ struct ThermalForgeApp: App {
 /// `image.isTemplate = false` renders genuine color, which is the whole reason
 /// for this class instead of a `MenuBarExtra` scene.
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     let appState = AppState()
 
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
+    private var editorWindow: NSWindow?
     private var appStateSubscription: AnyCancellable?
     private var lastRenderKey: String?
 
@@ -71,28 +62,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
         }
 
+        appState.openProfileEditor = { [weak self] target in self?.openProfileEditor(target) }
+
         setUpStatusItem()
         setUpPopover()
         observeAppState()
         updateStatusItem()
-
-        // The "Custom Profile" editor is the app's only `Scene`, and SwiftUI
-        // auto-presents an app's sole scene at launch — it should only ever appear
-        // via `openWindow(id:)` (from the "New"/"Edit" buttons). Whatever SwiftUI
-        // auto-opened hasn't been given a `profileEditorTarget` to edit, so it'd
-        // show a blank/stale form anyway. Deferred one runloop turn because
-        // SwiftUI's own window presentation for this launch hasn't necessarily
-        // happened yet when this delegate method runs.
-        //
-        // ONLY the editor window: `NSApp.windows` also contains the private
-        // `NSStatusBarWindow` hosting the status item's button — closing that one
-        // leaves the icon drawn but dead to clicks.
-        DispatchQueue.main.async {
-            for window in NSApp.windows
-            where window.identifier?.rawValue.contains("profile-editor") == true || window.title == "Custom Profile" {
-                window.close()
-            }
-        }
     }
 
     /// This is a menu bar accessory app — it lives in the status item, not in any
@@ -129,9 +104,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpPopover() {
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: MenuBarView().environmentObject(appState)
-        )
+        popover.delegate = self
     }
 
     @objc private func togglePopover() {
@@ -139,12 +112,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            // The hosting controller exists only while the popover is shown (released in
+            // `popoverDidClose`), so no SwiftUI view observes AppState while it's closed.
+            popover.contentViewController = NSHostingController(
+                rootView: MenuBarView().environmentObject(appState)
+            )
             // Accessory apps (LSUIElement — no Dock icon) don't automatically become
             // frontmost on click; without this the popover (and any window it opens,
             // e.g. the profile editor) can appear behind the previously-frontmost app.
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        // One runloop turn later: the close can be triggered from a button inside the
+        // popover's own SwiftUI view (e.g. New/Edit profile), which must finish its
+        // action before being released.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.popover.isShown else { return }
+            self.popover.contentViewController = nil
+        }
+    }
+
+    // MARK: - Custom Profile editor
+
+    /// Opens the editor in a plain `NSWindow`, created per open and fully released on
+    /// close (see `ThermalForgeApp.body` for why this isn't a SwiftUI `Window` scene).
+    /// An already-open editor is replaced, so New → Edit never shows stale fields.
+    func openProfileEditor(_ target: ProfileEditorTarget) {
+        popover.performClose(nil)
+        closeProfileEditor()
+
+        let view = ProfileEditorView(target: target, appState: appState) { [weak self] in
+            self?.closeProfileEditor()
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "Custom Profile"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false   // we own the lifetime; avoid a double release
+        window.delegate = self
+        window.center()
+        editorWindow = window
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func closeProfileEditor() {
+        editorWindow?.close()   // → windowWillClose does the teardown
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === editorWindow else { return }
+        editorWindow = nil
+        window.delegate = nil
+        // Drop the SwiftUI content one runloop turn later: this can run inside a button
+        // action (Save/Cancel → onClose) of the very view being torn down. Releasing it
+        // frees the hosting view and everything it observes.
+        DispatchQueue.main.async { window.contentViewController = nil }
     }
 
     // MARK: - Live updates

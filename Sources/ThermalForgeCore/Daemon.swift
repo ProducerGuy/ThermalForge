@@ -673,9 +673,37 @@ public final class DaemonServer {
         let response = process(request)
         smcLock.unlock()
         // Verb + outcome only — never raw client bytes.
-        NSLog("ThermalForge daemon: verb=%@ outcome=%@", request.verb.rawValue,
-              response.ok ? "ok" : (response.error?.rawValue ?? "error"))
+        if shouldLogRequest(verb: request.verb, ok: response.ok) {
+            NSLog("ThermalForge daemon: verb=%@ outcome=%@", request.verb.rawValue,
+                  response.ok ? "ok" : (response.error?.rawValue ?? "error"))
+        }
         return response
+    }
+
+    /// Request-log volume control. The app polls heartbeat/version/state every 5s and
+    /// ramps fan speed up to ~10x/sec — logging every successful one is ~50k+ useless
+    /// "ok" lines a day. Failures and the rare state-changing verbs (max/auto) always
+    /// log; routine polls never do when they succeed; successful `set`/`setfan` ramp
+    /// writes log at most once per `routineLogInterval`.
+    private static let routineLogInterval: TimeInterval = 30
+    private var lastRampLogAt = Date.distantPast
+    private let logGateLock = NSLock()
+
+    private func shouldLogRequest(verb: DaemonRequest.Verb, ok: Bool) -> Bool {
+        guard ok else { return true }
+        switch verb {
+        case .heartbeat, .version, .state, .status:
+            return false
+        case .set, .setfan:
+            logGateLock.lock()
+            defer { logGateLock.unlock() }
+            let now = Date()
+            guard now.timeIntervalSince(lastRampLogAt) >= Self.routineLogInterval else { return false }
+            lastRampLogAt = now
+            return true
+        case .max, .auto:
+            return true
+        }
     }
 
     /// The full request dispatch — MOVED VERBATIM from the pre-Phase-4 serial handler.

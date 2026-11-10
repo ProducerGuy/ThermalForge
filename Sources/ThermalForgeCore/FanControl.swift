@@ -41,11 +41,11 @@ public struct FanInfo {
     public let mode: String
 }
 
-public struct ThermalStatus: Encodable {
+public struct ThermalStatus: Encodable, Equatable {
     public let fans: [FanStatus]
     public let temperatures: [String: Float]
 
-    public struct FanStatus: Encodable {
+    public struct FanStatus: Encodable, Equatable {
         public let index: Int
         public let actualRPM: Int
         public let targetRPM: Int
@@ -212,6 +212,10 @@ public final class FanControl {
     }
 
     // MARK: - Set Speed
+    //
+    // Per-write logging is intentionally absent: a ramp issues a write up to ~10x/sec
+    // per fan, which flooded the log. Meaningful transitions (fans on/off, profile
+    // changes, safety overrides, reset) are logged by their owners instead.
 
     /// Set all fans to maximum RPM
     public func setMax() throws {
@@ -226,7 +230,6 @@ public final class FanControl {
             guard smc.writeKey(targetKey, bytes: floatToSMCBytes(maxRPM)) else {
                 throw ThermalForgeError.writeFailed(targetKey)
             }
-            log("Set fan \(i) to max (\(Int(maxRPM)) RPM)")
         }
     }
 
@@ -256,7 +259,6 @@ public final class FanControl {
         guard smc.writeKey(targetKey, bytes: floatToSMCBytes(rpm)) else {
             throw ThermalForgeError.writeFailed(targetKey)
         }
-        log("Set fan \(index) to \(Int(rpm)) RPM")
     }
 
     /// Set all fans to a specific RPM
@@ -283,7 +285,6 @@ public final class FanControl {
             guard smc.writeKey(targetKey, bytes: floatToSMCBytes(rpm)) else {
                 throw ThermalForgeError.writeFailed(targetKey)
             }
-            log("Set fan \(i) to \(Int(rpm)) RPM")
         }
     }
 

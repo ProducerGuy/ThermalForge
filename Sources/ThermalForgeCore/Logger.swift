@@ -71,23 +71,55 @@ public final class TFLogger {
 
     // MARK: - Writing
 
+    /// Open append handle for the current day's file. Kept open across writes (the old
+    /// open/seek/write/close per line was a syscall storm at high log rates) and
+    /// rotated when the date changes. Guarded by `lock`.
+    private var handle: FileHandle?
+    private var handleDate: String?
+
     private func write(_ category: String, _ message: String) {
         lock.lock()
         defer { lock.unlock() }
 
-        let timestamp = isoFormatter.string(from: Date())
+        let now = Date()
+        let timestamp = isoFormatter.string(from: now)
         let entry = "[\(timestamp)] [\(category)] \(message)\n"
-        let file = currentLogFile
+        guard let data = entry.data(using: .utf8) else { return }
 
-        if let handle = try? FileHandle(forWritingTo: file) {
-            handle.seekToEndOfFile()
-            if let data = entry.data(using: .utf8) {
-                handle.write(data)
-            }
-            handle.closeFile()
-        } else {
-            try? entry.write(to: file, atomically: true, encoding: .utf8)
+        let dateStr = dateFormatter.string(from: now)
+        if handle == nil || handleDate != dateStr {
+            closeHandle()
+            handle = openHandle(dateStr: dateStr)
+            handleDate = dateStr
         }
+        guard let handle else { return }
+
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            // The file may have been removed/rotated underneath us — drop the stale
+            // handle so the next write reopens (and recreates) it.
+            closeHandle()
+        }
+    }
+
+    private func openHandle(dateStr: String) -> FileHandle? {
+        let file = logDir.appendingPathComponent("thermalforge-\(dateStr).log")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: file.path) {
+            try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
+            guard fm.createFile(atPath: file.path, contents: nil) else { return nil }
+        }
+        guard let h = try? FileHandle(forWritingTo: file) else { return nil }
+        _ = try? h.seekToEnd()
+        return h
+    }
+
+    /// Caller holds `lock`.
+    private func closeHandle() {
+        try? handle?.close()
+        handle = nil
+        handleDate = nil
     }
 
     // MARK: - Cleanup
@@ -122,6 +154,7 @@ public final class TFLogger {
     public func clearAll() {
         lock.lock()
         defer { lock.unlock() }
+        closeHandle()
         try? FileManager.default.removeItem(at: logDir)
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
     }

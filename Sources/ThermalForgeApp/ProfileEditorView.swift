@@ -44,24 +44,18 @@ private extension Color {
     }
 }
 
-/// Window content: resolves `AppState.profileEditorTarget` to a profile (or a blank
-/// new one) and hosts the actual editor. Kept separate from `ProfileEditorView` so
-/// that view's `@State` is (re)initialized fresh via `.id(target)` whenever the
-/// target changes, instead of stale fields surviving a New → Edit switch.
-struct ProfileEditorWindow: View {
-    @EnvironmentObject var appState: AppState
-
-    var body: some View {
-        let target = appState.profileEditorTarget ?? .new
-        ProfileEditorView(target: target)
-            .id(target.id)
-            .environmentObject(appState)
-    }
-}
-
+/// The editor form. Hosted by `AppDelegate` in a plain `NSWindow` that is created on
+/// New/Edit and released on close — NOT a SwiftUI `Window` scene, whose closed window
+/// kept its hosting view alive and re-rendering on every `AppState` change (a memory
+/// leak). For the same reason `appState` is a plain reference, NOT `@EnvironmentObject`:
+/// the form only needs a few one-shot reads (live RPM range, active profile), and
+/// observing the whole object would re-render it ~2x/sec while the user types.
 struct ProfileEditorView: View {
-    @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) private var dismiss
+    /// Unobserved on purpose — see the type's doc comment.
+    let appState: AppState
+    /// Closes the hosting window (replaces SwiftUI's `dismiss`, which has no effect in a
+    /// manually-created `NSWindow`).
+    let onClose: () -> Void
 
     let target: ProfileEditorTarget
 
@@ -82,8 +76,10 @@ struct ProfileEditorView: View {
     /// different fan hardware (rather than baking in one Mac's RPM numbers).
     @State private var useRPM = false
 
-    init(target: ProfileEditorTarget) {
+    init(target: ProfileEditorTarget, appState: AppState, onClose: @escaping () -> Void) {
         self.target = target
+        self.appState = appState
+        self.onClose = onClose
         let existing: FanProfile? = {
             guard case .edit(let id) = target else { return nil }
             return FanProfile.loadAll().first { $0.id == id }
@@ -233,7 +229,7 @@ struct ProfileEditorView: View {
                     Button("Delete", role: .destructive) { delete() }
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { onClose() }
                 Button("Save") { save() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
@@ -422,7 +418,7 @@ struct ProfileEditorView: View {
             if appState.activeProfile.id == profile.id {
                 appState.selectProfile(profile)
             }
-            dismiss()
+            onClose()
         } catch {
             errorMessage = "\(error)"
         }
@@ -433,7 +429,7 @@ struct ProfileEditorView: View {
         do {
             try FanProfile.delete(id: id)
             TFLogger.shared.profile("Custom Profile deleted: \(id)")
-            dismiss()
+            onClose()
         } catch {
             errorMessage = "Couldn't delete: \(error.localizedDescription)"
         }

@@ -70,10 +70,11 @@ final class AppState: ObservableObject {
     /// state on launch (so it shows without waiting for a network round-trip); a
     /// dismissed version is suppressed until a newer one ships.
     @Published var availableUpdate: AvailableUpdate?
-    /// What the Custom Profile editor window should open to — a blank new profile, or
-    /// an existing one to edit. Set right before `openWindow(id:)` is called; the
-    /// editor window reads this once (via `.id(...)`) to size its own @State.
-    @Published var profileEditorTarget: ProfileEditorTarget?
+    /// Opens the Custom Profile editor. Installed by `AppDelegate`, which owns the
+    /// editor as a plain `NSWindow` (see its doc comment — a SwiftUI `Window` scene
+    /// kept a hidden hosting view alive that re-rendered on every AppState change).
+    /// Deliberately NOT `@Published`: setting it must never invalidate observers.
+    var openProfileEditor: ((ProfileEditorTarget) -> Void)?
 
     /// The menu bar icon's color, from whichever colored curve point the fan's
     /// ACTUAL speed (not its target) has reached — see
@@ -275,17 +276,21 @@ final class AppState: ObservableObject {
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if didReadVersion { self.daemonVersionMismatch = versionValue }
-                if didReadState { self.externalHold = holdValue }
+                // Assign only on change (see monitor.onUpdate): @Published fires on
+                // every assignment, and this poll is every 5s.
+                if didReadVersion, self.daemonVersionMismatch != versionValue {
+                    self.daemonVersionMismatch = versionValue
+                }
+                if didReadState, self.externalHold != holdValue { self.externalHold = holdValue }
                 // Daemon reachability — debounced so a single blip doesn't flash the
                 // "fan control unavailable" banner. Two consecutive missed heartbeats
                 // (~10s) is a real outage; any success clears it immediately.
                 if hbOK {
                     self.heartbeatFailures = 0
-                    self.daemonUnreachable = false
+                    if self.daemonUnreachable { self.daemonUnreachable = false }
                 } else {
                     self.heartbeatFailures += 1
-                    if self.heartbeatFailures >= 2 { self.daemonUnreachable = true }
+                    if self.heartbeatFailures >= 2, !self.daemonUnreachable { self.daemonUnreachable = true }
                 }
             }
 
@@ -385,15 +390,19 @@ final class AppState: ObservableObject {
         let monitor = ThermalMonitor(fanControl: fc, profile: activeProfile)
         monitor.onUpdate = { [weak self] status, profile, state in
             Task { @MainActor [weak self] in
-                self?.latestStatus = status
-                self?.activeProfile = profile
-                self?.monitorState = state
-                // Max of only the displayed sensors
+                guard let self else { return }
+                // `@Published` fires objectWillChange on EVERY assignment, equal value
+                // or not. This runs 2x/sec, so assign only on a real change — otherwise
+                // every observing view re-renders ~8x/sec for nothing.
+                if self.latestStatus != status { self.latestStatus = status }
+                if self.activeProfile != profile { self.activeProfile = profile }
+                if self.monitorState != state { self.monitorState = state }
                 // Peak across all CPU and GPU sensors for menu bar display
                 let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
-                self?.maxTemp = status.temperatures
+                let peak = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
+                if self.maxTemp != peak { self.maxTemp = peak }
             }
         }
         monitor.onFanCommand = { [weak self] command in
